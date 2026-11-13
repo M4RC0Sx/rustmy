@@ -34,9 +34,7 @@ services:
       - ./tests/docker/mysql-init.sh:/docker-entrypoint-initdb.d/init.sh:ro
       - ./tests/docker/certs:/certs:ro
     healthcheck:
-      # Logging in over TLS also primes the server's caching_sha2_password
-      # cache for `rustmy`, so tests with ssl_mode=disabled can take the
-      # fast-auth path (full auth over plain TCP needs RSA, not implemented).
+      # Ready once the `rustmy` account can log in over TLS.
       test:
         - CMD
         - mysql

@@ -49,6 +49,7 @@ def connect(
     ssl_ca: str | PathLike[str] | None = None,
     ssl_cert: str | PathLike[str] | None = None,
     ssl_key: str | PathLike[str] | None = None,
+    server_public_key: str | PathLike[str] | None = None,
 ) -> Connection: ...
 
 class Warning(Exception): ...  # noqa: A001, N818

@@ -407,3 +407,134 @@ fn large_payloads_over_tls() {
         assert_eq!(cells[1].map(<[u8]>::len), Some(size));
     }
 }
+
+/// Creates MySQL accounts that cannot be in the server's auth cache, so
+/// every login takes the full-authentication path; dropped on drop.
+struct FreshUsers {
+    admin: Conn,
+    created: Vec<String>,
+}
+
+impl FreshUsers {
+    fn new() -> Self {
+        let mut root = tls_opts(Server::Mysql, SslMode::Required, None);
+        "root".clone_into(&mut root.user);
+        root.database = None;
+        Self {
+            admin: Conn::connect(&root).unwrap(),
+            created: Vec::new(),
+        }
+    }
+
+    /// `None` when the server lacks the plugin (e.g. `sha256_password` on 9+).
+    fn create(&mut self, plugin: &str) -> Option<String> {
+        let name = format!("fresh_{}_{}", std::process::id(), self.created.len());
+        let sql = format!("CREATE USER '{name}'@'%' IDENTIFIED WITH {plugin} BY 'fresh-pw'");
+        match self.admin.query(sql.as_bytes()) {
+            Ok(_) => {
+                self.created.push(name.clone());
+                Some(name)
+            }
+            Err(Error::Server { code: 1524, .. }) => None, // plugin not loaded
+            Err(err) => panic!("{err}"),
+        }
+    }
+
+    fn server_public_key(&mut self) -> std::path::PathBuf {
+        let result = self
+            .admin
+            .query(b"SHOW STATUS LIKE 'Caching_sha2_password_rsa_public_key'")
+            .unwrap();
+        let path =
+            std::env::temp_dir().join(format!("rustmy-server-key-{}.pem", std::process::id()));
+        std::fs::write(&path, &table(&result)[0][1]).unwrap();
+        path
+    }
+}
+
+impl Drop for FreshUsers {
+    fn drop(&mut self) {
+        for name in &self.created {
+            let _ = self
+                .admin
+                .query(format!("DROP USER '{name}'@'%'").as_bytes());
+        }
+    }
+}
+
+fn plain_login(
+    user: &str,
+    password: &str,
+    key: Option<&std::path::Path>,
+) -> rustmy_proto::Result<Conn> {
+    let mut o = tls_opts(Server::Mysql, SslMode::Disabled, None);
+    user.clone_into(&mut o.user);
+    password.clone_into(&mut o.password);
+    o.database = None;
+    o.server_public_key = key.map(std::path::Path::to_path_buf);
+    Conn::connect(&o)
+}
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn rsa_full_authentication_over_plain_tcp() {
+    if !servers().contains(&Server::Mysql) {
+        return; // caching_sha2_password and sha256_password are MySQL-only
+    }
+    let mut users = FreshUsers::new();
+    let key = users.server_public_key();
+    for plugin in ["caching_sha2_password", "sha256_password"] {
+        let Some(requested) = users.create(plugin) else {
+            eprintln!("{plugin} not available on this server, skipped");
+            continue;
+        };
+        // Key requested from the server.
+        let conn =
+            plain_login(&requested, "fresh-pw", None).unwrap_or_else(|e| panic!("{plugin}: {e}"));
+        assert!(!conn.is_tls());
+        // Pinned key: no request.
+        let pinned = users.create(plugin).unwrap();
+        plain_login(&pinned, "fresh-pw", Some(&key)).unwrap_or_else(|e| panic!("{plugin}: {e}"));
+        // Wrong password: a proper "access denied".
+        let wrong = users.create(plugin).unwrap();
+        let err = plain_login(&wrong, "nope", None).unwrap_err();
+        assert!(
+            matches!(err, Error::Server { code: 1045, .. }),
+            "{plugin}: {err}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn pinning_the_wrong_public_key_is_refused() {
+    use rsa::pkcs8::EncodePublicKey;
+    use rsa::pkcs8::LineEnding;
+
+    if !servers().contains(&Server::Mysql) {
+        return;
+    }
+    let mut users = FreshUsers::new();
+    let user = users.create("caching_sha2_password").unwrap();
+    let stranger = rsa::PrivateKey::new(&mut getrandom::SysRng, 2048).unwrap();
+    let path = std::env::temp_dir().join(format!("rustmy-wrong-key-{}.pem", std::process::id()));
+    std::fs::write(
+        &path,
+        stranger
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap(),
+    )
+    .unwrap();
+    // The server cannot decrypt what was encrypted for another key.
+    let err = plain_login(&user, "fresh-pw", Some(&path)).unwrap_err();
+    assert!(matches!(err, Error::Server { code: 1045, .. }), "{err}");
+
+    let err = plain_login(
+        &user,
+        "fresh-pw",
+        Some(std::path::Path::new("/nonexistent.pem")),
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Config(_)), "{err}");
+}
