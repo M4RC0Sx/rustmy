@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Entry points and a scripted transport for `fuzz/`; never enabled in builds.
+fuzzing = []
+
 [dependencies]
 ed25519-dalek = { version = "3", default-features = false, features = ["hazmat", "fast", "zeroize"] }
 getrandom = { version = "0.4", features = ["sys_rng"] }

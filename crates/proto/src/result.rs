@@ -123,6 +123,11 @@ impl RowSet {
         })
     }
 
+    #[cfg(feature = "fuzzing")]
+    pub(crate) fn new_for_fuzzing(columns: usize) -> Self {
+        Self::new(columns)
+    }
+
     /// Buffer the connection appends raw row packets to.
     pub(crate) fn data_mut(&mut self) -> &mut Vec<u8> {
         &mut self.data
