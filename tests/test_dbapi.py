@@ -1,0 +1,53 @@
+"""PEP 249 module surface (no server needed)."""
+
+import pytest
+
+import rustmy
+
+
+@pytest.mark.parametrize(
+    ("exc", "parent"),
+    [
+        (rustmy.Warning, Exception),
+        (rustmy.Error, Exception),
+        (rustmy.InterfaceError, rustmy.Error),
+        (rustmy.DatabaseError, rustmy.Error),
+        (rustmy.DataError, rustmy.DatabaseError),
+        (rustmy.OperationalError, rustmy.DatabaseError),
+        (rustmy.IntegrityError, rustmy.DatabaseError),
+        (rustmy.InternalError, rustmy.DatabaseError),
+        (rustmy.ProgrammingError, rustmy.DatabaseError),
+        (rustmy.NotSupportedError, rustmy.DatabaseError),
+    ],
+)
+def test_exception_hierarchy(exc: type[Exception], parent: type[Exception]) -> None:
+    assert issubclass(exc, parent)
+
+
+def test_exceptions_are_reachable_from_connection_class() -> None:
+    assert rustmy.Connection.IntegrityError is rustmy.IntegrityError
+
+
+def test_type_objects_compare_equal_to_type_codes() -> None:
+    assert rustmy.FieldType.VAR_STRING == rustmy.STRING
+    assert rustmy.FieldType.LONGLONG == rustmy.NUMBER
+    assert rustmy.FieldType.DATETIME == rustmy.DATETIME
+    assert rustmy.FieldType.BLOB == rustmy.BINARY
+    assert rustmy.FieldType.BLOB != rustmy.STRING
+
+
+def test_connect_with_unsupported_charset_fails_before_connecting() -> None:
+    with pytest.raises(rustmy.NotSupportedError):
+        rustmy.connect(port=1, charset="latin1")
+
+
+def test_connection_refused_is_operational_error_2003() -> None:
+    with pytest.raises(rustmy.OperationalError) as info:
+        rustmy.connect(host="127.0.0.1", port=1, connect_timeout=2)
+    assert info.value.args[0] == 2003
+
+
+@pytest.mark.parametrize("timeout", [0, -1.0, float("nan")])
+def test_invalid_timeout_is_rejected(timeout: float) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        rustmy.connect(host="127.0.0.1", port=1, connect_timeout=timeout)

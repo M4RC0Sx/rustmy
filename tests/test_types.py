@@ -11,9 +11,9 @@ import pytest
 
 
 if TYPE_CHECKING:
-    from tests.conftest import Server
-
     import rustmy
+
+    from tests.conftest import Server
 
 
 CASES: list[tuple[str, str, object]] = [
