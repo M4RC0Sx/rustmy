@@ -1,0 +1,24 @@
+[package]
+name = "rustmy-pydriver"
+description = "PyO3 bindings exposing rustmy as the rustmy._core extension module"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+# The cdylib links against the interpreter only at import time, so a native
+# test binary cannot be linked; Python-side tests cover this crate.
+test = false
+doctest = false
+
+[dependencies]
+pyo3.workspace = true
+rustmy-proto.workspace = true
+
+[lints]
+workspace = true

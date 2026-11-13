@@ -1,0 +1,166 @@
+[build-system]
+requires = ["maturin>=1.16,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rustmy"
+description = "Fast DB-API 2.0 driver for MySQL/MariaDB written in Rust, no system libraries required"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"]
+keywords = ["mysql", "mariadb", "dbapi", "database", "driver", "sqlalchemy"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: Free Threading :: 2 - Beta",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+# Version comes from [workspace.package] in Cargo.toml.
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/M4RC0Sx/rustmy"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.140",
+    "maturin>=1.16,<2.0",
+    "mypy>=1.18",
+    "pymysql>=1.1",
+    "pytest>=8.4",
+    "pytest-asyncio>=1.2",
+    "pytest-cov>=7.0",
+    "pytest-mock>=3.15",
+    "pytest-randomly>=4.0",
+    "ruff>=0.14",
+    "sqlalchemy>=2.0",
+    "testcontainers[mysql]>=4.13",
+    "time-machine>=2.19",
+]
+# mysqlclient needs libmysqlclient + pkg-config to build, so it stays out of
+# the default sync: `uv sync --group bench`.
+bench = [
+    "mysqlclient>=2.2",
+    "pytest-benchmark>=5.1",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+# Rebuild the extension on `uv sync` / `uv run` when Rust sources change.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "crates/**/Cargo.toml" },
+    { file = "crates/**/*.rs" },
+]
+
+[tool.maturin]
+manifest-path = "crates/pydriver/Cargo.toml"
+python-source = "python"
+module-name = "rustmy._core"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+src = ["python", "tests"]
+
+[tool.ruff.lint]
+extend-select = [
+    "A",     # flake8-builtins
+    "ARG",   # flake8-unused-arguments
+    "ASYNC", # flake8-async
+    "B",     # flake8-bugbear
+    "BLE",   # flake8-blind-except
+    "C4",    # flake8-comprehensions
+    "C90",   # mccabe
+    "DTZ",   # flake8-datetimez
+    "E",     # pycodestyle errors (full set)
+    "EM",    # flake8-errmsg
+    "FBT",   # flake8-boolean-trap
+    "FLY",   # flynt
+    "FURB",  # refurb
+    "G",     # flake8-logging-format
+    "I",     # isort
+    "ICN",   # flake8-import-conventions
+    "ISC",   # flake8-implicit-str-concat
+    "INT",   # flake8-gettext
+    "LOG",   # flake8-logging
+    "N",     # pep8-naming
+    "PERF",  # perflint
+    "PGH",   # pygrep-hooks
+    "PIE",   # flake8-pie
+    "PL",    # pylint
+    "PTH",   # flake8-use-pathlib
+    "Q",     # flake8-quotes
+    "RET",   # flake8-return
+    "RSE",   # flake8-raise
+    "RUF",   # ruff-specific rules
+    "S",     # flake8-bandit
+    "SIM",   # flake8-simplify
+    "SLF",   # flake8-self
+    "SLOT",  # flake8-slots
+    "T10",   # flake8-debugger
+    "T20",   # flake8-print
+    "TC",    # flake8-type-checking
+    "TID",   # flake8-tidy-imports
+    "TRY",   # tryceratops
+    "UP",    # pyupgrade
+    "W",     # pycodestyle warnings
+    "YTT",   # flake8-2020
+]
+ignore = [
+    "PLR0913", # too many arguments — sometimes unavoidable
+    "PLR2004", # magic value comparison — too many false positives
+    "TRY003",  # long exception messages — sometimes clearer inline
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+force-single-line = true
+lines-between-types = 1
+lines-after-imports = 2
+known-first-party = ["rustmy"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+namespace_packages = true
+show_error_codes = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+mypy_path = "python"
+files = ["python", "tests"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: tests that hit real external services (DB, Redis, HTTP)",
+    "slow: tests > 1s",
+]
+
+[tool.coverage.run]
+source = ["rustmy"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]

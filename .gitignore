@@ -1,0 +1,26 @@
+# Rust
+/target/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+*.egg-info/
+
+# Built extension modules (maturin develop drops them into the source tree)
+python/rustmy/*.so
+python/rustmy/*.pyd
+
+# Tooling caches and reports
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.benchmarks/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# OS
+.DS_Store

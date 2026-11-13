@@ -1,0 +1,77 @@
+[workspace]
+resolver = "3"
+members = ["crates/proto", "crates/pydriver"]
+
+[workspace.package]
+# Single source of truth for the release version: maturin reads it for the
+# wheel metadata and semantic-release bumps it.
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/M4RC0Sx/rustmy"
+publish = false
+
+[workspace.dependencies]
+pyo3 = { version = "0.30.1", features = ["extension-module"] }
+rustmy-proto = { path = "crates/proto" }
+
+# Lint policy: clippy's default groups + `pedantic`, plus a curated list of
+# `restriction` lints (never the whole group, its lints contradict each other).
+# CI runs clippy with `-D warnings`, so every `warn` here is a hard error there.
+# Test-only relaxations live in `clippy.toml`.
+
+[workspace.lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow" # too noisy for a small set of modules
+
+# Suppressions must be `#[expect(lint, reason = "...")]`: the reason is
+# mandatory and the attribute errors once the suppression becomes stale.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+# unsafe must be justified (see also `#![forbid(unsafe_code)]` in proto).
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+# Panic-freedom: bytes coming from the server must never be able to panic
+# the driver. Errors propagate as `Result`; slices are read with `.get()`.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+unwrap_in_result = "deny"
+get_unwrap = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+exit = "deny"
+
+# Debugging leftovers and stray output (Python owns stdout/stderr).
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+# Quality.
+mem_forget = "deny"
+rc_buffer = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+lossy_float_literal = "warn"
+str_to_string = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
