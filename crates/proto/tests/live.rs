@@ -577,3 +577,68 @@ fn mariadb_ed25519_and_parsec_authentication() {
         }
     }
 }
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn select_db_reset_connection_and_change_user() {
+    for server in servers() {
+        let mut conn = connect(server);
+        conn.select_db("information_schema").unwrap();
+        assert_eq!(
+            table(&conn.query(b"SELECT DATABASE()").unwrap()),
+            [["information_schema"]]
+        );
+        let err = conn.select_db("no_such_db").unwrap_err();
+        assert!(matches!(err, Error::Server { .. }), "{server:?}: {err}");
+
+        let id = conn.connection_id();
+        conn.query(b"SET @x = 1").unwrap();
+        conn.reset_connection().unwrap();
+        assert_eq!(table(&conn.query(b"SELECT @x").unwrap()), [["NULL"]]);
+        assert_eq!(
+            table(&conn.query(b"SELECT CONNECTION_ID()").unwrap()),
+            [[id.to_string()]]
+        );
+
+        conn.change_user("root", "rustmy", Some("rustmy_test"))
+            .unwrap();
+        let who = &table(&conn.query(b"SELECT CURRENT_USER()").unwrap())[0][0];
+        assert!(who.starts_with("root@"), "{server:?}: {who}");
+
+        let err = conn.change_user("root", "wrong", None).unwrap_err();
+        assert!(
+            matches!(err, Error::Server { code: 1045, .. }),
+            "{server:?}: {err}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn commands_drain_unread_results_first() {
+    for server in servers() {
+        let mut o = opts(server, "rustmy");
+        o.client_flag = capability::MULTI_STATEMENTS;
+        let mut conn = Conn::connect(&o).unwrap();
+        conn.query(b"SELECT 1; SELECT 2").unwrap();
+        assert!(conn.has_more_results());
+        conn.ping().unwrap();
+        conn.query(b"SELECT 1; SELECT 2").unwrap();
+        conn.reset_connection().unwrap();
+        assert_eq!(table(&conn.query(b"SELECT 3").unwrap()), [["3"]]);
+    }
+}
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn read_timeout_interrupts_a_slow_query() {
+    for server in servers() {
+        let mut o = opts(server, "rustmy");
+        o.read_timeout = Some(std::time::Duration::from_millis(300));
+        let mut conn = Conn::connect(&o).unwrap();
+        let start = std::time::Instant::now();
+        let err = conn.query(b"SELECT SLEEP(3)").unwrap_err();
+        assert!(matches!(err, Error::Io(_)), "{server:?}: {err}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+}

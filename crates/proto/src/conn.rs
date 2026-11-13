@@ -18,6 +18,7 @@ use crate::auth::parse_public_key;
 use crate::auth::parsec_response;
 use crate::auth::trim_nonce;
 use crate::buf::Reader;
+use crate::buf::put_nul_bytes;
 use crate::column::Column;
 use crate::constants::DEFAULT_COLLATION;
 use crate::constants::capability;
@@ -262,6 +263,11 @@ pub struct Conn {
     status: u16,
     server_version: String,
     connection_id: u32,
+    /// Default plugin and nonce from the greeting, reused by `COM_CHANGE_USER`.
+    default_plugin: AuthPlugin,
+    greeting_nonce: Vec<u8>,
+    /// Pinned RSA key (`Opts::server_public_key`), also for `COM_CHANGE_USER`.
+    pinned_key: Option<rsa::PublicKey>,
     /// Scratch buffer for control packets.
     buf: Vec<u8>,
 }
@@ -306,9 +312,19 @@ impl Conn {
             status: greeting.status,
             server_version: greeting.server_version.clone(),
             connection_id: greeting.connection_id,
+            // Answer with the server's default plugin when we know it;
+            // otherwise offer native auth and let the server switch us.
+            default_plugin: AuthPlugin::from_name(&greeting.auth_plugin)
+                .unwrap_or(AuthPlugin::Native),
+            greeting_nonce: greeting.nonce.clone(),
+            pinned_key: opts
+                .server_public_key
+                .as_deref()
+                .map(load_public_key)
+                .transpose()?,
             buf,
         };
-        conn.authenticate(opts, &greeting)?;
+        conn.authenticate(opts)?;
         Ok(conn)
     }
 
@@ -342,19 +358,11 @@ impl Conn {
         matches!(self.stream.get_ref(), Stream::Tls(_))
     }
 
-    fn authenticate(&mut self, opts: &Opts, greeting: &ServerHandshake) -> Result<()> {
+    fn authenticate(&mut self, opts: &Opts) -> Result<()> {
         let password = opts.password.as_bytes();
-        let secure = self.stream.get_ref().is_secure();
-        let pinned_key = opts
-            .server_public_key
-            .as_deref()
-            .map(load_public_key)
-            .transpose()?;
-        // Answer with the server's default plugin when we know it; otherwise
-        // offer native auth and let the server switch us to the user's plugin.
-        let mut plugin = AuthPlugin::from_name(&greeting.auth_plugin).unwrap_or(AuthPlugin::Native);
-        let mut nonce = greeting.nonce.clone();
-        let auth_response = first_response(plugin, password, &nonce, secure, pinned_key.as_ref())?;
+        let plugin = self.default_plugin;
+        let nonce = self.greeting_nonce.clone();
+        let auth_response = self.first_response(plugin, password, &nonce)?;
         let response = HandshakeResponse {
             capabilities: self.capabilities,
             collation: DEFAULT_COLLATION,
@@ -365,7 +373,23 @@ impl Conn {
         }
         .encode()?;
         self.stream.write_packet(&response)?;
+        self.auth_exchange(password, plugin, nonce)
+    }
 
+    fn first_response(&self, plugin: AuthPlugin, password: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
+        let secure = self.stream.get_ref().is_secure();
+        first_response(plugin, password, nonce, secure, self.pinned_key.as_ref())
+    }
+
+    /// Runs the server-driven part of authentication (auth switches and
+    /// plugin-specific round trips) until OK or ERR.
+    fn auth_exchange(
+        &mut self,
+        password: &[u8],
+        mut plugin: AuthPlugin,
+        mut nonce: Vec<u8>,
+    ) -> Result<()> {
+        let secure = self.stream.get_ref().is_secure();
         loop {
             self.read_packet()?;
             let reply = match self.buf.first().copied() {
@@ -391,7 +415,7 @@ impl Conn {
                     } else {
                         data.to_vec()
                     };
-                    first_response(plugin, password, &nonce, secure, pinned_key.as_ref())?
+                    self.first_response(plugin, password, &nonce)?
                 }
                 // AuthMoreData: plugin-specific continuation.
                 Some(0x01) => {
@@ -401,7 +425,7 @@ impl Conn {
                         (AuthPlugin::CachingSha2, [PERFORM_FULL_AUTH]) => {
                             if secure {
                                 cleartext_password(password)
-                            } else if let Some(key) = &pinned_key {
+                            } else if let Some(key) = &self.pinned_key {
                                 encrypt_password(password, &nonce, key)?
                             } else {
                                 vec![CACHING_SHA2_REQUEST_PUBLIC_KEY]
@@ -443,9 +467,7 @@ impl Conn {
     ///
     /// I/O failures, protocol violations or an ERR packet from the server.
     pub fn query(&mut self, sql: &[u8]) -> Result<QueryResult> {
-        while self.has_more_results() {
-            self.read_result()?;
-        }
+        self.drain_results()?;
         self.stream.write_command(command::QUERY, sql)?;
         self.read_result()
     }
@@ -528,13 +550,75 @@ impl Conn {
         }
     }
 
-    /// Checks that the server is alive.
+    /// Switches the default database (`COM_INIT_DB`).
     ///
     /// # Errors
     ///
-    /// I/O failures or an unexpected response.
-    pub fn ping(&mut self) -> Result<()> {
-        self.stream.write_command(command::PING, &[])?;
+    /// I/O failures or an ERR packet (e.g. unknown database).
+    pub fn select_db(&mut self, database: &str) -> Result<()> {
+        self.drain_results()?;
+        self.stream
+            .write_command(command::INIT_DB, database.as_bytes())?;
+        self.expect_ok()
+    }
+
+    /// Resets the session to its just-connected state without
+    /// re-authenticating (`COM_RESET_CONNECTION`): rolls back any
+    /// transaction, drops temporary tables, clears user variables and
+    /// restores session variables (including `autocommit`) to their
+    /// defaults.
+    ///
+    /// # Errors
+    ///
+    /// I/O failures or an ERR packet.
+    pub fn reset_connection(&mut self) -> Result<()> {
+        self.drain_results()?;
+        self.stream.write_command(command::RESET_CONNECTION, &[])?;
+        self.expect_ok()
+    }
+
+    /// Re-authenticates as another account on the same connection
+    /// (`COM_CHANGE_USER`). The session is reset as with
+    /// [`Conn::reset_connection`].
+    ///
+    /// # Errors
+    ///
+    /// I/O failures, authentication errors reported by the server, or
+    /// authentication methods not implemented yet.
+    pub fn change_user(
+        &mut self,
+        user: &str,
+        password: &str,
+        database: Option<&str>,
+    ) -> Result<()> {
+        self.drain_results()?;
+        let plugin = self.default_plugin;
+        let nonce = self.greeting_nonce.clone();
+        let auth_response = self.first_response(plugin, password.as_bytes(), &nonce)?;
+        let auth_len = u8::try_from(auth_response.len())
+            .map_err(|_| Error::protocol("authentication response too long"))?;
+
+        let mut payload = Vec::with_capacity(64 + user.len());
+        put_nul_bytes(&mut payload, user.as_bytes());
+        payload.push(auth_len);
+        payload.extend_from_slice(&auth_response);
+        put_nul_bytes(&mut payload, database.unwrap_or_default().as_bytes());
+        payload.extend_from_slice(&u16::from(DEFAULT_COLLATION).to_le_bytes());
+        put_nul_bytes(&mut payload, plugin.name());
+        self.stream.write_command(command::CHANGE_USER, &payload)?;
+        self.auth_exchange(password.as_bytes(), plugin, nonce)
+    }
+
+    /// Discards unread results of a previous multi-result query.
+    fn drain_results(&mut self) -> Result<()> {
+        while self.has_more_results() {
+            self.read_result()?;
+        }
+        Ok(())
+    }
+
+    /// Reads the reply to a command that answers OK or ERR.
+    fn expect_ok(&mut self) -> Result<()> {
         self.read_packet()?;
         match self.buf.first() {
             Some(0x00) => {
@@ -542,8 +626,19 @@ impl Conn {
                 Ok(())
             }
             Some(0xFF) => Err(parse_err(&self.buf)),
-            _ => Err(Error::protocol("unexpected response to COM_PING")),
+            _ => Err(Error::protocol("expected an OK or ERR packet")),
         }
+    }
+
+    /// Checks that the server is alive.
+    ///
+    /// # Errors
+    ///
+    /// I/O failures or an unexpected response.
+    pub fn ping(&mut self) -> Result<()> {
+        self.drain_results()?;
+        self.stream.write_command(command::PING, &[])?;
+        self.expect_ok()
     }
 
     /// Sends `COM_QUIT` and closes the socket. Errors are ignored: the
