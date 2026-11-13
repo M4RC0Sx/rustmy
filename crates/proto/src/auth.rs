@@ -1,5 +1,10 @@
 //! Authentication plugins.
 
+use ed25519_dalek::Signer;
+use ed25519_dalek::SigningKey;
+use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::hazmat::ExpandedSecretKey;
+use ed25519_dalek::hazmat::raw_sign;
 use getrandom::SysRng;
 use pkcs1::DecodeRsaPublicKey;
 use pkcs8::DecodePublicKey;
@@ -8,6 +13,7 @@ use rsa::PublicKey;
 use sha1::Digest;
 use sha1::Sha1;
 use sha2::Sha256;
+use sha2::Sha512;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -21,6 +27,11 @@ pub(crate) enum AuthPlugin {
     /// `sha256_password`: MySQL's deprecated predecessor of `CachingSha2`;
     /// the password always travels in full (TLS or RSA-encrypted).
     Sha256,
+    /// MariaDB's `client_ed25519`: an Ed25519 signature of the nonce.
+    Ed25519,
+    /// MariaDB's `parsec` (11.6+): PBKDF2-derived Ed25519 key signing both
+    /// the server's and the client's nonce.
+    Parsec,
 }
 
 impl AuthPlugin {
@@ -29,6 +40,8 @@ impl AuthPlugin {
             b"mysql_native_password" => Some(Self::Native),
             b"caching_sha2_password" => Some(Self::CachingSha2),
             b"sha256_password" => Some(Self::Sha256),
+            b"client_ed25519" => Some(Self::Ed25519),
+            b"parsec" => Some(Self::Parsec),
             _ => None,
         }
     }
@@ -38,20 +51,34 @@ impl AuthPlugin {
             Self::Native => b"mysql_native_password",
             Self::CachingSha2 => b"caching_sha2_password",
             Self::Sha256 => b"sha256_password",
+            Self::Ed25519 => b"client_ed25519",
+            Self::Parsec => b"parsec",
         }
     }
 
     /// Hash-based response to the server's nonce, for the plugins that have
     /// one. An empty password always yields an empty response.
     pub(crate) fn scramble(self, password: &[u8], nonce: &[u8]) -> Vec<u8> {
+        if self == Self::Ed25519 {
+            // Always a signature, even for an empty password.
+            return sign_ed25519(password, nonce).to_vec();
+        }
         if password.is_empty() {
             return Vec::new();
         }
         match self {
             Self::Native => scramble_native(password, nonce),
             Self::CachingSha2 => scramble_caching_sha2(password, nonce),
-            Self::Sha256 => Vec::new(),
+            // parsec starts with an empty packet asking for its salt.
+            Self::Sha256 | Self::Ed25519 | Self::Parsec => Vec::new(),
         }
+    }
+
+    /// Whether the nonce in an auth-switch request carries a trailing NUL
+    /// terminator (20-byte scramble plugins) or is raw random bytes that
+    /// may legitimately end in 0x00 (Ed25519-based plugins).
+    pub(crate) const fn nul_terminated_nonce(self) -> bool {
+        !matches!(self, Self::Ed25519 | Self::Parsec)
     }
 }
 
@@ -79,6 +106,66 @@ fn scramble_caching_sha2(password: &[u8], nonce: &[u8]) -> Vec<u8> {
 
 fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
     a.iter().zip(b).map(|(x, y)| x ^ y).collect()
+}
+
+/// MariaDB `client_ed25519`: standard Ed25519 (RFC 8032) except that the
+/// 64-byte expanded secret is `SHA-512(password)` rather than the hash of a
+/// 32-byte seed. The signed message is the server's nonce.
+fn sign_ed25519(password: &[u8], nonce: &[u8]) -> [u8; 64] {
+    let expanded: [u8; 64] = Sha512::digest(password).into();
+    let secret = ExpandedSecretKey::from_bytes(&expanded);
+    let public = VerifyingKey::from(&secret);
+    raw_sign::<Sha512>(&secret, nonce, &public).to_bytes()
+}
+
+/// Largest PBKDF2 iteration count accepted from a server: MariaDB's own
+/// maximum (`parsec_iterations`), so a hostile server cannot make the client
+/// spin on a huge count.
+const PARSEC_MAX_ITERATIONS: u32 = 1 << 30;
+
+/// MariaDB `parsec` response to the server's "ext-salt" message:
+/// `client_nonce (32) ++ Ed25519 signature (64)` of
+/// `server_nonce ++ client_nonce`, signed with the RFC 8032 key whose seed is
+/// `PBKDF2-HMAC-SHA512(password, salt, 1024 << factor, 32 bytes)`.
+///
+/// `ext_salt` is `'P' ++ factor (1 byte) ++ salt`.
+pub(crate) fn parsec_response(
+    password: &[u8],
+    server_nonce: &[u8],
+    ext_salt: &[u8],
+) -> Result<Vec<u8>> {
+    let [b'P', factor, salt @ ..] = ext_salt else {
+        return Err(Error::protocol("malformed parsec salt message"));
+    };
+    if salt.is_empty() || server_nonce.len() != 32 {
+        return Err(Error::protocol("malformed parsec handshake"));
+    }
+    let iterations = 1024u32
+        .checked_shl(u32::from(*factor))
+        .filter(|&n| n <= PARSEC_MAX_ITERATIONS)
+        .ok_or_else(|| Error::protocol(format!("parsec iteration factor {factor} out of range")))?;
+    let mut seed = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<Sha512>(password, salt, iterations, &mut seed);
+    let key = SigningKey::from_bytes(&seed);
+
+    let mut client_nonce = [0u8; 32];
+    getrandom::fill(&mut client_nonce)
+        .map_err(|e| Error::protocol(format!("no randomness for parsec nonce: {e}")))?;
+    let mut message = Vec::with_capacity(64);
+    message.extend_from_slice(server_nonce);
+    message.extend_from_slice(&client_nonce);
+
+    let mut out = Vec::with_capacity(96);
+    out.extend_from_slice(&client_nonce);
+    out.extend_from_slice(&key.sign(&message).to_bytes());
+    Ok(out)
+}
+
+/// Public key MariaDB stores for an `ed25519` account (as base64).
+#[cfg(test)]
+fn ed25519_public_key(password: &[u8]) -> [u8; 32] {
+    let expanded: [u8; 64] = Sha512::digest(password).into();
+    VerifyingKey::from(&ExpandedSecretKey::from_bytes(&expanded)).to_bytes()
 }
 
 /// The server's RSA public key, as PEM in either SPKI (`BEGIN PUBLIC KEY`,
@@ -185,6 +272,53 @@ mod tests {
     fn garbage_public_key_is_an_error() {
         assert!(super::parse_public_key(b"-----BEGIN PUBLIC KEY-----\nnope").is_err());
         assert!(super::parse_public_key(&[0xFF, 0xFE]).is_err());
+    }
+
+    #[test]
+    fn ed25519_signature_verifies_with_the_derived_public_key() {
+        use ed25519_dalek::Signature;
+        use ed25519_dalek::Verifier;
+
+        let nonce = [7u8; 32];
+        let signature = AuthPlugin::Ed25519.scramble(b"secret", &nonce);
+        let public =
+            ed25519_dalek::VerifyingKey::from_bytes(&super::ed25519_public_key(b"secret")).unwrap();
+        let signature = Signature::from_slice(&signature).unwrap();
+        assert!(public.verify(&nonce, &signature).is_ok());
+        assert!(public.verify(&[8u8; 32], &signature).is_err());
+    }
+
+    #[test]
+    fn parsec_response_signs_both_nonces_with_the_pbkdf2_key() {
+        use ed25519_dalek::Signature;
+        use ed25519_dalek::Verifier;
+
+        let server_nonce = [3u8; 32];
+        let salt = b"0123456789abcdefgh";
+        let mut ext_salt = vec![b'P', 0];
+        ext_salt.extend_from_slice(salt);
+        let response = super::parsec_response(b"secret", &server_nonce, &ext_salt).unwrap();
+        assert_eq!(response.len(), 96);
+        let (client_nonce, signature) = response.split_at(32);
+
+        let mut seed = [0u8; 32];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha512>(b"secret", salt, 1024, &mut seed);
+        let public = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+        let message = [&server_nonce[..], client_nonce].concat();
+        let signature = Signature::from_slice(signature).unwrap();
+        assert!(public.verify(&message, &signature).is_ok());
+    }
+
+    #[test]
+    fn parsec_rejects_malformed_or_hostile_salt_messages() {
+        let nonce = [0u8; 32];
+        for bad in [&b""[..], b"X\x00salt", b"P\x00", b"P\x15salt", b"P\xffsalt"] {
+            assert!(
+                super::parsec_response(b"pw", &nonce, bad).is_err(),
+                "{bad:?}"
+            );
+        }
+        assert!(super::parsec_response(b"pw", &[0u8; 20], b"P\x00salt").is_err());
     }
 
     #[test]

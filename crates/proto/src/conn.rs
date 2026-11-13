@@ -15,6 +15,7 @@ use crate::auth::AuthPlugin;
 use crate::auth::cleartext_password;
 use crate::auth::encrypt_password;
 use crate::auth::parse_public_key;
+use crate::auth::parsec_response;
 use crate::auth::trim_nonce;
 use crate::buf::Reader;
 use crate::column::Column;
@@ -384,7 +385,12 @@ impl Conn {
                             String::from_utf8_lossy(name)
                         ))
                     })?;
-                    nonce = trim_nonce(r.rest()).to_vec();
+                    let data = r.rest();
+                    nonce = if plugin.nul_terminated_nonce() {
+                        trim_nonce(data).to_vec()
+                    } else {
+                        data.to_vec()
+                    };
                     first_response(plugin, password, &nonce, secure, pinned_key.as_ref())?
                 }
                 // AuthMoreData: plugin-specific continuation.
@@ -405,12 +411,17 @@ impl Conn {
                         (AuthPlugin::CachingSha2 | AuthPlugin::Sha256, pem) => {
                             encrypt_password(password, &nonce, &parse_public_key(pem)?)?
                         }
-                        (AuthPlugin::Native, _) => {
+                        (AuthPlugin::Parsec, salt) => parsec_response(password, &nonce, salt)?,
+                        (AuthPlugin::Native | AuthPlugin::Ed25519, _) => {
                             return Err(Error::protocol(
-                                "unexpected AuthMoreData for mysql_native_password",
+                                "unexpected AuthMoreData for this authentication plugin",
                             ));
                         }
                     }
+                }
+                // parsec's salt message may also arrive without the 0x01 prefix.
+                Some(b'P') if plugin == AuthPlugin::Parsec => {
+                    parsec_response(password, &nonce, &self.buf)?
                 }
                 _ => return Err(Error::protocol("unexpected packet during authentication")),
             };
