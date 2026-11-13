@@ -31,7 +31,7 @@ jobs:
       - run: cargo nextest run --workspace --exclude rustmy-pydriver
 
   rust-integration:
-    name: Rust integration (${{ matrix.server }} ${{ matrix.version }})
+    name: Integration (${{ matrix.server }} ${{ matrix.version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -60,6 +60,9 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - run: docker compose up -d --wait ${{ matrix.server }}
       - run: cargo nextest run -p rustmy-proto --run-ignored only --no-capture
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --locked
+      - run: uv run pytest -m integration
 
   deny:
     name: cargo-deny (licenses, advisories)

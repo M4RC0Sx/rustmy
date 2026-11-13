@@ -16,6 +16,7 @@ mod error;
 mod handshake;
 mod packet;
 mod result;
+pub mod text;
 
 pub use column::Column;
 pub use conn::Conn;
