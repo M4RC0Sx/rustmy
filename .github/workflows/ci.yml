@@ -1,8 +1,10 @@
 name: CI
 
+# develop is the integration branch; master only receives release PRs from
+# develop (validated by the pull_request trigger) and release-bot commits.
 on:
   push:
-    branches: [master]
+    branches: [develop]
   pull_request:
 
 concurrency:
