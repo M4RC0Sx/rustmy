@@ -1,0 +1,53 @@
+name: Fuzz
+
+# Weekly (and on demand): every fuzz target for a fixed time budget. Scheduled
+# workflows only run from the default branch (master), so the job checks out
+# develop to fuzz the code currently being worked on.
+on:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: "600"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [handshake, packets, result_set, text_values, session]
+    env:
+      SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@cargo-fuzz
+      # Keep the corpus between runs so each week builds on the last.
+      - uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Run
+        run: |
+          mkdir -p "fuzz/corpus/${{ matrix.target }}"
+          seeds="fuzz/seeds/${{ matrix.target }}"
+          [ -d "$seeds" ] || seeds=""
+          cargo +nightly fuzz run "${{ matrix.target }}" \
+            "fuzz/corpus/${{ matrix.target }}" $seeds -- \
+            -max_total_time="$SECONDS_PER_TARGET" -timeout=10 -rss_limit_mb=2048
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}

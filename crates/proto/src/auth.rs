@@ -121,7 +121,11 @@ fn sign_ed25519(password: &[u8], nonce: &[u8]) -> [u8; 64] {
 /// Largest PBKDF2 iteration count accepted from a server: MariaDB's own
 /// maximum (`parsec_iterations`), so a hostile server cannot make the client
 /// spin on a huge count.
+#[cfg(not(feature = "fuzzing"))]
 const PARSEC_MAX_ITERATIONS: u32 = 1 << 30;
+/// Fuzzing explores the same code paths with a cheap ceiling.
+#[cfg(feature = "fuzzing")]
+const PARSEC_MAX_ITERATIONS: u32 = 1 << 12;
 
 /// MariaDB `parsec` response to the server's "ext-salt" message:
 /// `client_nonce (32) ++ Ed25519 signature (64)` of

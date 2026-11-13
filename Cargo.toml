@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/proto", "crates/pydriver"]
+# Nightly-only cargo-fuzz crate, built on its own.
+exclude = ["fuzz"]
 
 [workspace.package]
 # Single source of truth for the release version: maturin reads it for the

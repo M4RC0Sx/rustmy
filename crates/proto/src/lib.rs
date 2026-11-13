@@ -13,6 +13,9 @@ mod column;
 mod conn;
 pub mod constants;
 mod error;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 mod handshake;
 mod packet;
 mod result;

@@ -111,6 +111,9 @@ pub(crate) enum Stream {
     #[cfg(unix)]
     Unix(UnixStream),
     Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
+    /// Scripted server for fuzzing.
+    #[cfg(feature = "fuzzing")]
+    Mock(crate::fuzzing::MockStream),
 }
 
 impl Stream {
@@ -159,6 +162,8 @@ impl Stream {
             #[cfg(unix)]
             Self::Unix(_) => true,
             Self::Tls(_) => true,
+            #[cfg(feature = "fuzzing")]
+            Self::Mock(_) => false,
         }
     }
 
@@ -186,6 +191,8 @@ impl Stream {
                 let _ = s.flush();
                 s.sock.shutdown(Shutdown::Both)
             }
+            #[cfg(feature = "fuzzing")]
+            Self::Mock(_) => Ok(()),
         };
     }
 }
@@ -197,6 +204,8 @@ impl Read for Stream {
             #[cfg(unix)]
             Self::Unix(s) => s.read(buf),
             Self::Tls(s) => s.read(buf),
+            #[cfg(feature = "fuzzing")]
+            Self::Mock(s) => s.read(buf),
         }
     }
 }
@@ -208,6 +217,8 @@ impl Write for Stream {
             #[cfg(unix)]
             Self::Unix(s) => s.write(buf),
             Self::Tls(s) => s.write(buf),
+            #[cfg(feature = "fuzzing")]
+            Self::Mock(s) => s.write(buf),
         }
     }
 
@@ -217,6 +228,8 @@ impl Write for Stream {
             #[cfg(unix)]
             Self::Unix(s) => s.flush(),
             Self::Tls(s) => s.flush(),
+            #[cfg(feature = "fuzzing")]
+            Self::Mock(s) => s.flush(),
         }
     }
 }
@@ -280,7 +293,12 @@ impl Conn {
     /// I/O failures, protocol violations, authentication errors reported
     /// by the server, or authentication methods not implemented yet.
     pub fn connect(opts: &Opts) -> Result<Self> {
-        let mut stream = PacketStream::new(Stream::connect(opts)?);
+        Self::establish(Stream::connect(opts)?, opts)
+    }
+
+    /// Handshake and authentication over an already open transport.
+    pub(crate) fn establish(transport: Stream, opts: &Opts) -> Result<Self> {
+        let mut stream = PacketStream::new(transport);
         let mut buf = Vec::new();
         stream.read_into(&mut buf)?;
         let greeting = ServerHandshake::parse(&buf)?;
