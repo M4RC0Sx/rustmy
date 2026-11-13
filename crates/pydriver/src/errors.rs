@@ -75,6 +75,7 @@ pub(crate) mod client_code {
     pub(crate) const CONN_HOST_ERROR: u16 = 2003;
     pub(crate) const SERVER_GONE: u16 = 2006;
     pub(crate) const SERVER_LOST: u16 = 2013;
+    pub(crate) const SSL_CONNECTION_ERROR: u16 = 2026;
     pub(crate) const MALFORMED_PACKET: u16 = 2027;
 }
 
@@ -120,6 +121,10 @@ pub(crate) fn from_proto(err: ProtoError, phase: Phase, target: &str) -> PyErr {
         ProtoError::Protocol(message) => OperationalError::new_err((
             client_code::MALFORMED_PACKET,
             format!("Malformed packet: {message}"),
+        )),
+        ProtoError::Tls(message) => OperationalError::new_err((
+            client_code::SSL_CONNECTION_ERROR,
+            format!("TLS/SSL error: {message}"),
         )),
         ProtoError::Unsupported(message) => NotSupportedError::new_err((0, message)),
         other => InterfaceError::new_err((0, other.to_string())),

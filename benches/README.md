@@ -18,8 +18,8 @@ uv run --no-sync python benches/report.py benches/results/phase0-*.json
 ```
 
 Fairness rules the script enforces: all drivers use `autocommit=True`, plain
-TCP (mysqlclient would otherwise negotiate TLS, which rustmy does not support
-yet) and the same queries against the same tables.
+TCP (rustmy and mysqlclient would otherwise negotiate TLS) and the same
+queries against the same tables.
 
 ## Phase 0 results (2026-11-13)
 

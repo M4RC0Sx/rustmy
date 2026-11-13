@@ -89,8 +89,8 @@ def drivers(target: Target) -> dict[str, Callable[[], Any]]:
         "autocommit": True,
     }
     return {
-        "rustmy": lambda: rustmy.connect(**common),
-        # libmysqlclient negotiates TLS by default; rustmy has no TLS yet.
+        "rustmy": lambda: rustmy.connect(**common, ssl_mode="disabled"),
+        # Plain TCP for everyone: rustmy and libmysqlclient default to TLS.
         "mysqlclient": lambda: MySQLdb.connect(**common, ssl_mode="DISABLED"),
         "pymysql": lambda: pymysql.connect(**common),
     }
@@ -199,6 +199,7 @@ def main() -> None:
     factories = drivers(target)
 
     with rustmy.connect(
+        ssl_mode="disabled",
         host=target.host,
         port=target.port,
         user=target.user,

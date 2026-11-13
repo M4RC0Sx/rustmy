@@ -67,18 +67,6 @@ class Server:
         with self.connect() as conn:
             return int(conn.get_server_info().split(".")[0])
 
-    @property
-    def native_user(self) -> str | None:
-        """Account whose failed logins surface as errors over plain TCP.
-
-        MySQL's ``rustmy`` uses caching_sha2_password, whose full
-        authentication needs TLS or RSA (not implemented yet). MySQL 9+
-        has no mysql_native_password account, so such tests are skipped.
-        """
-        if self.name == "mariadb":
-            return "rustmy"
-        return "rustmy_native" if self.major_version < 9 else None
-
 
 def _reachable(host: str, port: int) -> bool:
     try:

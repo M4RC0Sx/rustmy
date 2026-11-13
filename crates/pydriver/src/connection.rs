@@ -11,6 +11,8 @@ use pyo3::prelude::*;
 use rustmy_proto::Conn;
 use rustmy_proto::Error as ProtoError;
 use rustmy_proto::Opts;
+use rustmy_proto::SslMode;
+use rustmy_proto::TlsOpts;
 
 use crate::convert::result_to_py;
 use crate::errors::InterfaceError;
@@ -144,6 +146,12 @@ impl Connection {
         .map_err(|failure| self.failure_to_pyerr(failure))
     }
 
+    /// Whether the connection is encrypted with TLS.
+    #[getter]
+    fn tls(&self) -> PyResult<bool> {
+        self.peek(Conn::is_tls)
+    }
+
     #[getter]
     fn closed(&self) -> bool {
         matches!(
@@ -189,6 +197,10 @@ impl Connection {
     read_timeout = None,
     write_timeout = None,
     client_flag = 0,
+    ssl_mode = "preferred",
+    ssl_ca = None,
+    ssl_cert = None,
+    ssl_key = None,
 ))]
 #[expect(
     clippy::too_many_arguments,
@@ -206,7 +218,17 @@ pub(crate) fn connect(
     read_timeout: Option<f64>,
     write_timeout: Option<f64>,
     client_flag: u32,
+    ssl_mode: &str,
+    ssl_ca: Option<PathBuf>,
+    ssl_cert: Option<PathBuf>,
+    ssl_key: Option<PathBuf>,
 ) -> PyResult<Connection> {
+    let mode = SslMode::parse(ssl_mode).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "invalid ssl_mode {ssl_mode:?}; expected disabled, preferred, required, \
+             verify_ca or verify_identity"
+        ))
+    })?;
     let target = unix_socket.as_ref().map_or_else(
         || format!("'{host}:{port}'"),
         |p| format!("'{}'", p.display()),
@@ -222,6 +244,12 @@ pub(crate) fn connect(
         read_timeout: timeout(read_timeout, "read_timeout")?,
         write_timeout: timeout(write_timeout, "write_timeout")?,
         client_flag,
+        tls: TlsOpts {
+            mode,
+            ca: ssl_ca,
+            cert: ssl_cert,
+            key: ssl_key,
+        },
     };
     let conn = py
         .detach(|| Conn::connect(&opts))

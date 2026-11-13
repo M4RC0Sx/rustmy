@@ -21,6 +21,8 @@ class Connection:
     def ping(self) -> None: ...
     def close(self) -> None: ...
     @property
+    def tls(self) -> bool: ...
+    @property
     def closed(self) -> bool: ...
     @property
     def server_version(self) -> str: ...
@@ -43,6 +45,10 @@ def connect(
     read_timeout: float | None = None,
     write_timeout: float | None = None,
     client_flag: int = 0,
+    ssl_mode: str = "preferred",
+    ssl_ca: str | PathLike[str] | None = None,
+    ssl_cert: str | PathLike[str] | None = None,
+    ssl_key: str | PathLike[str] | None = None,
 ) -> Connection: ...
 
 class Warning(Exception): ...  # noqa: A001, N818

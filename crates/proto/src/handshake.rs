@@ -72,6 +72,17 @@ impl ServerHandshake {
     }
 }
 
+/// `Protocol::SSLRequest`: the first 32 bytes of a handshake response, sent
+/// in plain text right before the TLS handshake starts.
+pub(crate) fn ssl_request(capabilities: u32, collation: u8) -> Vec<u8> {
+    let mut out = Vec::with_capacity(32);
+    out.extend_from_slice(&(capabilities | capability::SSL).to_le_bytes());
+    out.extend_from_slice(&HandshakeResponse::MAX_PACKET_SIZE.to_le_bytes());
+    out.push(collation);
+    out.extend_from_slice(&[0; 23]);
+    out
+}
+
 /// `Protocol::HandshakeResponse41`.
 #[derive(Debug)]
 pub(crate) struct HandshakeResponse<'a> {

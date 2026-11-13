@@ -11,6 +11,12 @@ native_available="$(docker_process_sql --skip-column-names <<-'EOSQL'
 EOSQL
 )"
 
+# Requires a client certificate signed by the test CA (gen-certs.sh).
+docker_process_sql <<-'EOSQL'
+	CREATE USER 'rustmy_x509'@'%' IDENTIFIED BY 'rustmy' REQUIRE X509;
+	GRANT ALL ON rustmy_test.* TO 'rustmy_x509'@'%';
+EOSQL
+
 if [ "${native_available}" = "1" ]; then
 	docker_process_sql <<-'EOSQL'
 		CREATE USER 'rustmy_native'@'%' IDENTIFIED WITH mysql_native_password BY 'rustmy';

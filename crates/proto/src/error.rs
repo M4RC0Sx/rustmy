@@ -28,6 +28,10 @@ pub enum Error {
         message: String,
     },
 
+    /// TLS setup or handshake failure (bad certificate, unreadable file...).
+    #[error("TLS error: {0}")]
+    Tls(String),
+
     /// A valid server request that this client does not implement yet.
     #[error("unsupported: {0}")]
     Unsupported(String),
