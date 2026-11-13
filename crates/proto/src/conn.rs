@@ -12,6 +12,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::auth::AuthPlugin;
+use crate::auth::cleartext_password;
+use crate::auth::encrypt_password;
+use crate::auth::parse_public_key;
 use crate::auth::trim_nonce;
 use crate::buf::Reader;
 use crate::column::Column;
@@ -54,6 +57,10 @@ const DEFAULT_CAPABILITIES: u32 = capability::LONG_PASSWORD
 const FAST_AUTH_SUCCESS: u8 = 0x03;
 /// `caching_sha2_password`: the server needs the cleartext password.
 const PERFORM_FULL_AUTH: u8 = 0x04;
+/// `caching_sha2_password`: client asks for the server's RSA public key.
+const CACHING_SHA2_REQUEST_PUBLIC_KEY: u8 = 0x02;
+/// `sha256_password`: client asks for the server's RSA public key.
+const SHA256_REQUEST_PUBLIC_KEY: u8 = 0x01;
 
 /// Connection parameters.
 #[derive(Debug, Clone)]
@@ -71,6 +78,9 @@ pub struct Opts {
     /// Extra capability flags, e.g. `MULTI_STATEMENTS` or `FOUND_ROWS`.
     pub client_flag: u32,
     pub tls: TlsOpts,
+    /// PEM file with the server's RSA public key, used to encrypt the
+    /// password over plain TCP instead of asking the server for its key.
+    pub server_public_key: Option<PathBuf>,
 }
 
 impl Default for Opts {
@@ -87,6 +97,7 @@ impl Default for Opts {
             write_timeout: None,
             client_flag: 0,
             tls: TlsOpts::default(),
+            server_public_key: None,
         }
     }
 }
@@ -208,6 +219,40 @@ impl Write for Stream {
     }
 }
 
+/// First authentication payload for `plugin`.
+fn first_response(
+    plugin: AuthPlugin,
+    password: &[u8],
+    nonce: &[u8],
+    secure: bool,
+    pinned_key: Option<&rsa::PublicKey>,
+) -> Result<Vec<u8>> {
+    if plugin != AuthPlugin::Sha256 {
+        return Ok(plugin.scramble(password, nonce));
+    }
+    // sha256_password sends the password itself from the start.
+    if password.is_empty() {
+        Ok(vec![0])
+    } else if secure {
+        Ok(cleartext_password(password))
+    } else if let Some(key) = pinned_key {
+        encrypt_password(password, nonce, key)
+    } else {
+        Ok(vec![SHA256_REQUEST_PUBLIC_KEY])
+    }
+}
+
+fn load_public_key(path: &std::path::Path) -> Result<rsa::PublicKey> {
+    let pem = std::fs::read(path).map_err(|e| {
+        Error::Config(format!(
+            "cannot read server_public_key {}: {e}",
+            path.display()
+        ))
+    })?;
+    parse_public_key(&pem)
+        .map_err(|e| Error::Config(format!("server_public_key {}: {e}", path.display())))
+}
+
 /// An authenticated connection to a MySQL or MariaDB server.
 #[derive(Debug)]
 pub struct Conn {
@@ -298,10 +343,17 @@ impl Conn {
 
     fn authenticate(&mut self, opts: &Opts, greeting: &ServerHandshake) -> Result<()> {
         let password = opts.password.as_bytes();
+        let secure = self.stream.get_ref().is_secure();
+        let pinned_key = opts
+            .server_public_key
+            .as_deref()
+            .map(load_public_key)
+            .transpose()?;
         // Answer with the server's default plugin when we know it; otherwise
         // offer native auth and let the server switch us to the user's plugin.
         let mut plugin = AuthPlugin::from_name(&greeting.auth_plugin).unwrap_or(AuthPlugin::Native);
-        let auth_response = plugin.scramble(password, &greeting.nonce);
+        let mut nonce = greeting.nonce.clone();
+        let auth_response = first_response(plugin, password, &nonce, secure, pinned_key.as_ref())?;
         let response = HandshakeResponse {
             capabilities: self.capabilities,
             collation: DEFAULT_COLLATION,
@@ -315,7 +367,7 @@ impl Conn {
 
         loop {
             self.read_packet()?;
-            match self.buf.first().copied() {
+            let reply = match self.buf.first().copied() {
                 Some(0x00) => {
                     self.status = parse_ok(&self.buf)?.status;
                     return Ok(());
@@ -332,30 +384,37 @@ impl Conn {
                             String::from_utf8_lossy(name)
                         ))
                     })?;
-                    let nonce = trim_nonce(r.rest()).to_vec();
-                    let response = plugin.scramble(password, &nonce);
-                    self.stream.write_packet(&response)?;
+                    nonce = trim_nonce(r.rest()).to_vec();
+                    first_response(plugin, password, &nonce, secure, pinned_key.as_ref())?
                 }
-                Some(0x01) if plugin == AuthPlugin::CachingSha2 => match self.buf.get(1).copied() {
-                    Some(FAST_AUTH_SUCCESS) => {}
-                    Some(PERFORM_FULL_AUTH) if self.stream.get_ref().is_secure() => {
-                        let mut cleartext = password.to_vec();
-                        cleartext.push(0);
-                        self.stream.write_packet(&cleartext)?;
+                // AuthMoreData: plugin-specific continuation.
+                Some(0x01) => {
+                    let data = self.buf.get(1..).unwrap_or_default();
+                    match (plugin, data) {
+                        (AuthPlugin::CachingSha2, [FAST_AUTH_SUCCESS]) => continue,
+                        (AuthPlugin::CachingSha2, [PERFORM_FULL_AUTH]) => {
+                            if secure {
+                                cleartext_password(password)
+                            } else if let Some(key) = &pinned_key {
+                                encrypt_password(password, &nonce, key)?
+                            } else {
+                                vec![CACHING_SHA2_REQUEST_PUBLIC_KEY]
+                            }
+                        }
+                        // The public key we asked for.
+                        (AuthPlugin::CachingSha2 | AuthPlugin::Sha256, pem) => {
+                            encrypt_password(password, &nonce, &parse_public_key(pem)?)?
+                        }
+                        (AuthPlugin::Native, _) => {
+                            return Err(Error::protocol(
+                                "unexpected AuthMoreData for mysql_native_password",
+                            ));
+                        }
                     }
-                    Some(PERFORM_FULL_AUTH) => {
-                        return Err(Error::unsupported(
-                            "caching_sha2_password full authentication over \
-                                 plain TCP (needs TLS or RSA key exchange); \
-                                 use a Unix socket or a cached account",
-                        ));
-                    }
-                    _ => {
-                        return Err(Error::protocol("unexpected caching_sha2_password message"));
-                    }
-                },
+                }
                 _ => return Err(Error::protocol("unexpected packet during authentication")),
-            }
+            };
+            self.stream.write_packet(&reply)?;
         }
     }
 

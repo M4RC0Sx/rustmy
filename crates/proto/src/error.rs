@@ -28,6 +28,10 @@ pub enum Error {
         message: String,
     },
 
+    /// Invalid connection settings, e.g. an unreadable key file.
+    #[error("invalid configuration: {0}")]
+    Config(String),
+
     /// TLS setup or handshake failure (bad certificate, unreadable file...).
     #[error("TLS error: {0}")]
     Tls(String),

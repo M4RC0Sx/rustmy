@@ -201,6 +201,7 @@ impl Connection {
     ssl_ca = None,
     ssl_cert = None,
     ssl_key = None,
+    server_public_key = None,
 ))]
 #[expect(
     clippy::too_many_arguments,
@@ -222,6 +223,7 @@ pub(crate) fn connect(
     ssl_ca: Option<PathBuf>,
     ssl_cert: Option<PathBuf>,
     ssl_key: Option<PathBuf>,
+    server_public_key: Option<PathBuf>,
 ) -> PyResult<Connection> {
     let mode = SslMode::parse(ssl_mode).ok_or_else(|| {
         PyValueError::new_err(format!(
@@ -250,6 +252,7 @@ pub(crate) fn connect(
             cert: ssl_cert,
             key: ssl_key,
         },
+        server_public_key,
     };
     let conn = py
         .detach(|| Conn::connect(&opts))

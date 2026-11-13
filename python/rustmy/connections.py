@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from typing import TYPE_CHECKING
 from typing import TypeAlias
 
@@ -78,6 +80,7 @@ class Connection:
         ssl_cert: PathArg | None = None,
         ssl_key: PathArg | None = None,
         ssl: Mapping[str, object] | bool | None = None,
+        server_public_key: PathArg | None = None,
     ) -> None:
         """Open a connection.
 
@@ -93,6 +96,12 @@ class Connection:
         ``ssl_cert``/``ssl_key`` present a client certificate. ``ssl`` accepts
         the ``{"ca", "cert", "key", "check_hostname"}`` dict of other MySQL
         drivers, or ``True``/``False``.
+
+        Without TLS, accounts using ``caching_sha2_password`` (MySQL's
+        default) or ``sha256_password`` send their password RSA-encrypted
+        with the server's public key, which is requested from the server as
+        PyMySQL does. ``server_public_key`` (a PEM file) pins the key
+        instead, so a man in the middle cannot substitute its own.
         """
         if charset.lower() not in _SUPPORTED_CHARSETS:
             msg = f"charset {charset!r} is not supported yet; use utf8mb4"
@@ -119,6 +128,9 @@ class Connection:
             ssl_ca=tls.ca,
             ssl_cert=tls.cert,
             ssl_key=tls.key,
+            server_public_key=(
+                None if server_public_key is None else os.fspath(server_public_key)
+            ),
         )
         self.cursorclass = cursorclass
         try:

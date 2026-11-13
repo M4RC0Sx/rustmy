@@ -126,6 +126,7 @@ pub(crate) fn from_proto(err: ProtoError, phase: Phase, target: &str) -> PyErr {
             client_code::SSL_CONNECTION_ERROR,
             format!("TLS/SSL error: {message}"),
         )),
+        ProtoError::Config(message) => InterfaceError::new_err((0, message)),
         ProtoError::Unsupported(message) => NotSupportedError::new_err((0, message)),
         other => InterfaceError::new_err((0, other.to_string())),
     }
