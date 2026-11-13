@@ -538,3 +538,42 @@ fn pinning_the_wrong_public_key_is_refused() {
     .unwrap_err();
     assert!(matches!(err, Error::Config(_)), "{err}");
 }
+
+/// `(major, minor)` of a MariaDB server, e.g. `(11, 8)`.
+fn mariadb_version() -> (u32, u32) {
+    let conn = connect(Server::Mariadb);
+    let mut parts = conn.server_version().split(['.', '-']);
+    let major = parts.next().unwrap().parse().unwrap();
+    let minor = parts.next().unwrap().parse().unwrap();
+    (major, minor)
+}
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn mariadb_ed25519_and_parsec_authentication() {
+    if !servers().contains(&Server::Mariadb) {
+        return; // MariaDB-only plugins
+    }
+    let mut accounts = vec!["rustmy_ed25519"];
+    if mariadb_version() >= (11, 6) {
+        accounts.push("rustmy_parsec");
+    } else {
+        eprintln!("parsec needs MariaDB 11.6+, skipped");
+    }
+    for user in accounts {
+        for mode in [SslMode::Disabled, SslMode::Required] {
+            let mut o = tls_opts(Server::Mariadb, mode, None);
+            user.clone_into(&mut o.user);
+            let mut conn = Conn::connect(&o).unwrap_or_else(|e| panic!("{user} {mode:?}: {e}"));
+            let who = &table(&conn.query(b"SELECT CURRENT_USER()").unwrap())[0][0];
+            assert!(who.starts_with(user), "{who}");
+
+            "wrong".clone_into(&mut o.password);
+            let err = Conn::connect(&o).unwrap_err();
+            assert!(
+                matches!(err, Error::Server { code: 1045, .. }),
+                "{user} {mode:?}: {err}"
+            );
+        }
+    }
+}

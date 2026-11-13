@@ -1,8 +1,12 @@
-"""Authentication plugins and RSA password exchange over plain TCP.
+"""Authentication plugins.
 
-``caching_sha2_password`` and ``sha256_password`` exist only on MySQL. Each
-case uses a freshly created account, which cannot be in the server's
-authentication cache, so the full-authentication path always runs.
+MySQL: ``caching_sha2_password`` and ``sha256_password`` with the RSA
+password exchange over plain TCP. Each case uses a freshly created account,
+which cannot be in the server's authentication cache, so the
+full-authentication path always runs.
+
+MariaDB: ``client_ed25519`` and ``parsec`` (11.6+), with the accounts from
+``tests/docker/mariadb-init.sh``.
 """
 
 from __future__ import annotations
@@ -114,3 +118,31 @@ def test_unreadable_public_key_file_is_interface_error(
     user = create_user("caching_sha2_password")
     with pytest.raises(rustmy.InterfaceError, match="server_public_key"):
         _plain_login(mysql, user, "fresh-pw", server_public_key=tmp_path / "x.pem")
+
+
+@pytest.fixture
+def mariadb(server: Server) -> Server:
+    if server.name != "mariadb":
+        pytest.skip("client_ed25519 and parsec are MariaDB-only")
+    return server
+
+
+def _mariadb_version(server: Server) -> tuple[int, int]:
+    with server.connect() as conn:
+        major, minor = conn.get_server_info().split("-")[0].split(".")[:2]
+    return int(major), int(minor)
+
+
+@pytest.mark.parametrize("ssl_mode", ["disabled", "required"])
+@pytest.mark.parametrize("user", ["rustmy_ed25519", "rustmy_parsec"])
+def test_mariadb_plugins(mariadb: Server, user: str, ssl_mode: str) -> None:
+    if user == "rustmy_parsec" and _mariadb_version(mariadb) < (11, 6):
+        pytest.skip("parsec needs MariaDB 11.6+")
+    with mariadb.connect(user=user, ssl_mode=ssl_mode) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT CURRENT_USER()")
+        (who,) = cursor.fetchone() or ("",)
+        assert who.startswith(user)
+    with pytest.raises(rustmy.OperationalError) as info:
+        mariadb.connect(user=user, password="wrong", ssl_mode=ssl_mode)
+    assert info.value.args[0] == 1045
