@@ -133,14 +133,20 @@ class Connection:
             ),
         )
         self.cursorclass = cursorclass
+        self._init_command = init_command
+        self._autocommit_setting = autocommit
         try:
-            if init_command is not None:
-                self._query(init_command.encode())
-            if autocommit is not None:
-                self.autocommit(autocommit)
+            self._init_session()
         except BaseException:
             self._conn.close()
             raise
+
+    def _init_session(self) -> None:
+        """Apply the per-session settings chosen at connect time."""
+        if self._init_command is not None:
+            self._query(self._init_command.encode())
+        if self._autocommit_setting is not None:
+            self.autocommit(self._autocommit_setting)
 
     def _query(self, sql: bytes) -> QueryResult:
         return self._conn.query(sql)
@@ -179,6 +185,33 @@ class Connection:
     def ping(self) -> None:
         """Check that the server is reachable; raises if it is not."""
         self._conn.ping()
+
+    def select_db(self, database: str) -> None:
+        """Make ``database`` the default database of the session."""
+        self._conn.select_db(database)
+
+    def reset_connection(self) -> None:
+        """Return the session to its just-connected state, cheaply.
+
+        Rolls back any open transaction, drops temporary tables and clears
+        user and session variables without re-authenticating, then applies
+        ``init_command`` and the ``autocommit`` mode given to ``connect()``
+        again. Useful for connection pools.
+        """
+        self._conn.reset_connection()
+        self._init_session()
+
+    def change_user(
+        self, user: str, password: str = "", database: str | None = None
+    ) -> None:
+        """Re-authenticate as another account on this connection.
+
+        The session is reset as with :meth:`reset_connection`, then
+        ``init_command`` and the ``autocommit`` mode given to ``connect()``
+        are applied again.
+        """
+        self._conn.change_user(user, password, database)
+        self._init_session()
 
     def close(self) -> None:
         """Close the connection. Calling it again is a no-op."""

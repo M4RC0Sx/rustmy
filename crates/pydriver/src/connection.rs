@@ -24,7 +24,8 @@ use crate::errors::from_proto;
 
 #[derive(Debug)]
 enum State {
-    Open(Conn),
+    // Boxed: a connection is much larger than the other states.
+    Open(Box<Conn>),
     /// An I/O or protocol error left the stream in an unknown state.
     Broken,
     Closed,
@@ -58,6 +59,18 @@ impl Connection {
         T: Send,
         F: FnOnce(&mut Conn) -> rustmy_proto::Result<T> + Send,
     {
+        self.run(py, f, |err| {
+            matches!(err, ProtoError::Io(_) | ProtoError::Protocol(_))
+        })
+    }
+
+    /// Like [`Self::with_conn`], with `breaks` deciding which errors leave
+    /// the connection unusable.
+    fn run<T, F>(&self, py: Python<'_>, f: F, breaks: fn(&ProtoError) -> bool) -> PyResult<T>
+    where
+        T: Send,
+        F: FnOnce(&mut Conn) -> rustmy_proto::Result<T> + Send,
+    {
         py.detach(|| {
             let mut state = match self.state.try_lock() {
                 Ok(guard) => guard,
@@ -72,7 +85,7 @@ impl Connection {
                 State::Closed => return Err(Failure::Closed),
             };
             f(conn).map_err(|err| {
-                if matches!(err, ProtoError::Io(_) | ProtoError::Protocol(_)) {
+                if breaks(&err) {
                     *state = State::Broken;
                 }
                 Failure::Proto(err)
@@ -128,6 +141,32 @@ impl Connection {
 
     fn ping(&self, py: Python<'_>) -> PyResult<()> {
         self.with_conn(py, Conn::ping)
+    }
+
+    fn select_db(&self, py: Python<'_>, database: &str) -> PyResult<()> {
+        self.with_conn(py, |conn| conn.select_db(database))
+    }
+
+    fn reset_connection(&self, py: Python<'_>) -> PyResult<()> {
+        self.with_conn(py, Conn::reset_connection)
+    }
+
+    #[pyo3(signature = (user, password, database = None))]
+    fn change_user(
+        &self,
+        py: Python<'_>,
+        user: &str,
+        password: &str,
+        database: Option<&str>,
+    ) -> PyResult<()> {
+        // A failed COM_CHANGE_USER makes MySQL drop the connection while
+        // MariaDB keeps the old user: treat the connection as gone on every
+        // error so behaviour does not depend on the server.
+        self.run(
+            py,
+            |conn| conn.change_user(user, password, database),
+            |_| true,
+        )
     }
 
     /// Sends `COM_QUIT` and closes the socket. Idempotent.
@@ -258,7 +297,7 @@ pub(crate) fn connect(
         .detach(|| Conn::connect(&opts))
         .map_err(|err| from_proto(err, Phase::Connect, &target))?;
     Ok(Connection {
-        state: Mutex::new(State::Open(conn)),
+        state: Mutex::new(State::Open(Box::new(conn))),
         target,
     })
 }
