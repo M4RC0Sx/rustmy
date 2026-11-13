@@ -46,6 +46,7 @@ dev = [
 # mysqlclient needs libmysqlclient + pkg-config to build, so it stays out of
 # the default sync: `uv sync --group bench`.
 bench = [
+    "matplotlib>=3.10",
     "mysqlclient>=2.2",
     "pytest-benchmark>=5.1",
 ]
@@ -69,7 +70,7 @@ module-name = "rustmy._core"
 [tool.ruff]
 target-version = "py310"
 line-length = 88
-src = ["python", "tests"]
+src = ["python", "tests", "benches"]
 
 [tool.ruff.lint]
 extend-select = [
@@ -128,6 +129,12 @@ ignore = [
     "S608",   # SQL built from the tests' own constants, not user input
     "DTZ001", # MySQL DATETIME values are naive by definition
 ]
+"benches/**" = [
+    "T201", # command-line reports go to stdout
+    "S101", # sanity asserts on benchmark results
+    "S105", # throwaway credentials of the docker test servers
+    "S608", # SQL built from the script's own constants, not user input
+]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
@@ -145,7 +152,13 @@ namespace_packages = true
 show_error_codes = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 mypy_path = "python"
-files = ["python", "tests"]
+files = ["python", "tests", "benches"]
+
+[[tool.mypy.overrides]]
+# Benchmark-only dependencies (bench group, absent from the dev env); the
+# reference drivers ship no type information either.
+module = ["MySQLdb", "MySQLdb.*", "pymysql", "pymysql.*", "matplotlib", "matplotlib.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
