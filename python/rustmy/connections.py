@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from typing import TypeAlias
 
 from rustmy import _core
+from rustmy import _tls
 from rustmy import err
 from rustmy.converters import escape_string
 from rustmy.converters import literal
@@ -12,6 +14,7 @@ from rustmy.cursors import Cursor
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from os import PathLike
     from types import TracebackType
 
@@ -25,6 +28,8 @@ _STATUS_AUTOCOMMIT = 1 << 1
 _STATUS_NO_BACKSLASH_ESCAPES = 1 << 9
 
 _SUPPORTED_CHARSETS = frozenset({"utf8mb4", "utf8", "utf8mb3"})
+
+PathArg: TypeAlias = "str | PathLike[str]"
 
 
 class Connection:
@@ -56,7 +61,7 @@ class Connection:
         password: str = "",
         database: str | None = None,
         port: int = 3306,
-        unix_socket: str | PathLike[str] | None = None,
+        unix_socket: PathArg | None = None,
         *,
         passwd: str | None = None,
         db: str | None = None,
@@ -68,16 +73,37 @@ class Connection:
         init_command: str | None = None,
         client_flag: int = 0,
         cursorclass: type[Cursor] = Cursor,
+        ssl_mode: str | None = None,
+        ssl_ca: PathArg | None = None,
+        ssl_cert: PathArg | None = None,
+        ssl_key: PathArg | None = None,
+        ssl: Mapping[str, object] | bool | None = None,
     ) -> None:
         """Open a connection.
 
         ``passwd`` and ``db`` are accepted as aliases of ``password`` and
         ``database`` for compatibility with other MySQL drivers.
         ``autocommit=None`` keeps the server's default.
+
+        TLS: ``ssl_mode`` is one of ``disabled``, ``preferred`` (default),
+        ``required`` (encrypted, server not verified), ``verify_ca`` and
+        ``verify_identity``. Passing ``ssl_ca`` alone means
+        ``verify_identity`` against that CA only; the verify modes without
+        ``ssl_ca`` trust the operating system's certificate store.
+        ``ssl_cert``/``ssl_key`` present a client certificate. ``ssl`` accepts
+        the ``{"ca", "cert", "key", "check_hostname"}`` dict of other MySQL
+        drivers, or ``True``/``False``.
         """
         if charset.lower() not in _SUPPORTED_CHARSETS:
             msg = f"charset {charset!r} is not supported yet; use utf8mb4"
             raise err.NotSupportedError(0, msg)
+        tls = _tls.resolve(
+            ssl_mode=ssl_mode,
+            ssl_ca=ssl_ca,
+            ssl_cert=ssl_cert,
+            ssl_key=ssl_key,
+            ssl=ssl,
+        )
         self._conn = _core.connect(
             host=host,
             port=port,
@@ -89,6 +115,10 @@ class Connection:
             read_timeout=read_timeout,
             write_timeout=write_timeout,
             client_flag=client_flag,
+            ssl_mode=tls.mode,
+            ssl_ca=tls.ca,
+            ssl_cert=tls.cert,
+            ssl_key=tls.key,
         )
         self.cursorclass = cursorclass
         try:
@@ -141,6 +171,11 @@ class Connection:
     def close(self) -> None:
         """Close the connection. Calling it again is a no-op."""
         self._conn.close()
+
+    @property
+    def tls(self) -> bool:
+        """Whether the connection is encrypted with TLS."""
+        return self._conn.tls
 
     @property
     def open(self) -> bool:

@@ -34,8 +34,27 @@ impl<S: Read + Write> PacketStream<S> {
         }
     }
 
+    /// Hands the raw stream back (to wrap it in TLS) with the sequence id to
+    /// continue from. Fails if the server already sent bytes we buffered.
+    pub(crate) fn into_parts(self) -> Result<(S, u8)> {
+        if !self.inner.buffer().is_empty() {
+            return Err(Error::protocol("unexpected data before the TLS handshake"));
+        }
+        Ok((self.inner.into_inner(), self.seq))
+    }
+
+    pub(crate) fn from_parts(stream: S, seq: u8) -> Self {
+        let mut packets = Self::new(stream);
+        packets.seq = seq;
+        packets
+    }
+
     pub(crate) fn get_ref(&self) -> &S {
         self.inner.get_ref()
+    }
+
+    pub(crate) fn get_mut(&mut self) -> &mut S {
+        self.inner.get_mut()
     }
 
     /// Every client command starts a new sequence.

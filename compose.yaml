@@ -1,12 +1,28 @@
 # Local servers for integration tests and benchmarks: `docker compose up -d --wait`.
 # Pick versions with MYSQL_VERSION / MARIADB_VERSION, e.g.
 #   MYSQL_VERSION=9.7 docker compose up -d --wait mysql
-# Data lives in tmpfs, so every restart starts from a clean server.
+# Data lives in tmpfs, so every restart starts from a clean server. TLS uses
+# throwaway certificates that the `certs` service generates on first start
+# into tests/docker/certs (git-ignored).
 services:
+  certs:
+    image: alpine:3.22
+    command: ["sh", "/work/gen-certs.sh"]
+    volumes:
+      # The parent directory, so the script can (re)create certs/ itself.
+      - ./tests/docker:/work
+
   mysql:
     image: mysql:${MYSQL_VERSION:-8.4}
     # `loose-` makes the option a no-op on 9.x, where the plugin was removed.
-    command: ["--loose-mysql-native-password=ON"]
+    command:
+      - --loose-mysql-native-password=ON
+      - --ssl-ca=/certs/ca.pem
+      - --ssl-cert=/certs/server.pem
+      - --ssl-key=/certs/server-key.pem
+    depends_on:
+      certs:
+        condition: service_completed_successfully
     environment:
       MYSQL_ROOT_PASSWORD: rustmy
       MYSQL_DATABASE: rustmy_test
@@ -16,10 +32,11 @@ services:
     tmpfs: [/var/lib/mysql]
     volumes:
       - ./tests/docker/mysql-init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+      - ./tests/docker/certs:/certs:ro
     healthcheck:
       # Logging in over TLS also primes the server's caching_sha2_password
-      # cache for `rustmy`, so plain-TCP clients take the fast-auth path.
-      # Full auth over plain TCP needs TLS or RSA, not implemented yet.
+      # cache for `rustmy`, so tests with ssl_mode=disabled can take the
+      # fast-auth path (full auth over plain TCP needs RSA, not implemented).
       test:
         - CMD
         - mysql
@@ -35,7 +52,14 @@ services:
 
   mariadb:
     image: mariadb:${MARIADB_VERSION:-11.4}
-    command: ["--max-allowed-packet=64M"]
+    command:
+      - --max-allowed-packet=64M
+      - --ssl-ca=/certs/ca.pem
+      - --ssl-cert=/certs/server.pem
+      - --ssl-key=/certs/server-key.pem
+    depends_on:
+      certs:
+        condition: service_completed_successfully
     environment:
       MARIADB_ROOT_PASSWORD: rustmy
       MARIADB_DATABASE: rustmy_test
@@ -43,6 +67,9 @@ services:
       MARIADB_PASSWORD: rustmy
     ports: ["13307:3306"]
     tmpfs: [/var/lib/mysql]
+    volumes:
+      - ./tests/docker/mariadb-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./tests/docker/certs:/certs:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 2s

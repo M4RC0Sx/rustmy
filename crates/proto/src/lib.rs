@@ -17,6 +17,7 @@ mod handshake;
 mod packet;
 mod result;
 pub mod text;
+mod tls;
 
 pub use column::Column;
 pub use conn::Conn;
@@ -26,6 +27,8 @@ pub use error::Result;
 pub use result::QueryResult;
 pub use result::RowRef;
 pub use result::RowSet;
+pub use tls::SslMode;
+pub use tls::TlsOpts;
 
 /// Maximum payload carried by a single protocol packet (2^24 - 1 bytes).
 ///

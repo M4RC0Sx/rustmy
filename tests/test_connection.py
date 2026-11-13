@@ -55,11 +55,9 @@ def test_duplicate_key_is_integrity_error(cursor: rustmy.Cursor) -> None:
 
 
 def test_wrong_password_is_operational_error(server: Server) -> None:
-    user = server.native_user
-    if user is None:
-        pytest.skip("needs TLS/RSA for failed caching_sha2 logins (Phase 1)")
+    # Over TLS a failed caching_sha2_password login gets a real answer.
     with pytest.raises(rustmy.OperationalError) as info:
-        server.connect(user=user, password="wrong")
+        server.connect(password="wrong", ssl_mode="required")
     assert info.value.args[0] == 1045
 
 

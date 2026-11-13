@@ -23,6 +23,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::handshake::HandshakeResponse;
 use crate::handshake::ServerHandshake;
+use crate::handshake::ssl_request;
 use crate::packet::PacketStream;
 use crate::result::QueryResult;
 use crate::result::RowPacket;
@@ -30,6 +31,11 @@ use crate::result::accept_row_packet;
 use crate::result::parse_eof;
 use crate::result::parse_err;
 use crate::result::parse_ok;
+use crate::tls::SslMode;
+use crate::tls::TlsOpts;
+use crate::tls::client_config;
+use crate::tls::server_name;
+use crate::tls::tls_error;
 
 /// Capabilities requested by default; the effective set is the
 /// intersection with what the server offers.
@@ -64,6 +70,7 @@ pub struct Opts {
     pub write_timeout: Option<Duration>,
     /// Extra capability flags, e.g. `MULTI_STATEMENTS` or `FOUND_ROWS`.
     pub client_flag: u32,
+    pub tls: TlsOpts,
 }
 
 impl Default for Opts {
@@ -79,6 +86,7 @@ impl Default for Opts {
             read_timeout: None,
             write_timeout: None,
             client_flag: 0,
+            tls: TlsOpts::default(),
         }
     }
 }
@@ -89,6 +97,7 @@ pub(crate) enum Stream {
     Tcp(TcpStream),
     #[cfg(unix)]
     Unix(UnixStream),
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
 }
 
 impl Stream {
@@ -136,15 +145,34 @@ impl Stream {
             Self::Tcp(_) => false,
             #[cfg(unix)]
             Self::Unix(_) => true,
+            Self::Tls(_) => true,
         }
     }
 
-    fn shutdown(&self) {
+    /// Runs the TLS handshake over a plain TCP stream.
+    fn upgrade(self, tls: &TlsOpts, host: &str) -> Result<Self> {
+        let Self::Tcp(mut tcp) = self else {
+            return Err(Error::Tls("TLS is only supported over TCP".to_owned()));
+        };
+        let mut session = rustls::ClientConnection::new(client_config(tls)?, server_name(host)?)
+            .map_err(tls_error)?;
+        while session.is_handshaking() {
+            session.complete_io(&mut tcp).map_err(tls_error)?;
+        }
+        Ok(Self::Tls(Box::new(rustls::StreamOwned::new(session, tcp))))
+    }
+
+    fn shutdown(&mut self) {
         // Best effort: the peer may already be gone.
         let _ = match self {
             Self::Tcp(s) => s.shutdown(Shutdown::Both),
             #[cfg(unix)]
             Self::Unix(s) => s.shutdown(Shutdown::Both),
+            Self::Tls(s) => {
+                s.conn.send_close_notify();
+                let _ = s.flush();
+                s.sock.shutdown(Shutdown::Both)
+            }
         };
     }
 }
@@ -155,6 +183,7 @@ impl Read for Stream {
             Self::Tcp(s) => s.read(buf),
             #[cfg(unix)]
             Self::Unix(s) => s.read(buf),
+            Self::Tls(s) => s.read(buf),
         }
     }
 }
@@ -165,6 +194,7 @@ impl Write for Stream {
             Self::Tcp(s) => s.write(buf),
             #[cfg(unix)]
             Self::Unix(s) => s.write(buf),
+            Self::Tls(s) => s.write(buf),
         }
     }
 
@@ -173,6 +203,7 @@ impl Write for Stream {
             Self::Tcp(s) => s.flush(),
             #[cfg(unix)]
             Self::Unix(s) => s.flush(),
+            Self::Tls(s) => s.flush(),
         }
     }
 }
@@ -209,7 +240,19 @@ impl Conn {
         if opts.database.is_some() {
             wanted |= capability::CONNECT_WITH_DB;
         }
+        let use_tls = Self::negotiate_tls(opts, &greeting)?;
+        if use_tls {
+            wanted |= capability::SSL;
+        }
         let capabilities = wanted & greeting.capabilities;
+
+        if use_tls {
+            // SSLRequest goes out in plain text, then the same socket is
+            // wrapped in TLS and the sequence continues inside it.
+            stream.write_packet(&ssl_request(capabilities, DEFAULT_COLLATION))?;
+            let (raw, seq) = stream.into_parts()?;
+            stream = PacketStream::from_parts(raw.upgrade(&opts.tls, &opts.host)?, seq);
+        }
 
         let mut conn = Self {
             stream,
@@ -221,6 +264,36 @@ impl Conn {
         };
         conn.authenticate(opts, &greeting)?;
         Ok(conn)
+    }
+
+    /// Decides whether to use TLS, per `ssl_mode` and what the server offers.
+    fn negotiate_tls(opts: &Opts, greeting: &ServerHandshake) -> Result<bool> {
+        let mode = opts.tls.mode;
+        if mode == SslMode::Disabled {
+            return Ok(false);
+        }
+        if opts.unix_socket.is_some() {
+            // A local socket is already private; certificates name hosts.
+            if mode.verifies() {
+                return Err(Error::Tls(
+                    "certificate verification needs a TCP connection, not a Unix socket".to_owned(),
+                ));
+            }
+            return Ok(false);
+        }
+        let server_has_tls = greeting.capabilities & capability::SSL != 0;
+        if mode.requires_tls() && !server_has_tls {
+            return Err(Error::Tls(format!(
+                "ssl_mode {mode:?} needs TLS but the server does not support it"
+            )));
+        }
+        Ok(server_has_tls)
+    }
+
+    /// Whether the connection is encrypted with TLS.
+    #[must_use]
+    pub fn is_tls(&self) -> bool {
+        matches!(self.stream.get_ref(), Stream::Tls(_))
     }
 
     fn authenticate(&mut self, opts: &Opts, greeting: &ServerHandshake) -> Result<()> {
@@ -407,7 +480,7 @@ impl Conn {
     /// connection is being discarded either way.
     pub fn close(mut self) {
         let _ = self.stream.write_command(command::QUIT, &[]);
-        self.stream.get_ref().shutdown();
+        self.stream.get_mut().shutdown();
     }
 
     #[must_use]
