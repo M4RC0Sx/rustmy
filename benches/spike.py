@@ -16,13 +16,16 @@ the speedup against mysqlclient measured in the same run, not absolute times.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import gc
+import json
 import platform
 import statistics
 import sys
 import time
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
 
@@ -185,6 +188,12 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=13306)
     parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument(
+        "--json",
+        type=Path,
+        metavar="PATH",
+        help="also write the results as JSON (input of benches/report.py)",
+    )
     args = parser.parse_args()
     target = Target(args.host, args.port)
     factories = drivers(target)
@@ -212,6 +221,7 @@ def main() -> None:
     header = f"{'scenario':<48}" + "".join(f"{name:>13}" for name in factories)
     print(header + f"{'rustmy speedup':>17}")
     speedups = []
+    results = []
     for scenario in SCENARIOS:
         times = {
             name: best_time(scenario, conn, args.repeat)
@@ -223,6 +233,13 @@ def main() -> None:
         marker = " *" if scenario.informative else ""
         cells = "".join(f"{times[name] * 1000:>11.1f}ms" for name in factories)
         print(f"{scenario.name + marker:<48}{cells}{speedup:>16.2f}x")
+        results.append(
+            {
+                "name": scenario.name,
+                "informative": scenario.informative,
+                "seconds": times,
+            }
+        )
     for conn in connections.values():
         conn.close()
 
@@ -231,6 +248,23 @@ def main() -> None:
         "* informative: rustmy's executemany still runs one INSERT per row in the "
         "spike,\n  mysqlclient rewrites it into multi-row INSERTs (Phase 2)."
     )
+    if args.json:
+        report = {
+            "date": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "machine": f"{platform.system()} {platform.machine()}",
+            "python": f"{platform.python_implementation()} {sys.version.split()[0]}",
+            "server": server,
+            "drivers": {
+                "rustmy": rustmy.__version__,
+                "mysqlclient": mysqlclient_version,
+                "pymysql": pymysql.__version__,
+            },
+            "repeat": args.repeat,
+            "scenarios": results,
+        }
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps(report, indent=2) + "\n")
+        print(f"results written to {args.json}")
 
 
 if __name__ == "__main__":

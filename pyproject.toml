@@ -46,6 +46,7 @@ dev = [
 # mysqlclient needs libmysqlclient + pkg-config to build, so it stays out of
 # the default sync: `uv sync --group bench`.
 bench = [
+    "matplotlib>=3.10",
     "mysqlclient>=2.2",
     "pytest-benchmark>=5.1",
 ]
@@ -154,8 +155,9 @@ mypy_path = "python"
 files = ["python", "tests", "benches"]
 
 [[tool.mypy.overrides]]
-# Reference drivers used by benchmarks; neither ships type information.
-module = ["MySQLdb", "MySQLdb.*", "pymysql", "pymysql.*"]
+# Benchmark-only dependencies (bench group, absent from the dev env); the
+# reference drivers ship no type information either.
+module = ["MySQLdb", "MySQLdb.*", "pymysql", "pymysql.*", "matplotlib", "matplotlib.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
