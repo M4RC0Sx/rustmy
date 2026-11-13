@@ -7,6 +7,25 @@
 // The protocol core parses untrusted server bytes: it stays 100% safe Rust.
 #![forbid(unsafe_code)]
 
+mod auth;
+mod buf;
+mod column;
+mod conn;
+pub mod constants;
+mod error;
+mod handshake;
+mod packet;
+mod result;
+
+pub use column::Column;
+pub use conn::Conn;
+pub use conn::Opts;
+pub use error::Error;
+pub use error::Result;
+pub use result::QueryResult;
+pub use result::RowRef;
+pub use result::RowSet;
+
 /// Maximum payload carried by a single protocol packet (2^24 - 1 bytes).
 ///
 /// Larger payloads are split across consecutive packets.

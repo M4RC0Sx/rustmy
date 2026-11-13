@@ -1,8 +1,10 @@
 name: CI
 
+# develop is the integration branch; master only receives release PRs from
+# develop (validated by the pull_request trigger) and release-bot commits.
 on:
   push:
-    branches: [master]
+    branches: [develop]
   pull_request:
 
 concurrency:
@@ -27,6 +29,37 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The PyO3 cdylib cannot link a native test binary; Python tests cover it.
       - run: cargo nextest run --workspace --exclude rustmy-pydriver
+
+  rust-integration:
+    name: Rust integration (${{ matrix.server }} ${{ matrix.version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every server line still under vendor support (LTS releases plus the
+        # latest innovation/rolling release, which surfaces changes first),
+        # plus MySQL 8.0: upstream EOL, but still widely deployed.
+        include:
+          - { server: mysql, version: "8.0" }
+          - { server: mysql, version: "8.4" }
+          - { server: mysql, version: "9.7" }
+          - { server: mysql, version: "26.10" }
+          - { server: mariadb, version: "10.11" }
+          - { server: mariadb, version: "11.4" }
+          - { server: mariadb, version: "11.8" }
+          - { server: mariadb, version: "12.3" }
+          - { server: mariadb, version: "13.0" }
+    env:
+      MYSQL_VERSION: ${{ matrix.version }}
+      MARIADB_VERSION: ${{ matrix.version }}
+      RUSTMY_TEST_SERVERS: ${{ matrix.server }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: docker compose up -d --wait ${{ matrix.server }}
+      - run: cargo nextest run -p rustmy-proto --run-ignored only --no-capture
 
   deny:
     name: cargo-deny (licenses, advisories)
