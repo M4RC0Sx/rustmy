@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [handshake, packets, result_set, text_values, session]
+        target: [handshake, packets, result_set, text_values, sql, session]
     env:
       SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
     steps:

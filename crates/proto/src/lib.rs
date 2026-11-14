@@ -19,6 +19,7 @@ pub mod fuzzing;
 mod handshake;
 mod packet;
 mod result;
+pub mod sql;
 pub mod text;
 mod tls;
 

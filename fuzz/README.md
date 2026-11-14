@@ -10,6 +10,7 @@ panic, hang or allocate without bound.
 | `packets` | packet framing (lengths, sequence ids, >16 MiB payloads) |
 | `result_set` | column definitions, rows, OK / ERR / EOF packets |
 | `text_values` | text-protocol integer, float, date and time parsers |
+| `sql` | the `INSERT … VALUES` recogniser used by `executemany` and string escaping |
 | `session` | the whole client against a scripted server: handshake, every authentication plugin (RSA, ed25519, parsec, auth switches), queries, multiple results, `ping`, `select_db`, `reset_connection`, `change_user` |
 
 The hooks live behind the `fuzzing` feature of `rustmy-proto`

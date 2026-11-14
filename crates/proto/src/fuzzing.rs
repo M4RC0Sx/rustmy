@@ -83,6 +83,15 @@ pub fn result_set(data: &[u8]) {
     }
 }
 
+/// SQL helpers used on user-written queries: the `INSERT … VALUES`
+/// recogniser and string escaping in both modes.
+pub fn sql(data: &[u8]) {
+    let _ = crate::sql::insert_values(data);
+    let mut out = Vec::new();
+    crate::sql::escape_into(&mut out, data, false);
+    crate::sql::escape_into(&mut out, data, true);
+}
+
 /// Text-protocol value parsers.
 pub fn text_values(data: &[u8]) {
     let _ = text::parse_i64(data);

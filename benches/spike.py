@@ -166,7 +166,6 @@ SCENARIOS = [
         f"executemany {INSERTS // 1000}k rows",
         executemany_insert,
         reset="TRUNCATE bench_insert",
-        informative=True,
     ),
 ]
 
@@ -245,10 +244,6 @@ def main() -> None:
         conn.close()
 
     print(f"\ngeometric mean speedup: {statistics.geometric_mean(speedups):.2f}x")
-    print(
-        "* informative: rustmy's executemany still runs one INSERT per row in the "
-        "spike,\n  mysqlclient rewrites it into multi-row INSERTs (Phase 2)."
-    )
     if args.json:
         report = {
             "date": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),

@@ -16,6 +16,7 @@ from rustmy.cursors import Cursor
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from collections.abc import Mapping
     from os import PathLike
     from types import TracebackType
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
     from rustmy._core import QueryResult
+    from rustmy.converters import Params
 
 
 # Server status flags (see the protocol's SERVER_STATUS_* values).
@@ -150,6 +152,17 @@ class Connection:
 
     def _query(self, sql: bytes) -> QueryResult:
         return self._conn.query(sql)
+
+    def _execute(self, query: str, args: Params) -> QueryResult:
+        return self._conn.execute(query, args)
+
+    def _mogrify(self, query: str, args: Params) -> str:
+        return self._conn.mogrify(query, args)
+
+    def _executemany(
+        self, query: str, seq_of_args: Iterable[Params], max_stmt_length: int
+    ) -> tuple[int, int | None] | None:
+        return self._conn.executemany(query, seq_of_args, max_stmt_length)
 
     def _next_result(self) -> QueryResult | None:
         return self._conn.next_result()
