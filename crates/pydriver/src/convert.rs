@@ -66,6 +66,11 @@ fn kind(column: &Column) -> Kind {
 
 static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
+/// `decimal.Decimal`, imported once.
+pub(crate) fn decimal_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    DECIMAL.import(py, "decimal", "Decimal")
+}
+
 /// `(description, rows, rowcount, last_insert_id, warnings)`. For statements
 /// without a result set, description and rows are `None` and rowcount is the
 /// number of affected rows.
@@ -113,7 +118,7 @@ fn description<'py>(py: Python<'py>, columns: &[Column]) -> PyResult<Bound<'py, 
 fn rows<'py>(py: Python<'py>, result: &QueryResult) -> PyResult<Bound<'py, PyList>> {
     let kinds: Vec<Kind> = result.columns.iter().map(kind).collect();
     let decimal = if kinds.contains(&Kind::Decimal) {
-        Some(DECIMAL.import(py, "decimal", "Decimal")?)
+        Some(decimal_type(py)?)
     } else {
         None
     };

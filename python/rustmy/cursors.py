@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 from typing import Any
 from typing import TypeAlias
 
-from rustmy.converters import interpolate
 from rustmy.err import ProgrammingError
 
 
@@ -37,6 +36,9 @@ class Cursor:
     #: Default number of rows returned by :meth:`fetchmany`.
     arraysize: int = 1
 
+    #: Largest statement :meth:`executemany` builds when batching inserts.
+    max_stmt_length: int = 256 * 1024
+
     def __init__(self, connection: Connection) -> None:
         self._connection: Connection | None = connection
         self.description: Description | None = None
@@ -44,7 +46,7 @@ class Cursor:
         self.lastrowid: int | None = None
         self._rows: list[Row] = []
         self._pos = 0
-        self._executed: str | None = None
+        self._last: tuple[str, Params] | None = None
 
     @property
     def connection(self) -> Connection:
@@ -78,12 +80,15 @@ class Cursor:
 
     def mogrify(self, query: str, args: Params = None) -> str:
         """Return the query exactly as :meth:`execute` would send it."""
-        if args is None:
-            return query
-        connection = self._get_connection()
-        return interpolate(
-            query, args, no_backslash_escapes=connection.no_backslash_escapes
-        )
+        return self._get_connection()._mogrify(query, args)  # noqa: SLF001
+
+    @property
+    def _executed(self) -> str | None:
+        """The last query sent by :meth:`execute` (built on demand)."""
+        if self._last is None:
+            return None
+        query, args = self._last
+        return self.mogrify(query, args)
 
     def execute(self, query: str, args: Params = None) -> int:
         """Run ``query``, interpolating ``args`` if given; return the rowcount.
@@ -91,16 +96,31 @@ class Cursor:
         Without ``args`` the query is sent as is, so ``%`` needs no escaping.
         """
         connection = self._get_connection()
-        sql = self.mogrify(query, args)
-        self._executed = sql
-        self._set_result(connection._query(sql.encode()))  # noqa: SLF001
+        self._last = (query, args)
+        self._set_result(connection._execute(query, args))  # noqa: SLF001
         return self.rowcount
 
     def executemany(self, query: str, seq_of_args: Iterable[Params]) -> int:
         """Run ``query`` once per item of ``seq_of_args``.
 
-        Returns the total number of affected rows.
+        A single-row ``INSERT``/``REPLACE … VALUES (…)`` is sent as multi-row
+        statements of at most :attr:`max_stmt_length` bytes; anything else
+        runs row by row. Returns the total number of affected rows.
         """
+        connection = self._get_connection()
+        batched = connection._executemany(  # noqa: SLF001
+            query, seq_of_args, self.max_stmt_length
+        )
+        if batched is not None:
+            rowcount, lastrowid = batched
+            self.description = None
+            self._rows = []
+            self._pos = 0
+            self.rowcount = rowcount
+            if lastrowid is not None:
+                self.lastrowid = lastrowid
+            self._last = (query, None)
+            return rowcount
         total = 0
         for args in seq_of_args:
             total += self.execute(query, args)

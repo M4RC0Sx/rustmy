@@ -14,6 +14,13 @@ use rustmy_proto::Opts;
 use rustmy_proto::SslMode;
 use rustmy_proto::TlsOpts;
 
+use std::borrow::Cow;
+
+use pyo3::types::PyBytes;
+use pyo3::types::PyString;
+use rustmy_proto::constants::status;
+use rustmy_proto::sql::insert_values;
+
 use crate::convert::result_to_py;
 use crate::errors::InterfaceError;
 use crate::errors::OperationalError;
@@ -21,6 +28,11 @@ use crate::errors::Phase;
 use crate::errors::ProgrammingError;
 use crate::errors::client_code;
 use crate::errors::from_proto;
+use crate::params::Args;
+use crate::params::BinaryLiteral;
+use crate::params::Encoder;
+use crate::params::has_placeholder;
+use crate::params::unescape_percent;
 
 #[derive(Debug)]
 enum State {
@@ -108,6 +120,33 @@ impl Connection {
         }
     }
 
+    /// Literal writer for this connection's current SQL mode.
+    fn encoder(&self) -> PyResult<Encoder> {
+        self.peek(|conn| Encoder {
+            no_backslash_escapes: conn.status_flags() & status::NO_BACKSLASH_ESCAPES != 0,
+            binary: BinaryLiteral::Escaped,
+        })
+    }
+
+    /// Runs one statement of an `executemany` batch and resets `sql` to
+    /// the prefix for the next one.
+    fn flush_batch(
+        &self,
+        py: Python<'_>,
+        sql: &mut Vec<u8>,
+        suffix: &[u8],
+        prefix_len: usize,
+        totals: &mut (u64, Option<u64>),
+    ) -> PyResult<()> {
+        sql.extend_from_slice(suffix);
+        let statement: &[u8] = sql;
+        let result = self.with_conn(py, |conn| conn.query(statement))?;
+        totals.0 += result.affected_rows;
+        totals.1 = Some(result.last_insert_id);
+        sql.truncate(prefix_len);
+        Ok(())
+    }
+
     fn failure_to_pyerr(&self, failure: Failure) -> PyErr {
         match failure {
             Failure::Busy => ProgrammingError::new_err((
@@ -130,6 +169,96 @@ impl Connection {
     fn query(&self, py: Python<'_>, sql: &[u8]) -> PyResult<Py<PyAny>> {
         let result = self.with_conn(py, |conn| conn.query(sql))?;
         result_to_py(py, &result)
+    }
+
+    /// Interpolates `args` (if any) into `query` and runs it. Without
+    /// `args` the query is sent as is, so `%` needs no escaping.
+    #[pyo3(signature = (query, args = None))]
+    fn execute(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyString>,
+        args: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let template = query.to_str()?.as_bytes();
+        let sql: Cow<'_, [u8]> = match args.filter(|a| !a.is_none()) {
+            None => Cow::Borrowed(template),
+            Some(args) => {
+                let mut out = Vec::with_capacity(template.len() + 64);
+                self.encoder()?
+                    .interpolate(&mut out, template, &Args::from_py(args))?;
+                Cow::Owned(out)
+            }
+        };
+        let result = self.with_conn(py, |conn| conn.query(&sql))?;
+        result_to_py(py, &result)
+    }
+
+    /// The query exactly as `execute` would send it, as `str` (bytes that
+    /// are not UTF-8 come back as surrogate escapes).
+    #[pyo3(signature = (query, args = None))]
+    fn mogrify<'py>(
+        &self,
+        query: &Bound<'py, PyString>,
+        args: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let Some(args) = args.filter(|a| !a.is_none()) else {
+            return Ok(query.clone().into_any());
+        };
+        let template = query.to_str()?.as_bytes();
+        let mut out = Vec::with_capacity(template.len() + 64);
+        self.encoder()?
+            .interpolate(&mut out, template, &Args::from_py(args))?;
+        decode_lossless(query.py(), &out)
+    }
+
+    /// Batches a single-row `INSERT`/`REPLACE … VALUES (…)` into multi-row
+    /// statements of at most `max_stmt_length` bytes (a row that is larger
+    /// on its own still goes alone). Returns `(affected_rows,
+    /// last_insert_id)`, `last_insert_id` being `None` when nothing ran, or
+    /// `None` when the query cannot be batched and must run row by row.
+    fn executemany(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyString>,
+        seq_of_args: &Bound<'_, PyAny>,
+        max_stmt_length: usize,
+    ) -> PyResult<Option<(u64, Option<u64>)>> {
+        let template = query.to_str()?.as_bytes();
+        let Some(parts) = insert_values(template) else {
+            return Ok(None);
+        };
+        let prefix_template = template.get(parts.prefix).unwrap_or_default();
+        let row_template = template.get(parts.row).unwrap_or_default();
+        let suffix_template = template.get(parts.suffix).unwrap_or_default();
+        if has_placeholder(prefix_template) || has_placeholder(suffix_template) {
+            return Ok(None);
+        }
+        let encoder = self.encoder()?;
+        let prefix = unescape_percent(encoder, prefix_template)?;
+        let suffix = unescape_percent(encoder, suffix_template)?;
+
+        let mut sql = prefix.clone();
+        let mut row = Vec::new();
+        let mut rows_in_batch = 0usize;
+        let mut totals = (0, None);
+        for args in seq_of_args.try_iter()? {
+            row.clear();
+            encoder.interpolate(&mut row, row_template, &Args::from_py(&args?))?;
+            if rows_in_batch > 0 && sql.len() + 1 + row.len() + suffix.len() > max_stmt_length {
+                self.flush_batch(py, &mut sql, &suffix, prefix.len(), &mut totals)?;
+                rows_in_batch = 0;
+            }
+            if rows_in_batch > 0 {
+                sql.push(b',');
+            }
+            sql.extend_from_slice(&row);
+            rows_in_batch += 1;
+        }
+        if rows_in_batch > 0 {
+            self.flush_batch(py, &mut sql, &suffix, prefix.len(), &mut totals)?;
+        }
+        Ok(Some(totals))
     }
 
     /// Next result of a multi-result query, or `None` when there is none.
@@ -315,4 +444,53 @@ fn timeout(seconds: Option<f64>, name: &str) -> PyResult<Option<Duration>> {
                 })
         })
         .transpose()
+}
+
+/// Bytes as `str`, keeping non-UTF-8 bytes as surrogate escapes.
+fn decode_lossless<'py>(py: Python<'py>, bytes: &[u8]) -> PyResult<Bound<'py, PyAny>> {
+    PyBytes::new(py, bytes).call_method1("decode", ("utf-8", "surrogateescape"))
+}
+
+/// `value` as an SQL literal, for a UTF-8 connection.
+#[pyfunction]
+#[pyo3(signature = (value, no_backslash_escapes = false))]
+pub(crate) fn literal<'py>(
+    value: &Bound<'py, PyAny>,
+    no_backslash_escapes: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let encoder = Encoder {
+        no_backslash_escapes,
+        binary: BinaryLiteral::Escaped,
+    };
+    let mut out = Vec::new();
+    encoder.literal(&mut out, value)?;
+    decode_lossless(value.py(), &out)
+}
+
+/// `value` escaped for use inside a single-quoted SQL literal.
+#[pyfunction]
+#[pyo3(signature = (value, no_backslash_escapes = false))]
+pub(crate) fn escape_string(value: &str, no_backslash_escapes: bool) -> PyResult<String> {
+    let mut out = Vec::with_capacity(value.len() + 8);
+    rustmy_proto::sql::escape_into(&mut out, value.as_bytes(), no_backslash_escapes);
+    // Escaping only inserts ASCII into valid UTF-8, so this cannot fail.
+    String::from_utf8(out).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// `query` with `args` interpolated, for a UTF-8 connection.
+#[pyfunction]
+#[pyo3(signature = (query, args, no_backslash_escapes = false))]
+pub(crate) fn interpolate<'py>(
+    query: &Bound<'py, PyString>,
+    args: &Bound<'py, PyAny>,
+    no_backslash_escapes: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let encoder = Encoder {
+        no_backslash_escapes,
+        binary: BinaryLiteral::Escaped,
+    };
+    let template = query.to_str()?.as_bytes();
+    let mut out = Vec::with_capacity(template.len() + 64);
+    encoder.interpolate(&mut out, template, &Args::from_py(args))?;
+    decode_lossless(query.py(), &out)
 }

@@ -1,0 +1,37 @@
+{
+  "date": "2026-11-14T08:45:35+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 5,
+  "default": "rustmy 256 KiB",
+  "sweep": [
+    {
+      "rows": 10000,
+      "seconds": {
+        "mysqlclient": 0.07605095799954142,
+        "pymysql": 0.04824245900090318,
+        "rustmy 16 KiB": 0.030392166001547594,
+        "rustmy 64 KiB": 0.024290917001053458,
+        "rustmy 256 KiB": 0.023403082999720937,
+        "rustmy 1 MiB": 0.023673291001614416
+      }
+    },
+    {
+      "rows": 100000,
+      "seconds": {
+        "mysqlclient": 0.6138125420002325,
+        "pymysql": 0.4644519579996995,
+        "rustmy 16 KiB": 0.3076279999986582,
+        "rustmy 64 KiB": 0.2550810829998227,
+        "rustmy 256 KiB": 0.25058029199863086,
+        "rustmy 1 MiB": 0.22889595900051063
+      }
+    }
+  ]
+}
