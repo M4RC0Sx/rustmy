@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from typing import TYPE_CHECKING
+from typing import Any
 from typing import TypeAlias
 from typing import TypeVar
 from typing import overload
@@ -12,7 +13,9 @@ from typing import overload
 from rustmy import _core
 from rustmy import _tls
 from rustmy import err
+from rustmy.constants import CLIENT
 from rustmy.converters import escape_string
+from rustmy.converters import split_conv
 from rustmy.cursors import Cursor
 
 
@@ -79,6 +82,9 @@ class Connection:
         autocommit: bool | None = False,
         init_command: str | None = None,
         client_flag: int = 0,
+        multi_statements: bool = False,
+        sql_mode: str | None = None,
+        conv: Mapping[Any, Any] | None = None,
         cursorclass: type[Cursor] = Cursor,
         ssl_mode: str | None = None,
         ssl_ca: PathArg | None = None,
@@ -100,6 +106,22 @@ class Connection:
         for it (what its tables use, so comparisons with user variables
         work), set in the handshake at no extra cost; with ``collation``,
         ``SET NAMES … COLLATE …`` runs after connecting.
+
+        ``multi_statements=True`` allows several statements separated by
+        ``;`` in one ``execute`` (off by default: it lets an injected string
+        append whole statements). ``sql_mode`` sets the session's SQL mode;
+        ``init_command`` runs after it. Both are applied again after
+        :meth:`reset_connection` and :meth:`change_user`.
+
+        ``conv`` maps column types (``FIELD_TYPE``) to decoders and Python
+        types to encoders, in MySQLdb's format; start from
+        :data:`rustmy.converters.conversions`. Only entries that differ from
+        it are called from Python, so the other columns keep the native fast
+        path. A decoder gets ``str`` for ``DECIMAL`` and date/time columns and
+        ``bytes`` for the rest (``None`` is passed through); a column type may
+        map to ``[(FLAG mask, decoder), …]`` to choose by the column's flags.
+        An encoder is called as ``encoder(value, conv)`` and returns the SQL
+        literal.
 
         TLS: ``ssl_mode`` is one of ``disabled``, ``preferred`` (default),
         ``required`` (encrypted, server not verified), ``verify_ca`` and
@@ -133,7 +155,8 @@ class Connection:
             connect_timeout=connect_timeout,
             read_timeout=read_timeout,
             write_timeout=write_timeout,
-            client_flag=client_flag,
+            client_flag=client_flag
+            | (CLIENT.MULTI_STATEMENTS if multi_statements else 0),
             charset=charset,
             ssl_mode=tls.mode,
             ssl_ca=tls.ca,
@@ -144,11 +167,15 @@ class Connection:
             ),
         )
         self.cursorclass = cursorclass
+        if conv is not None:
+            decoders, encoders = split_conv(conv)
+            self._conn.set_converters(decoders, encoders, conv)
         # The session gets the character set (with the server's default
         # collation for it) in the handshake; SET NAMES is only needed for
         # an explicit collation or after set_character_set().
         self._collation = collation
         self._set_names = collation is not None
+        self._sql_mode = sql_mode
         self._init_command = init_command
         self._autocommit_setting = autocommit
         try:
@@ -167,6 +194,8 @@ class Connection:
         conn = self._conn
         if self._set_names or (after_reset and conn.charset != conn.server_charset):
             conn.set_character_set(conn.charset, self._collation)
+        if self._sql_mode is not None:
+            self._conn.execute("SET sql_mode = %s", (self._sql_mode,))
         if self._init_command is not None:
             self._query(self._init_command)
         if self._autocommit_setting is not None:

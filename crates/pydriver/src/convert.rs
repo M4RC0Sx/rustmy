@@ -43,6 +43,67 @@ enum Kind {
     Text,
     Bytes,
     Null,
+    /// A `conv=` decoder (index into `Converter::custom`), called with the
+    /// cell as `str` (`text`) or `bytes`.
+    Custom {
+        index: usize,
+        text: bool,
+    },
+}
+
+/// `conv=` entries that differ from the defaults (see
+/// `rustmy.converters.split_conv`).
+#[derive(Debug)]
+pub(crate) struct Custom {
+    /// Column type to decoder, or to `[(flag mask, decoder or None)]`.
+    pub(crate) decoders: Option<Py<PyDict>>,
+    /// Python type to `encoder(value, conv) -> literal`.
+    pub(crate) encoders: Option<Py<PyDict>>,
+    /// The whole `conv=` mapping, second argument of every encoder.
+    pub(crate) conv: Py<PyAny>,
+}
+
+/// Column types whose custom decoders get `str` (as in `MySQLdb`); the rest
+/// get `bytes`.
+fn decodes_from_text(column_type: ColumnType) -> bool {
+    matches!(
+        column_type,
+        ColumnType::DECIMAL
+            | ColumnType::NEWDECIMAL
+            | ColumnType::TIMESTAMP
+            | ColumnType::DATETIME
+            | ColumnType::TIME
+            | ColumnType::DATE
+    )
+}
+
+/// The custom decoder for `column`, if any: a callable entry, or the first
+/// `(mask, decoder)` pair whose mask matches the column's flags (or is not
+/// an int). The binary flag follows the column's collation, as in `MySQLdb`.
+fn custom_decoder<'py>(
+    decoders: &Bound<'py, PyDict>,
+    column: &Column,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let Some(entry) = decoders.get_item(column.column_type.0)? else {
+        return Ok(None);
+    };
+    if entry.is_callable() {
+        return Ok(Some(entry));
+    }
+    let mut flags = i64::from(column.flags);
+    if column.is_binary() {
+        flags |= i64::from(column_flag::BINARY);
+    } else {
+        flags &= !i64::from(column_flag::BINARY);
+    }
+    for pair in entry.try_iter()? {
+        let (mask, decoder): (Bound<'py, PyAny>, Bound<'py, PyAny>) = pair?.extract()?;
+        let matches = mask.extract::<i64>().map_or(true, |mask| mask & flags != 0);
+        if matches {
+            return Ok((!decoder.is_none()).then_some(decoder));
+        }
+    }
+    Ok(None)
 }
 
 fn kind(column: &Column) -> Kind {
@@ -88,6 +149,8 @@ pub(crate) struct Converter {
     keys: Option<Vec<Py<PyString>>>,
     /// The session's character set: text (JSON included) arrives in it.
     codec: Arc<Codec>,
+    /// `conv=` decoders used by this result's columns.
+    custom: Vec<Py<PyAny>>,
 }
 
 impl Converter {
@@ -96,8 +159,22 @@ impl Converter {
         columns: &[Column],
         as_dict: bool,
         codec: &Arc<Codec>,
+        custom: Option<&Custom>,
     ) -> PyResult<Self> {
-        let kinds: Vec<Kind> = columns.iter().map(kind).collect();
+        let mut kinds: Vec<Kind> = columns.iter().map(kind).collect();
+        let mut custom_decoders = Vec::new();
+        if let Some(decoders) = custom.and_then(|c| c.decoders.as_ref()) {
+            let decoders = decoders.bind(py);
+            for (column, slot) in columns.iter().zip(kinds.iter_mut()) {
+                if let Some(decoder) = custom_decoder(decoders, column)? {
+                    *slot = Kind::Custom {
+                        index: custom_decoders.len(),
+                        text: decodes_from_text(column.column_type),
+                    };
+                    custom_decoders.push(decoder.unbind());
+                }
+            }
+        }
         let decimal = if kinds.contains(&Kind::Decimal) {
             Some(decimal_type(py)?.clone().unbind())
         } else {
@@ -108,6 +185,7 @@ impl Converter {
             decimal,
             keys: as_dict.then(|| dict_keys(py, columns, codec)),
             codec: Arc::clone(codec),
+            custom: custom_decoders,
         })
     }
 
@@ -120,9 +198,13 @@ impl Converter {
     ) -> PyResult<()> {
         let decimal = self.decimal.as_ref().map(|d| d.bind(py));
         let codec = &*self.codec;
-        let cell_value = |cell: Option<&[u8]>, kind: Kind| match cell {
-            None => Ok(py.None().into_bound(py)),
-            Some(bytes) => value(py, kind, bytes, decimal, codec),
+        let custom = &self.custom;
+        let cell_value = |cell: Option<&[u8]>, kind: Kind| match (cell, kind) {
+            (None, _) => Ok(py.None().into_bound(py)),
+            (Some(bytes), Kind::Custom { index, text }) => {
+                custom_value(py, custom, index, text, bytes)
+            }
+            (Some(bytes), _) => value(py, kind, bytes, decimal, codec),
         };
         if let Some(keys) = &self.keys {
             for row in rows.rows() {
@@ -185,7 +267,7 @@ pub(crate) fn result_to_py(
         )
             .into_py_any(py);
     }
-    let converter = Converter::new(py, &result.columns, as_dict, codec)?;
+    let converter = Converter::new(py, &result.columns, as_dict, codec, None)?;
     let mut rows = Vec::with_capacity(result.rows.len());
     converter.convert(py, &result.rows, |row| rows.push(row))?;
     (
@@ -253,8 +335,28 @@ fn value<'py>(
         Kind::DateTime => Ok(datetime(py, bytes)),
         Kind::Time => time(py, bytes).ok_or_else(invalid),
         Kind::Text => codec.decode(py, bytes).map(Bound::into_any),
-        Kind::Bytes => Ok(PyBytes::new(py, bytes).into_any()),
+        // `Custom` cells go through `custom_value` instead.
+        Kind::Bytes | Kind::Custom { .. } => Ok(PyBytes::new(py, bytes).into_any()),
         Kind::Null => Ok(py.None().into_bound(py)),
+    }
+}
+
+/// Calls the `conv=` decoder `index` on a cell.
+fn custom_value<'py>(
+    py: Python<'py>,
+    decoders: &[Py<PyAny>],
+    index: usize,
+    text: bool,
+    bytes: &[u8],
+) -> PyResult<Bound<'py, PyAny>> {
+    let decoder = decoders
+        .get(index)
+        .ok_or_else(|| DataError::new_err((0, "custom decoder missing")))?
+        .bind(py);
+    if text {
+        decoder.call1((utf8(py, bytes)?,))
+    } else {
+        decoder.call1((PyBytes::new(py, bytes),))
     }
 }
 

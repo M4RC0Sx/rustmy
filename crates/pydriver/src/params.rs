@@ -31,6 +31,7 @@ use pyo3::types::PyTuple;
 use rustmy_proto::sql::escape_into;
 
 use crate::charset::Codec;
+use crate::convert::Custom;
 use crate::convert::decimal_type;
 use crate::errors::ProgrammingError;
 
@@ -43,6 +44,8 @@ use crate::errors::ProgrammingError;
 pub(crate) struct Encoder {
     pub(crate) no_backslash_escapes: bool,
     pub(crate) codec: Arc<Codec>,
+    /// `conv=` encoders, tried first for the types they cover.
+    pub(crate) custom: Option<Arc<Custom>>,
 }
 
 /// Arguments of one `execute`: a sequence for `%s`, a mapping for
@@ -178,6 +181,13 @@ impl Encoder {
 
     /// Appends `value` as an SQL literal.
     pub(crate) fn literal(&self, out: &mut Vec<u8>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        if let Some(custom) = &self.custom
+            && let Some(encoders) = &custom.encoders
+            && let Some(encoder) = encoders.bind(value.py()).get_item(value.get_type())?
+        {
+            let literal = encoder.call1((value, custom.conv.bind(value.py())))?;
+            return self.write_custom(out, &literal);
+        }
         if value.is_none() {
             out.extend_from_slice(b"NULL");
         } else if let Ok(flag) = value.cast::<PyBool>() {
@@ -241,6 +251,22 @@ impl Encoder {
             )));
         }
         Ok(())
+    }
+
+    /// The SQL a `conv=` encoder returned, as is: `str` is encoded in the
+    /// connection's character set, `bytes` taken as already encoded.
+    fn write_custom(&self, out: &mut Vec<u8>, literal: &Bound<'_, PyAny>) -> PyResult<()> {
+        if let Ok(text) = literal.cast::<PyString>() {
+            self.codec.encode_into(literal.py(), out, text.to_str()?)
+        } else if let Ok(bytes) = literal.cast::<PyBytes>() {
+            out.extend_from_slice(bytes.as_bytes());
+            Ok(())
+        } else {
+            Err(programming_error(format!(
+                "conv encoders must return str or bytes, not {}",
+                literal.get_type().name()?
+            )))
+        }
     }
 
     /// A quoted string literal: escaped as text, then encoded.

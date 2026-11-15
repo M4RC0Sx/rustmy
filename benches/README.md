@@ -461,3 +461,73 @@ uv run --no-sync python benches/report.py --section phase2-block3a \
 
 Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
 <!-- results:phase2-block3a:end -->
+
+## Phase 2, block 3b: `conv=` and the rest of `connect()` (2026-11-15)
+
+`conv=` takes MySQLdb's format (column types to decoders, Python types to
+encoders). Entries equal to `rustmy.converters.conversions` stay on the
+native path, so a mapping that changes one type only slows down the columns
+of that type. `benches/conv.py` gives each driver its own default mapping
+plus the same change:
+
+```sh
+uv run --no-sync python benches/conv.py --repeat 5 \
+    --json benches/results/phase2-block3b-conv-py310.json
+uv run --no-sync python benches/report.py --section phase2-block3b-conv \
+    benches/results/phase2-block3b-conv-py310.json
+```
+
+<!-- results:phase2-block3b-conv:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase2-block3b-conv-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase2-block3b-conv-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-15T20:53:57+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| fetchall 100k decimal, no conv | **12.8 ms** | 17.9 ms | 102.1 ms | 1.40x | 7.96x |
+| fetchall 100k decimal, conv NEWDECIMAL: float | **9.6 ms** | 14.7 ms | 99.9 ms | 1.54x | 10.45x |
+| fetchall 100k int/varchar, no conv | **24.7 ms** | 34.4 ms | 248.2 ms | 1.39x | 10.06x |
+| fetchall 100k int/varchar, conv TIME changed (Django) | **23.7 ms** | 33.4 ms | 248.0 ms | 1.41x | 10.46x |
+| fetchall 100k int/varchar, conv LONG: Python function | **32.0 ms** | 43.8 ms | 255.8 ms | 1.37x | 7.98x |
+| executemany 10k rows, conv encoder for an enum | **18.7 ms** | 24.0 ms | 24.4 ms | 1.28x | 1.31x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+<!-- results:phase2-block3b-conv:end -->
+
+The Django-style mapping (`TIME` changed, on a table without `TIME` columns)
+costs what no `conv=` costs. A Python decoder on an integer column adds about
+40 ns per value (mysqlclient about 100 ns).
+
+`spike.py` after the block, unchanged within noise (geometric mean 1.91x
+against 1.92x before):
+
+```sh
+uv run --no-sync python benches/spike.py --repeat 7 \
+    --json benches/results/phase2-block3b-py310.json
+uv run --no-sync python benches/report.py --section phase2-block3b \
+    benches/results/phase2-block3b-py310.json
+```
+
+<!-- results:phase2-block3b:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase2-block3b-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase2-block3b-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 7 · 2026-11-15T20:54:51+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| fetchall 100k int/varchar | **23.7 ms** | 35.1 ms | 233.1 ms | 1.48x | 9.84x |
+| fetchall 100k mixed (double/datetime/date/decimal) | **43.5 ms** | 139.5 ms | 414.7 ms | 3.21x | 9.53x |
+| fetchall 100k datetime + date | **13.3 ms** | 93.4 ms | 278.6 ms | 7.02x | 20.92x |
+| fetchall 100k decimal | **11.7 ms** | 17.6 ms | 109.4 ms | 1.51x | 9.38x |
+| 10k x SELECT 1 | **655.7 ms** | 679.6 ms | 818.0 ms | 1.04x | 1.25x |
+| 10k x INSERT with params | **1201.1 ms** | 1220.2 ms | 1317.6 ms | 1.02x | 1.10x |
+| executemany 10k rows | **17.9 ms** | 30.8 ms | 31.3 ms | 1.72x | 1.75x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+<!-- results:phase2-block3b:end -->
