@@ -59,7 +59,7 @@ pub(crate) fn parse_err(payload: &[u8]) -> Error {
     Error::Server {
         code,
         sql_state,
-        message: String::from_utf8_lossy(r.rest()).into_owned(),
+        message: r.rest().to_vec(),
     }
 }
 
@@ -347,7 +347,7 @@ mod tests {
         };
         assert_eq!(code, 1317);
         assert_eq!(sql_state, "70100");
-        assert_eq!(message, "Query execution was interrupted");
+        assert_eq!(message, b"Query execution was interrupted");
     }
 
     #[test]

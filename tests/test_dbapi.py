@@ -36,9 +36,22 @@ def test_type_objects_compare_equal_to_type_codes() -> None:
     assert rustmy.FieldType.BLOB != rustmy.STRING
 
 
-def test_connect_with_unsupported_charset_fails_before_connecting() -> None:
-    with pytest.raises(rustmy.NotSupportedError):
-        rustmy.connect(port=1, charset="latin1")
+@pytest.mark.parametrize(
+    ("charset", "reason"),
+    [
+        ("binary", "needs a text character set"),
+        ("eucjpms", "no exact codec"),
+        ("utf16", "does not accept it as a connection character set"),
+        ("armscii8", "no codec"),
+        ("klingon", "not a MySQL character set"),
+    ],
+)
+def test_connect_with_unsupported_charset_fails_before_connecting(
+    charset: str, reason: str
+) -> None:
+    # Port 1 refuses connections: the error comes before connecting.
+    with pytest.raises(rustmy.NotSupportedError, match=reason):
+        rustmy.connect(port=1, charset=charset)
 
 
 def test_connection_refused_is_operational_error_2003() -> None:

@@ -125,7 +125,7 @@ class Cursor:
         if last is None:
             return None
         if isinstance(last, bytes):
-            return last.decode("utf-8", "surrogateescape")
+            return self._get_connection()._decode_statement(last)  # noqa: SLF001
         query, args = last
         return self.mogrify(query, args)
 

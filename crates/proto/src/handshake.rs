@@ -18,6 +18,8 @@ pub(crate) struct ServerHandshake {
     /// 20-byte nonce used by the authentication plugins.
     pub(crate) nonce: Vec<u8>,
     pub(crate) auth_plugin: Vec<u8>,
+    /// The server's default collation (0 when the greeting omits it).
+    pub(crate) collation: u8,
 }
 
 impl ServerHandshake {
@@ -41,9 +43,10 @@ impl ServerHandshake {
         let mut capabilities = u32::from(r.u16()?);
         let mut status = 0;
         let mut auth_plugin = Vec::new();
+        let mut collation = 0;
 
         if !r.is_empty() {
-            let _charset = r.u8()?;
+            collation = r.u8()?;
             status = r.u16()?;
             capabilities |= u32::from(r.u16()?) << 16;
             let nonce_len = usize::from(r.u8()?);
@@ -68,7 +71,13 @@ impl ServerHandshake {
             status,
             nonce,
             auth_plugin,
+            collation,
         })
+    }
+
+    /// Whether the server is MariaDB (which reports itself in the version).
+    pub(crate) fn is_mariadb(&self) -> bool {
+        self.server_version.contains("MariaDB")
     }
 }
 

@@ -3,7 +3,9 @@
 
 use std::borrow::Cow;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::sync::TryLockError;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -27,6 +29,8 @@ use rustmy_proto::TlsOpts;
 use rustmy_proto::constants::status;
 use rustmy_proto::sql::insert_values;
 
+use crate::charset::Codec;
+use crate::charset::UTF8;
 use crate::convert::Converter;
 use crate::convert::description;
 use crate::convert::result_to_py;
@@ -37,7 +41,6 @@ use crate::errors::ProgrammingError;
 use crate::errors::client_code;
 use crate::errors::from_proto;
 use crate::params::Args;
-use crate::params::BinaryLiteral;
 use crate::params::Encoder;
 use crate::params::has_placeholder;
 use crate::params::unescape_percent;
@@ -76,6 +79,8 @@ pub(crate) struct Connection {
     /// Generation of the streamed result set that still has rows the user
     /// has not fetched, or 0.
     open_stream: AtomicU64,
+    /// The session's character set; `set_character_set` replaces it.
+    codec: Mutex<Arc<Codec>>,
 }
 
 /// `(affected_rows, last_insert_id, last_statement)` of a batched
@@ -207,6 +212,7 @@ impl Connection {
         F: FnOnce(&mut Conn) -> rustmy_proto::Result<Head> + Send,
     {
         let to_pyerr = |failure| self.failure_to_pyerr(failure);
+        let codec = self.codec();
         self.locked(py, breaks_on_io, |session| {
             // One GIL release covers the statement and its first batch, so
             // a small query costs no more than before.
@@ -225,9 +231,9 @@ impl Connection {
                 return Ok(None);
             };
             let Some((id, mut outcome)) = reading else {
-                return result_to_py(py, &head, as_dict).map(Some);
+                return result_to_py(py, &head, as_dict, &codec).map(Some);
             };
-            let converter = Converter::new(py, &head.columns, as_dict)?;
+            let converter = Converter::new(py, &head.columns, as_dict, &codec)?;
             let mut rows = Vec::new();
             let mut raw = std::mem::take(&mut head.rows);
             loop {
@@ -241,7 +247,7 @@ impl Connection {
                 if let ReadOutcome::Done { warnings } = outcome {
                     let count = rows.len();
                     return (
-                        description(py, &head.columns)?,
+                        description(py, &head.columns, &codec)?,
                         PyList::new(py, rows)?,
                         count,
                         head.last_insert_id,
@@ -362,7 +368,8 @@ impl Connection {
             )
                 .into_py_any(py);
         };
-        let converter = Converter::new(py, &head.columns, as_dict)?;
+        let codec = slf.get().codec();
+        let converter = Converter::new(py, &head.columns, as_dict, &codec)?;
         let stream = ResultStream::new(
             slf.clone().unbind(),
             id,
@@ -372,7 +379,7 @@ impl Connection {
             batch_bytes,
         );
         (
-            description(py, &head.columns)?,
+            description(py, &head.columns, &codec)?,
             stream,
             -1,
             head.last_insert_id,
@@ -381,19 +388,32 @@ impl Connection {
             .into_py_any(py)
     }
 
-    /// Interpolates `args` into `query`, or borrows it as is without them.
+    /// The session's character set.
+    pub(crate) fn codec(&self) -> Arc<Codec> {
+        Arc::clone(&self.codec.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// `query` in the session's character set, with `args` interpolated if
+    /// given (without them it is sent as is, so `%` needs no escaping).
     fn statement<'a>(
         &self,
         query: &'a Bound<'_, PyString>,
         args: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Cow<'a, [u8]>> {
-        let template = query.to_str()?.as_bytes();
+        let template = query.to_str()?;
+        let encoder = self.encoder()?;
         Ok(match args.filter(|a| !a.is_none()) {
-            None => Cow::Borrowed(template),
+            None if encoder.codec.is_utf8mb4() || template.is_ascii() => {
+                Cow::Borrowed(template.as_bytes())
+            }
+            None => {
+                let mut out = Vec::with_capacity(template.len() + 16);
+                encoder.codec.encode_into(query.py(), &mut out, template)?;
+                Cow::Owned(out)
+            }
             Some(args) => {
                 let mut out = Vec::with_capacity(template.len() + 64);
-                self.encoder()?
-                    .interpolate(&mut out, template, &Args::from_py(args))?;
+                encoder.interpolate(query.py(), &mut out, template, &Args::from_py(args))?;
                 Cow::Owned(out)
             }
         })
@@ -413,11 +433,13 @@ impl Connection {
         }
     }
 
-    /// Literal writer for this connection's current SQL mode.
+    /// Statement writer for this connection's SQL mode and character set.
     fn encoder(&self) -> PyResult<Encoder> {
-        self.peek(|conn| Encoder {
-            no_backslash_escapes: conn.status_flags() & status::NO_BACKSLASH_ESCAPES != 0,
-            binary: BinaryLiteral::Escaped,
+        let no_backslash_escapes =
+            self.peek(|conn| conn.status_flags() & status::NO_BACKSLASH_ESCAPES != 0)?;
+        Ok(Encoder {
+            no_backslash_escapes,
+            codec: self.codec(),
         })
     }
 
@@ -456,18 +478,28 @@ impl Connection {
                 client_code::SERVER_GONE,
                 "MySQL server has gone away (connection broken by an earlier error)",
             )),
-            Failure::Proto(err) => from_proto(err, Phase::Command, &self.target),
+            Failure::Proto(err) => from_proto(err, Phase::Command, &self.target, |message| {
+                let codec = self.codec();
+                Python::attach(|py| codec.decode_lenient(py, message))
+            }),
         }
     }
 }
 
 #[pymethods]
 impl Connection {
-    /// Runs one SQL statement; see `convert::result_to_py` for the result.
+    /// Runs one SQL statement as is; see `convert::result_to_py` for the
+    /// result.
     #[pyo3(signature = (sql, batch_bytes = 4096))]
-    fn query(&self, py: Python<'_>, sql: &[u8], batch_bytes: usize) -> PyResult<Py<PyAny>> {
+    fn query(
+        &self,
+        py: Python<'_>,
+        sql: &Bound<'_, PyString>,
+        batch_bytes: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let sql = self.statement(sql, None)?;
         let result = self.buffered(py, false, batch_bytes, |conn| {
-            conn.query_streamed(sql).map(Some)
+            conn.query_streamed(&sql).map(Some)
         })?;
         Ok(result.unwrap_or_else(|| py.None()))
     }
@@ -511,7 +543,8 @@ impl Connection {
     }
 
     /// The query exactly as `execute` would send it, as `str` (bytes that
-    /// are not UTF-8 come back as surrogate escapes).
+    /// are not text, such as binary literals, come back as surrogate
+    /// escapes).
     #[pyo3(signature = (query, args = None))]
     fn mogrify<'py>(
         &self,
@@ -521,11 +554,31 @@ impl Connection {
         let Some(args) = args.filter(|a| !a.is_none()) else {
             return Ok(query.clone().into_any());
         };
-        let template = query.to_str()?.as_bytes();
+        let py = query.py();
+        let template = query.to_str()?;
+        let encoder = self.encoder()?;
         let mut out = Vec::with_capacity(template.len() + 64);
-        self.encoder()?
-            .interpolate(&mut out, template, &Args::from_py(args))?;
-        decode_lossless(query.py(), &out)
+        encoder.interpolate(py, &mut out, template, &Args::from_py(args))?;
+        encoder.codec.decode_statement(py, &out)
+    }
+
+    /// `value` as an SQL literal for this connection (its character set
+    /// and SQL mode), as `str`.
+    fn literal<'py>(&self, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let encoder = self.encoder()?;
+        let mut out = Vec::new();
+        encoder.literal(&mut out, value)?;
+        encoder.codec.decode_statement(value.py(), &out)
+    }
+
+    /// A statement this connection built (`executemany`'s last one), as
+    /// `str`, as `mogrify` shows it.
+    fn decode_statement<'py>(
+        &self,
+        py: Python<'py>,
+        statement: &[u8],
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.codec().decode_statement(py, statement)
     }
 
     /// Batches a single-row `INSERT`/`REPLACE … VALUES (…)` into multi-row
@@ -541,19 +594,27 @@ impl Connection {
         seq_of_args: &Bound<'py, PyAny>,
         max_stmt_length: usize,
     ) -> PyResult<Option<BatchTotals<'py>>> {
-        let template = query.to_str()?.as_bytes();
-        let Some(parts) = insert_values(template) else {
+        let template = query.to_str()?;
+        let Some(parts) = insert_values(template.as_bytes()) else {
             return Ok(None);
         };
-        let prefix_template = template.get(parts.prefix).unwrap_or_default();
-        let row_template = template.get(parts.row).unwrap_or_default();
-        let suffix_template = template.get(parts.suffix).unwrap_or_default();
-        if has_placeholder(prefix_template) || has_placeholder(suffix_template) {
+        // The parts split at ASCII tokens, hence at character boundaries;
+        // anything else runs row by row.
+        let (Some(prefix_template), Some(row_template), Some(suffix_template)) = (
+            template.get(parts.prefix),
+            template.get(parts.row),
+            template.get(parts.suffix),
+        ) else {
+            return Ok(None);
+        };
+        if has_placeholder(prefix_template.as_bytes())
+            || has_placeholder(suffix_template.as_bytes())
+        {
             return Ok(None);
         }
         let encoder = self.encoder()?;
-        let prefix = unescape_percent(encoder, prefix_template)?;
-        let suffix = unescape_percent(encoder, suffix_template)?;
+        let prefix = unescape_percent(&encoder, py, prefix_template)?;
+        let suffix = unescape_percent(&encoder, py, suffix_template)?;
 
         let mut sql = prefix.clone();
         let mut row = Vec::new();
@@ -561,7 +622,7 @@ impl Connection {
         let mut totals = (0, None);
         for args in seq_of_args.try_iter()? {
             row.clear();
-            encoder.interpolate(&mut row, row_template, &Args::from_py(&args?))?;
+            encoder.interpolate(py, &mut row, row_template, &Args::from_py(&args?))?;
             if rows_in_batch > 0 && sql.len() + 1 + row.len() + suffix.len() > max_stmt_length {
                 self.flush_batch(py, &mut sql, &suffix, prefix.len(), &mut totals)?;
                 rows_in_batch = 0;
@@ -656,6 +717,54 @@ impl Connection {
         .map_err(|failure| self.failure_to_pyerr(failure))
     }
 
+    /// Switches the session to `charset` (`SET NAMES`, with `COLLATE` when
+    /// `collation` is given) and encodes and decodes with it from now on.
+    #[pyo3(signature = (charset, collation = None))]
+    fn set_character_set(
+        &self,
+        py: Python<'_>,
+        charset: &str,
+        collation: Option<&str>,
+    ) -> PyResult<()> {
+        let codec = Codec::new(py, charset)?;
+        let mut sql = format!("SET NAMES {}", codec.name());
+        if let Some(collation) = collation {
+            let valid = !collation.is_empty()
+                && collation
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            if !valid {
+                return Err(ProgrammingError::new_err((
+                    0,
+                    format!("invalid collation name {collation:?}"),
+                )));
+            }
+            sql.push_str(" COLLATE ");
+            sql.push_str(collation);
+        }
+        self.with_conn(py, |conn| conn.query(sql.as_bytes()))?;
+        *self.codec.lock().unwrap_or_else(PoisonError::into_inner) = codec;
+        Ok(())
+    }
+
+    /// The session's character set, as MySQL names it.
+    #[getter]
+    fn charset(&self) -> &'static str {
+        self.codec().name()
+    }
+
+    /// The server's default character set (from its greeting), if known.
+    #[getter]
+    fn server_charset(&self) -> PyResult<Option<&'static str>> {
+        self.peek(Conn::server_charset)
+    }
+
+    /// Python codec name of the session's character set.
+    #[getter]
+    fn encoding(&self) -> &'static str {
+        self.codec().python_name()
+    }
+
     /// Whether the connection is encrypted with TLS.
     #[getter]
     fn tls(&self) -> PyResult<bool> {
@@ -707,6 +816,7 @@ impl Connection {
     read_timeout = None,
     write_timeout = None,
     client_flag = 0,
+    charset = "utf8mb4",
     ssl_mode = "preferred",
     ssl_ca = None,
     ssl_cert = None,
@@ -729,6 +839,7 @@ pub(crate) fn connect(
     read_timeout: Option<f64>,
     write_timeout: Option<f64>,
     client_flag: u32,
+    charset: &str,
     ssl_mode: &str,
     ssl_ca: Option<PathBuf>,
     ssl_cert: Option<PathBuf>,
@@ -745,6 +856,7 @@ pub(crate) fn connect(
         || format!("'{host}:{port}'"),
         |p| format!("'{}'", p.display()),
     );
+    let codec = Codec::new(py, charset)?;
     let opts = Opts {
         host,
         port,
@@ -756,6 +868,7 @@ pub(crate) fn connect(
         read_timeout: timeout(read_timeout, "read_timeout")?,
         write_timeout: timeout(write_timeout, "write_timeout")?,
         client_flag,
+        charset: codec.name().to_owned(),
         tls: TlsOpts {
             mode,
             ca: ssl_ca,
@@ -764,14 +877,17 @@ pub(crate) fn connect(
         },
         server_public_key,
     };
-    let conn = py
-        .detach(|| Conn::connect(&opts))
-        .map_err(|err| from_proto(err, Phase::Connect, &target))?;
+    let conn = py.detach(|| Conn::connect(&opts)).map_err(|err| {
+        from_proto(err, Phase::Connect, &target, |message| {
+            String::from_utf8_lossy(message).into_owned()
+        })
+    })?;
     Ok(Connection {
         state: Mutex::new(State::Open(Box::new(conn))),
         target,
         generation: AtomicU64::new(0),
         open_stream: AtomicU64::new(0),
+        codec: Mutex::new(codec),
     })
 }
 
@@ -818,9 +934,12 @@ fn timeout(seconds: Option<f64>, name: &str) -> PyResult<Option<Duration>> {
         .transpose()
 }
 
-/// Bytes as `str`, keeping non-UTF-8 bytes as surrogate escapes.
-fn decode_lossless<'py>(py: Python<'py>, bytes: &[u8]) -> PyResult<Bound<'py, PyAny>> {
-    PyBytes::new(py, bytes).call_method1("decode", ("utf-8", "surrogateescape"))
+/// The UTF-8 statement writer of the module-level helpers.
+fn utf8_encoder(no_backslash_escapes: bool) -> Encoder {
+    Encoder {
+        no_backslash_escapes,
+        codec: Arc::clone(&UTF8),
+    }
 }
 
 /// `value` as an SQL literal, for a UTF-8 connection.
@@ -830,13 +949,10 @@ pub(crate) fn literal<'py>(
     value: &Bound<'py, PyAny>,
     no_backslash_escapes: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let encoder = Encoder {
-        no_backslash_escapes,
-        binary: BinaryLiteral::Escaped,
-    };
+    let encoder = utf8_encoder(no_backslash_escapes);
     let mut out = Vec::new();
     encoder.literal(&mut out, value)?;
-    decode_lossless(value.py(), &out)
+    encoder.codec.decode_statement(value.py(), &out)
 }
 
 /// `value` escaped for use inside a single-quoted SQL literal.
@@ -857,12 +973,10 @@ pub(crate) fn interpolate<'py>(
     args: &Bound<'py, PyAny>,
     no_backslash_escapes: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let encoder = Encoder {
-        no_backslash_escapes,
-        binary: BinaryLiteral::Escaped,
-    };
-    let template = query.to_str()?.as_bytes();
+    let py = query.py();
+    let encoder = utf8_encoder(no_backslash_escapes);
+    let template = query.to_str()?;
     let mut out = Vec::with_capacity(template.len() + 64);
-    encoder.interpolate(&mut out, template, &Args::from_py(args))?;
-    decode_lossless(query.py(), &out)
+    encoder.interpolate(py, &mut out, template, &Args::from_py(args))?;
+    encoder.codec.decode_statement(py, &out)
 }

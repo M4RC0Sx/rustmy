@@ -99,8 +99,5 @@ impl ColumnType {
     pub const GEOMETRY: Self = Self(255);
 }
 
-/// `utf8mb4_general_ci`: understood by every supported MySQL and MariaDB.
-pub(crate) const DEFAULT_COLLATION: u8 = 45;
-
 /// Collation id the server uses for binary strings.
 pub const BINARY_COLLATION: u16 = 63;
