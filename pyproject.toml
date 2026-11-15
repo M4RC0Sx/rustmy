@@ -71,6 +71,8 @@ module-name = "rustmy._core"
 target-version = "py310"
 line-length = 88
 src = ["python", "tests", "benches"]
+# The PEP 249 suite, kept byte for byte as published (tests/test_dbapi20.py).
+extend-exclude = ["tests/dbapi20.py"]
 
 [tool.ruff.lint]
 extend-select = [
@@ -159,12 +161,19 @@ show_error_codes = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 mypy_path = "python"
 files = ["python", "tests", "benches", "scripts"]
+exclude = ['^tests/dbapi20\.py$']  # see the tests.dbapi20 override below
 
 [[tool.mypy.overrides]]
 # Benchmark-only dependencies (bench group, absent from the dev env); the
 # reference drivers ship no type information either.
 module = ["MySQLdb", "MySQLdb.*", "pymysql", "pymysql.*", "matplotlib", "matplotlib.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The PEP 249 suite, kept byte for byte as published (untyped, Python 2 era).
+# Skipping it makes the module `Any`, so subclassing it needs no casts.
+module = ["tests.dbapi20"]
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 minversion = "8.0"

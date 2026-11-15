@@ -126,6 +126,12 @@ SCENARIOS = [
         executemany(RUSSIAN),
         reset="TRUNCATE bench_text_insert",
     ),
+    Scenario(
+        f"executemany {INSERTS // 1000}k gbk (Chinese)",
+        "gbk",
+        executemany(CHINESE),
+        reset="TRUNCATE bench_text_insert",
+    ),
 ]
 
 

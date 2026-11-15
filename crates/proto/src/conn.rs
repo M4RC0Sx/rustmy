@@ -73,9 +73,14 @@ pub struct Opts {
     pub port: u16,
     /// Connect through this Unix socket instead of TCP.
     pub unix_socket: Option<PathBuf>,
-    pub user: String,
+    /// User name in the session's character set (`charset`): the server
+    /// reads it, and `database`, in that character set.
+    pub user: Vec<u8>,
+    /// Sent as UTF-8 whatever `charset` is: the server compares the bytes
+    /// with those the password was set with (from a UTF-8 session).
     pub password: String,
-    pub database: Option<String>,
+    /// Default database, in the session's character set.
+    pub database: Option<Vec<u8>>,
     pub connect_timeout: Option<Duration>,
     pub read_timeout: Option<Duration>,
     pub write_timeout: Option<Duration>,
@@ -97,7 +102,7 @@ impl Default for Opts {
             host: "localhost".to_owned(),
             port: 3306,
             unix_socket: None,
-            user: String::new(),
+            user: Vec::new(),
             password: String::new(),
             database: None,
             connect_timeout: None,
@@ -429,9 +434,9 @@ impl Conn {
         let response = HandshakeResponse {
             capabilities: self.capabilities,
             collation: self.collation,
-            user: opts.user.as_bytes(),
+            user: &opts.user,
             auth_response: &auth_response,
-            database: opts.database.as_deref().map(str::as_bytes),
+            database: opts.database.as_deref(),
             auth_plugin: plugin.name(),
         }
         .encode()?;
@@ -733,15 +738,15 @@ impl Conn {
         Ok((QueryResult::rowset(columns), Some(id)))
     }
 
-    /// Switches the default database (`COM_INIT_DB`).
+    /// Switches the default database (`COM_INIT_DB`). `database` is in the
+    /// session's character set.
     ///
     /// # Errors
     ///
     /// I/O failures or an ERR packet (e.g. unknown database).
-    pub fn select_db(&mut self, database: &str) -> Result<()> {
+    pub fn select_db(&mut self, database: &[u8]) -> Result<()> {
         self.drain_results()?;
-        self.stream
-            .write_command(command::INIT_DB, database.as_bytes())?;
+        self.stream.write_command(command::INIT_DB, database)?;
         self.expect_ok()
     }
 
@@ -762,7 +767,9 @@ impl Conn {
 
     /// Re-authenticates as another account on the same connection
     /// (`COM_CHANGE_USER`). The session is reset as with
-    /// [`Conn::reset_connection`].
+    /// [`Conn::reset_connection`]. `user` and `database` are in the
+    /// character set of [`Conn::collation`], which the packet names (the
+    /// password goes as UTF-8, as in the handshake).
     ///
     /// # Errors
     ///
@@ -770,9 +777,9 @@ impl Conn {
     /// authentication methods not implemented yet.
     pub fn change_user(
         &mut self,
-        user: &str,
+        user: &[u8],
         password: &str,
-        database: Option<&str>,
+        database: Option<&[u8]>,
     ) -> Result<()> {
         self.drain_results()?;
         let plugin = self.default_plugin;
@@ -782,10 +789,10 @@ impl Conn {
             .map_err(|_| Error::protocol("authentication response too long"))?;
 
         let mut payload = Vec::with_capacity(64 + user.len());
-        put_nul_bytes(&mut payload, user.as_bytes());
+        put_nul_bytes(&mut payload, user);
         payload.push(auth_len);
         payload.extend_from_slice(&auth_response);
-        put_nul_bytes(&mut payload, database.unwrap_or_default().as_bytes());
+        put_nul_bytes(&mut payload, database.unwrap_or_default());
         payload.extend_from_slice(&u16::from(self.collation).to_le_bytes());
         put_nul_bytes(&mut payload, plugin.name());
         self.stream.write_command(command::CHANGE_USER, &payload)?;

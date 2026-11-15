@@ -531,3 +531,44 @@ uv run --no-sync python benches/report.py --section phase2-block3b \
 
 Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
 <!-- results:phase2-block3b:end -->
+
+## Phase 2, block 4: character sets follow the server (2026-11-15)
+
+Block 4's tests found that Python's codecs and the server disagree on a few
+characters. In sjis and ujis, Python encodes `¥` as 0x5C, which the server
+reads as a backslash, so escaping the text before encoding it let a quote
+through. In multi-byte character sets, encoded text must now decode back to
+itself, or it is refused. That costs one more decode, only for non-ASCII
+text in multi-byte sessions. `charsets.py` gained an `executemany` scenario
+in gbk to measure it: 23.3 ms before and 27.0 ms after (1.36x → 1.18x
+against mysqlclient). Every other scenario is within noise of the run
+before the change (same machine, same server, minutes apart):
+
+```sh
+uv run --no-sync python benches/charsets.py --repeat 5 \
+    --json benches/results/phase2-block4-charsets-py310.json
+uv run --no-sync python benches/report.py --section phase2-block4-charsets \
+    benches/results/phase2-block4-charsets-py310.json
+```
+
+<!-- results:phase2-block4-charsets:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase2-block4-charsets-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase2-block4-charsets-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-15T21:49:25+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| fetchall 100k utf8mb4 (es + ru + zh) | **46.5 ms** | 59.0 ms | 196.1 ms | 1.27x | 4.22x |
+| fetchall 100k latin1 (Spanish) | **28.9 ms** | 52.0 ms | 130.9 ms | 1.80x | 4.52x |
+| fetchall 100k cp1251 (Russian) | **30.9 ms** | 55.7 ms | 139.2 ms | 1.80x | 4.50x |
+| fetchall 100k gbk (Chinese) | **29.5 ms** | 47.4 ms | 133.8 ms | 1.61x | 4.54x |
+| fetchall 100k latin1 (ASCII int/varchar) | **25.8 ms** | 66.7 ms | 292.6 ms | 2.59x | 11.35x |
+| executemany 10k latin1 (Spanish) | **21.5 ms** | 35.9 ms | 38.1 ms | 1.67x | 1.77x |
+| executemany 10k cp1251 (Russian) | **23.1 ms** | 34.8 ms | 39.0 ms | 1.51x | 1.69x |
+| executemany 10k gbk (Chinese) | **27.0 ms** | 32.0 ms | 33.4 ms | 1.18x | 1.24x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+<!-- results:phase2-block4-charsets:end -->

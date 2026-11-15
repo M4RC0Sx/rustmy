@@ -74,9 +74,9 @@ fn opts(server: Server, user: &str) -> Opts {
     Opts {
         host: host.to_owned(),
         port: port.parse().expect("numeric port"),
-        user: user.to_owned(),
+        user: user.into(),
         password: "rustmy".to_owned(),
-        database: Some("rustmy_test".to_owned()),
+        database: Some(b"rustmy_test".to_vec()),
         ..Opts::default()
     }
 }
@@ -366,7 +366,7 @@ fn verification_against_the_test_ca() {
 fn client_certificate_for_require_x509_account() {
     for server in servers() {
         let mut o = tls_opts(server, SslMode::VerifyIdentity, Some("ca.pem"));
-        o.user = "rustmy_x509".to_owned();
+        o.user = b"rustmy_x509".to_vec();
         o.tls.cert = Some(cert("client.pem"));
         o.tls.key = Some(cert("client-key.pem"));
         let mut conn = Conn::connect(&o).unwrap_or_else(|e| panic!("{server:?}: {e}"));
@@ -392,7 +392,7 @@ fn caching_sha2_full_authentication_over_tls() {
     // A brand-new account cannot be in the server's auth cache.
     let user = format!("fresh_{}", std::process::id());
     let mut root = tls_opts(Server::Mysql, SslMode::Required, None);
-    root.user = "root".to_owned();
+    root.user = b"root".to_vec();
     root.database = None;
     let mut admin = Conn::connect(&root).unwrap();
     admin
@@ -400,7 +400,7 @@ fn caching_sha2_full_authentication_over_tls() {
         .unwrap();
 
     let mut o = tls_opts(Server::Mysql, SslMode::Required, None);
-    o.user.clone_from(&user);
+    o.user = user.clone().into_bytes();
     o.password = "fresh-pw".to_owned();
     o.database = None;
     let mut conn = Conn::connect(&o).unwrap();
@@ -437,7 +437,7 @@ struct FreshUsers {
 impl FreshUsers {
     fn new() -> Self {
         let mut root = tls_opts(Server::Mysql, SslMode::Required, None);
-        "root".clone_into(&mut root.user);
+        root.user = b"root".to_vec();
         root.database = None;
         Self {
             admin: Conn::connect(&root).unwrap(),
@@ -487,7 +487,7 @@ fn plain_login(
     key: Option<&std::path::Path>,
 ) -> rustmy_proto::Result<Conn> {
     let mut o = tls_opts(Server::Mysql, SslMode::Disabled, None);
-    user.clone_into(&mut o.user);
+    o.user = user.into();
     password.clone_into(&mut o.password);
     o.database = None;
     o.server_public_key = key.map(std::path::Path::to_path_buf);
@@ -582,7 +582,7 @@ fn mariadb_ed25519_and_parsec_authentication() {
     for user in accounts {
         for mode in [SslMode::Disabled, SslMode::Required] {
             let mut o = tls_opts(Server::Mariadb, mode, None);
-            user.clone_into(&mut o.user);
+            o.user = user.as_bytes().to_vec();
             let mut conn = Conn::connect(&o).unwrap_or_else(|e| panic!("{user} {mode:?}: {e}"));
             let who = &table(&conn.query(b"SELECT CURRENT_USER()").unwrap())[0][0];
             assert!(who.starts_with(user), "{who}");
@@ -602,12 +602,12 @@ fn mariadb_ed25519_and_parsec_authentication() {
 fn select_db_reset_connection_and_change_user() {
     for server in servers() {
         let mut conn = connect(server);
-        conn.select_db("information_schema").unwrap();
+        conn.select_db(b"information_schema").unwrap();
         assert_eq!(
             table(&conn.query(b"SELECT DATABASE()").unwrap()),
             [["information_schema"]]
         );
-        let err = conn.select_db("no_such_db").unwrap_err();
+        let err = conn.select_db(b"no_such_db").unwrap_err();
         assert!(matches!(err, Error::Server { .. }), "{server:?}: {err}");
 
         let id = conn.connection_id();
@@ -619,12 +619,12 @@ fn select_db_reset_connection_and_change_user() {
             [[id.to_string()]]
         );
 
-        conn.change_user("root", "rustmy", Some("rustmy_test"))
+        conn.change_user(b"root", "rustmy", Some(b"rustmy_test"))
             .unwrap();
         let who = &table(&conn.query(b"SELECT CURRENT_USER()").unwrap())[0][0];
         assert!(who.starts_with("root@"), "{server:?}: {who}");
 
-        let err = conn.change_user("root", "wrong", None).unwrap_err();
+        let err = conn.change_user(b"root", "wrong", None).unwrap_err();
         assert!(
             matches!(err, Error::Server { code: 1045, .. }),
             "{server:?}: {err}"

@@ -1,0 +1,86 @@
+{
+  "date": "2026-11-15T21:49:25+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 5,
+  "scenarios": [
+    {
+      "name": "fetchall 100k utf8mb4 (es + ru + zh)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.046455666997644585,
+        "mysqlclient": 0.05902274999971269,
+        "pymysql": 0.19609504200343508
+      }
+    },
+    {
+      "name": "fetchall 100k latin1 (Spanish)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.028935082998941652,
+        "mysqlclient": 0.05199033299868461,
+        "pymysql": 0.13090387499687495
+      }
+    },
+    {
+      "name": "fetchall 100k cp1251 (Russian)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.03091862500150455,
+        "mysqlclient": 0.055700750002870336,
+        "pymysql": 0.1391652919992339
+      }
+    },
+    {
+      "name": "fetchall 100k gbk (Chinese)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.029480665994924493,
+        "mysqlclient": 0.04737416699936148,
+        "pymysql": 0.13379470800282434
+      }
+    },
+    {
+      "name": "fetchall 100k latin1 (ASCII int/varchar)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.025774458998057526,
+        "mysqlclient": 0.06669154200062621,
+        "pymysql": 0.29259924999496434
+      }
+    },
+    {
+      "name": "executemany 10k latin1 (Spanish)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.021511792001547292,
+        "mysqlclient": 0.035929249999753665,
+        "pymysql": 0.038053584001318086
+      }
+    },
+    {
+      "name": "executemany 10k cp1251 (Russian)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.023105166997993365,
+        "mysqlclient": 0.034817374995327555,
+        "pymysql": 0.03900254199834308
+      }
+    },
+    {
+      "name": "executemany 10k gbk (Chinese)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.027039541993872263,
+        "mysqlclient": 0.032026415996369906,
+        "pymysql": 0.033441750005295034
+      }
+    }
+  ]
+}

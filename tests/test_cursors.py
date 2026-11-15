@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import _thread
 import contextlib
+import gc
 import threading
 import time
 import uuid
@@ -187,6 +188,26 @@ def test_callproc(
 
     cursor.execute(f"SELECT @`_{quoted}_1`, @`_{quoted}_2`")
     assert cursor.fetchall() == [(42, "HI")]
+
+
+def test_callproc_with_a_database_name(conn: rustmy.Connection, procedure: str) -> None:
+    # Unlike PyMySQL and mysqlclient, which quote the whole name as one.
+    cursor = conn.cursor()
+    cursor.execute("USE information_schema")  # elsewhere, to need the name
+    try:
+        cursor.callproc(f"rustmy_test.{procedure}", (2, None, "ab"))
+        quoted = procedure.replace("`", "``")
+        variable = f"@`_rustmy_test.{quoted}"
+        assert cursor._executed == (  # noqa: SLF001
+            f"CALL `rustmy_test`.`{quoted}`({variable}_0`,{variable}_1`,{variable}_2`)"
+        )
+        assert cursor.fetchall() == [(2,)]
+        while cursor.nextset():
+            pass
+        cursor.execute(f"SELECT {variable}_1`, {variable}_2`")
+        assert cursor.fetchall() == [(4, "AB")]
+    finally:
+        cursor.execute("USE rustmy_test")
 
 
 def test_callproc_without_args(cursor: Cursor) -> None:
@@ -560,16 +581,25 @@ def test_ctrl_c_interrupts_a_long_buffered_read(conn: rustmy.Connection) -> None
     # first. Checked between batches, it stops the read right after that
     # pause instead of when the whole result has arrived.
     cursor = conn.cursor()
-    timer = threading.Timer(0.1, _thread.interrupt_main)
-    timer.start()
-    start = time.perf_counter()
-    with pytest.raises(KeyboardInterrupt):
-        cursor.execute(
-            "SELECT n, SLEEP(CASE n WHEN 2000 THEN 0.2 WHEN 9000 THEN 1 ELSE 0 END) "
-            f"FROM ({MANY} LIMIT 10000) AS numbers"
-        )
-    elapsed = time.perf_counter() - start
-    timer.join()
+    # Python code in a gc callback can take the interrupt instead, and
+    # CPython drops exceptions raised there (unraisable). Hypothesis installs
+    # one once a property test has run in the same process, so the outcome
+    # depended on test order: run without callbacks.
+    callbacks = gc.callbacks[:]
+    gc.callbacks.clear()
+    try:
+        timer = threading.Timer(0.1, _thread.interrupt_main)
+        timer.start()
+        start = time.perf_counter()
+        with pytest.raises(KeyboardInterrupt):
+            cursor.execute(
+                "SELECT n, SLEEP(CASE n WHEN 2000 THEN 0.2 WHEN 9000 THEN 1 "
+                f"ELSE 0 END) FROM ({MANY} LIMIT 10000) AS numbers"
+            )
+        elapsed = time.perf_counter() - start
+        timer.join()
+    finally:
+        gc.callbacks[:] = callbacks
     assert elapsed < 0.8
     assert cursor.description is None
     # The next command discards the rest quietly.

@@ -145,6 +145,8 @@ class Connection:
             ssl_key=ssl_key,
             ssl=ssl,
         )
+        # Set by close(), unlike `_conn.closed`, which a broken connection sets too.
+        self._closed = False
         self._conn = _core.connect(
             host=host,
             port=port,
@@ -170,9 +172,12 @@ class Connection:
         if conv is not None:
             decoders, encoders = split_conv(conv)
             self._conn.set_converters(decoders, encoders, conv)
-        # The session gets the character set (with the server's default
-        # collation for it) in the handshake; SET NAMES is only needed for
-        # an explicit collation or after set_character_set().
+        # The handshake asks for the character set (with the server's
+        # default collation for it). SET NAMES follows for an explicit
+        # collation, after set_character_set(), and for any character set
+        # other than the server's own: a server silently ignores a collation
+        # id it does not know (MariaDB has no gb18030) and keeps its
+        # default, so only SET NAMES turns that into an error.
         self._collation = collation
         self._set_names = collation is not None
         self._sql_mode = sql_mode
@@ -184,15 +189,16 @@ class Connection:
             self._conn.close()
             raise
 
-    def _init_session(self, *, after_reset: bool = False) -> None:
+    def _init_session(self) -> None:
         """Apply the per-session settings chosen at connect time.
 
-        MySQL's reset returns the session to the server's default character
-        set rather than the one negotiated at connect time (MariaDB keeps
-        it), so a different one is set again.
+        A character set other than the server's own is set again after a
+        reset too: MySQL's reset returns the session to the server's default
+        character set rather than the one negotiated at connect time
+        (MariaDB keeps it).
         """
         conn = self._conn
-        if self._set_names or (after_reset and conn.charset != conn.server_charset):
+        if self._set_names or conn.charset != conn.server_charset:
             conn.set_character_set(conn.charset, self._collation)
         if self._sql_mode is not None:
             self._conn.execute("SET sql_mode = %s", (self._sql_mode,))
@@ -306,7 +312,7 @@ class Connection:
         again. Useful for connection pools.
         """
         self._conn.reset_connection()
-        self._init_session(after_reset=True)
+        self._init_session()
 
     def change_user(
         self, user: str, password: str = "", database: str | None = None
@@ -321,7 +327,15 @@ class Connection:
         self._init_session()
 
     def close(self) -> None:
-        """Close the connection. Calling it again is a no-op."""
+        """Close the connection.
+
+        Closing it again raises :exc:`InterfaceError`, as PEP 249 asks of
+        any use of a closed connection (leaving a ``with`` block does not).
+        A connection that broke (server gone, timeout) can still be closed.
+        """
+        if self._closed:
+            raise err.InterfaceError(0, "connection already closed")
+        self._closed = True
         self._conn.close()
 
     @property
@@ -371,4 +385,5 @@ class Connection:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self.close()
+        if not self._closed:
+            self.close()

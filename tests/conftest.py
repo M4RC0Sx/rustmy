@@ -22,6 +22,8 @@ from typing import Any
 
 import pytest
 
+from hypothesis import settings
+
 import rustmy
 
 
@@ -43,6 +45,15 @@ def _selected_servers() -> tuple[list[str], bool]:
 
 
 _SERVERS, _EXPLICIT = _selected_servers()
+
+# Property tests run against real servers: no per-example deadline (network
+# latency varies) and, on failure, the blob that replays the exact example
+# (`@reproduce_failure`). The seed is random on purpose, CI included: every
+# run explores new examples. `--hypothesis-profile thorough` before closing
+# a block.
+settings.register_profile("default", max_examples=100, deadline=None, print_blob=True)
+settings.register_profile("thorough", max_examples=5000, deadline=None, print_blob=True)
+settings.load_profile("default")
 
 
 @dataclass(frozen=True)
@@ -76,14 +87,20 @@ def _reachable(host: str, port: int) -> bool:
         return False
 
 
-@pytest.fixture(scope="session", params=_SERVERS)
-def server(request: pytest.FixtureRequest) -> Server:
-    name: str = request.param
+def resolve_server(name: str) -> Server:
+    """The server ``name``, skipping when it is not selected or not running."""
+    if name not in _SERVERS:
+        pytest.skip(f"{name} is not in RUSTMY_TEST_SERVERS")
     env_var, default = _ENDPOINTS[name]
     host, _, port = os.environ.get(env_var, default).rpartition(":")
     if not _EXPLICIT and not _reachable(host, int(port)):
         pytest.skip(f"{name} is not running (docker compose up -d --wait)")
     return Server(name, host, int(port))
+
+
+@pytest.fixture(scope="session", params=_SERVERS)
+def server(request: pytest.FixtureRequest) -> Server:
+    return resolve_server(request.param)
 
 
 @pytest.fixture

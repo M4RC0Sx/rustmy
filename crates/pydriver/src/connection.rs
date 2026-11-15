@@ -27,6 +27,7 @@ use rustmy_proto::ReadOutcome;
 use rustmy_proto::SslMode;
 use rustmy_proto::StreamId;
 use rustmy_proto::TlsOpts;
+use rustmy_proto::charset::charset_of;
 use rustmy_proto::constants::status;
 use rustmy_proto::sql::insert_values;
 
@@ -689,7 +690,8 @@ impl Connection {
     }
 
     fn select_db(&self, py: Python<'_>, database: &str) -> PyResult<()> {
-        self.with_conn(py, |conn| conn.select_db(database))
+        let database = self.codec().encode(py, database)?;
+        self.with_conn(py, |conn| conn.select_db(&database))
     }
 
     fn reset_connection(&self, py: Python<'_>) -> PyResult<()> {
@@ -704,12 +706,21 @@ impl Connection {
         password: &str,
         database: Option<&str>,
     ) -> PyResult<()> {
+        // The packet names the handshake's collation, and the server reads
+        // the user and database in its character set (which may not be the
+        // session's after set_character_set()).
+        let codec = match self.peek(|conn| charset_of(conn.collation()))? {
+            Some(name) if name != self.codec().name() => Codec::new(py, name)?,
+            _ => self.codec(),
+        };
+        let user = codec.encode(py, user)?;
+        let database = database.map(|db| codec.encode(py, db)).transpose()?;
         // A failed COM_CHANGE_USER makes MySQL drop the connection while
         // MariaDB keeps the old user: treat the connection as gone on every
         // error so behaviour does not depend on the server.
         self.run(
             py,
-            |conn| conn.change_user(user, password, database),
+            |conn| conn.change_user(&user, password, database.as_deref()),
             |_| true,
         )
     }
@@ -866,9 +877,9 @@ pub(crate) fn connect(
     py: Python<'_>,
     host: String,
     port: u16,
-    user: String,
+    user: &str,
     password: String,
-    database: Option<String>,
+    database: Option<&str>,
     unix_socket: Option<PathBuf>,
     connect_timeout: Option<f64>,
     read_timeout: Option<f64>,
@@ -892,6 +903,9 @@ pub(crate) fn connect(
         |p| format!("'{}'", p.display()),
     );
     let codec = Codec::new(py, charset)?;
+    // The server reads both in the session's character set.
+    let user = codec.encode(py, user)?;
+    let database = database.map(|db| codec.encode(py, db)).transpose()?;
     let opts = Opts {
         host,
         port,
