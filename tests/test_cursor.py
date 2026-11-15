@@ -62,6 +62,9 @@ def test_dml_reports_rowcount_and_lastrowid(cursor: rustmy.Cursor) -> None:
     assert cursor.execute("UPDATE t SET v = v + 1") == 2
     with pytest.raises(rustmy.ProgrammingError, match="no result set"):
         cursor.fetchone()
+    # PEP 249: no row id for a statement that returns rows (as PyMySQL).
+    cursor.execute("SELECT v FROM t")
+    assert cursor.lastrowid is None
 
 
 def test_executemany(cursor: rustmy.Cursor) -> None:

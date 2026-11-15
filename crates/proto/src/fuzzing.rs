@@ -108,9 +108,9 @@ pub fn text_values(data: &[u8]) {
 /// multiple results and the other commands.
 pub fn session(data: &[u8]) {
     let opts = Opts {
-        user: "fuzz".to_owned(),
+        user: b"fuzz".to_vec(),
         password: "secret".to_owned(),
-        database: Some("db".to_owned()),
+        database: Some(b"db".to_vec()),
         client_flag: capability::MULTI_STATEMENTS,
         tls: TlsOpts {
             mode: SslMode::Disabled,
@@ -136,8 +136,8 @@ pub fn session(data: &[u8]) {
         let _ = conn.read_rows(id, &mut head.rows, usize::MAX);
     }
     let _ = conn.ping();
-    let _ = conn.select_db("db");
+    let _ = conn.select_db(b"db");
     let _ = conn.reset_connection();
-    let _ = conn.change_user("other", "pw", Some("db"));
+    let _ = conn.change_user(b"other", "pw", Some(b"db"));
     let _ = conn.query(b"SELECT 2");
 }

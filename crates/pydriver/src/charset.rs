@@ -2,12 +2,16 @@
 //!
 //! UTF-8 takes the fast path it always had. Single-byte character sets use
 //! a 256-entry table built at connect time from Python's own codec, so
-//! results are identical to Python's while every cell is decoded in Rust.
-//! Multi-byte legacy character sets call `CPython`'s decoder directly (the
-//! only `unsafe` in the crate's charset handling). Every supported
-//! character set is ASCII-compatible (checked when the codec is built), so
-//! ASCII text skips the tables and the decoder.
+//! every cell is decoded in Rust. Multi-byte legacy character sets call
+//! `CPython`'s codec directly (the only `unsafe` in the crate's charset
+//! handling). Every supported character set is ASCII-compatible (checked
+//! when the codec is built), so ASCII text skips the tables and the codec.
+//!
+//! The server's definition of a character set wins over Python's codec
+//! where they differ (`Fixes`): text the server would store as something
+//! else is translated, text it cannot store is refused before sending.
 
+use std::borrow::Cow;
 use std::ffi::CStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -15,6 +19,7 @@ use std::sync::LazyLock;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use pyo3::types::PyDict;
 use pyo3::types::PyString;
 
 use crate::errors::DataError;
@@ -36,53 +41,183 @@ struct Spec {
     name: &'static str,
     python: &'static CStr,
     family: Family,
+    fixes: &'static Fixes,
 }
 
 const fn spec(name: &'static str, python: &'static CStr, family: Family) -> Spec {
+    fixed(name, python, family, &Fixes::NONE)
+}
+
+const fn fixed(
+    name: &'static str,
+    python: &'static CStr,
+    family: Family,
+    fixes: &'static Fixes,
+) -> Spec {
     Spec {
         name,
         python,
         family,
+        fixes,
     }
 }
 
-/// MySQL character sets with a Python codec. `latin1` is MySQL's own
-/// definition: cp1252 plus the five bytes cp1252 leaves undefined, which
-/// MySQL maps to the C1 controls of the same value.
+/// Where the server's definition of a character set differs from Python's
+/// codec. Found by comparing every character both ways on every supported
+/// server version (all of them agree) and checked by `tests/test_charsets.py`.
+#[derive(Debug)]
+struct Fixes {
+    /// Single-byte: the server's character for these bytes (`None`: the
+    /// server has none).
+    bytes: &'static [(u8, Option<char>)],
+    /// Multi-byte: characters Python can encode and the server cannot
+    /// represent (it would store `?`).
+    missing: &'static [char],
+    /// Multi-byte: characters the server encodes as Python encodes another
+    /// one: `(character, what to hand Python's encoder instead)`.
+    encode_as: &'static [(char, char)],
+    /// Multi-byte: byte sequences the server reads as a different character
+    /// than Python does: `(bytes, Python's character, the server's)`.
+    decode_as: &'static [(&'static [u8], char, char)],
+}
+
+impl Fixes {
+    const NONE: Self = Self {
+        bytes: &[],
+        missing: &[],
+        encode_as: &[],
+        decode_as: &[],
+    };
+}
+
+/// MySQL's latin1 is cp1252 plus the five bytes cp1252 leaves undefined,
+/// mapped to the C1 controls of the same value.
+const LATIN1: Fixes = Fixes {
+    bytes: &[
+        (0x81, Some('\u{81}')),
+        (0x8D, Some('\u{8D}')),
+        (0x8F, Some('\u{8F}')),
+        (0x90, Some('\u{90}')),
+        (0x9D, Some('\u{9D}')),
+    ],
+    ..Fixes::NONE
+};
+
+/// The server's cp1256 predates the Urdu letters Windows added later.
+const CP1256: Fixes = Fixes {
+    bytes: &[
+        (0x8A, None),
+        (0x8F, None),
+        (0x98, None),
+        (0x9A, None),
+        (0x9F, None),
+        (0xAA, None),
+        (0xC0, None),
+        (0xFF, None),
+    ],
+    ..Fixes::NONE
+};
+
+const CP866: Fixes = Fixes {
+    bytes: &[(0xFC, Some('\u{207F}')), (0xFD, Some('\u{B2}'))],
+    ..Fixes::NONE
+};
+
+const KOI8U: Fixes = Fixes {
+    bytes: &[(0x95, Some('\u{2022}'))],
+    ..Fixes::NONE
+};
+
+/// The server's greek is ISO 8859-7:1987: modifier letters where the 2003
+/// edition has quotation marks, and no euro, drachma or ypogegrammeni.
+const GREEK: Fixes = Fixes {
+    bytes: &[
+        (0xA1, Some('\u{2BD}')),
+        (0xA2, Some('\u{2BC}')),
+        (0xA4, None),
+        (0xA5, None),
+        (0xAA, None),
+    ],
+    ..Fixes::NONE
+};
+
+const HEBREW: Fixes = Fixes {
+    bytes: &[(0xAF, Some('\u{203E}'))],
+    ..Fixes::NONE
+};
+
+const BIG5: Fixes = Fixes {
+    missing: &['\u{2CD}', '\u{2574}', '\u{FFE3}'],
+    ..Fixes::NONE
+};
+
+const CP932: Fixes = Fixes {
+    missing: &['\u{80}', '\u{F8F0}', '\u{F8F1}', '\u{F8F2}', '\u{F8F3}'],
+    ..Fixes::NONE
+};
+
+/// The server reads the full-width backslash's bytes as an ASCII backslash
+/// (as text: they still form one two-byte character, so nothing is
+/// escaped). `¥` and `‾`, which Python encodes as `\\` and `~`, are caught by
+/// the round-trip check in `encode_multibyte`.
+const SJIS: Fixes = Fixes {
+    missing: &['\u{FF3C}'],
+    decode_as: &[(b"\x81\x5F", '\u{FF3C}', '\\')],
+    ..Fixes::NONE
+};
+
+const UJIS: Fixes = Fixes {
+    missing: &['\u{FF3C}'],
+    decode_as: &[(b"\xA1\xC0", '\u{FF3C}', '\\')],
+    ..Fixes::NONE
+};
+
+/// The server follows GB 18030-2005, Python the 2000 edition: two code
+/// points swap places.
+const GB18030: Fixes = Fixes {
+    encode_as: &[('\u{1E3F}', '\u{E7C7}'), ('\u{E7C7}', '\u{1E3F}')],
+    decode_as: &[
+        (b"\xA8\xBC", '\u{E7C7}', '\u{1E3F}'),
+        (b"\x81\x35\xF4\x37", '\u{1E3F}', '\u{E7C7}'),
+    ],
+    ..Fixes::NONE
+};
+
+/// MySQL character sets with a Python codec. `euckr` is the server's: the
+/// Unified Hangul Code (cp949), which covers every Hangul syllable, not
+/// just the 2350 of EUC-KR (Python's `euc_kr` spells the others as
+/// sequences of jamo, which the server stores as such).
 const SUPPORTED: &[Spec] = &[
     spec("utf8mb4", c"utf8", Family::Utf8),
     spec("utf8mb3", c"utf8", Family::Utf8Mb3),
     spec("ascii", c"ascii", Family::SingleByte),
-    spec("latin1", c"cp1252", Family::SingleByte),
+    fixed("latin1", c"cp1252", Family::SingleByte, &LATIN1),
     spec("latin2", c"iso8859_2", Family::SingleByte),
     spec("latin5", c"iso8859_9", Family::SingleByte),
     spec("latin7", c"iso8859_13", Family::SingleByte),
     spec("cp1250", c"cp1250", Family::SingleByte),
     spec("cp1251", c"cp1251", Family::SingleByte),
-    spec("cp1256", c"cp1256", Family::SingleByte),
+    fixed("cp1256", c"cp1256", Family::SingleByte, &CP1256),
     spec("cp1257", c"cp1257", Family::SingleByte),
     spec("cp850", c"cp850", Family::SingleByte),
     spec("cp852", c"cp852", Family::SingleByte),
-    spec("cp866", c"cp866", Family::SingleByte),
+    fixed("cp866", c"cp866", Family::SingleByte, &CP866),
     spec("koi8r", c"koi8_r", Family::SingleByte),
-    spec("koi8u", c"koi8_u", Family::SingleByte),
-    spec("greek", c"iso8859_7", Family::SingleByte),
-    spec("hebrew", c"iso8859_8", Family::SingleByte),
+    fixed("koi8u", c"koi8_u", Family::SingleByte, &KOI8U),
+    fixed("greek", c"iso8859_7", Family::SingleByte, &GREEK),
+    fixed("hebrew", c"iso8859_8", Family::SingleByte, &HEBREW),
     spec("macroman", c"mac_roman", Family::SingleByte),
     spec("macce", c"mac_latin2", Family::SingleByte),
     spec("tis620", c"tis_620", Family::SingleByte),
-    spec("big5", c"big5", Family::MultiByte),
-    spec("cp932", c"cp932", Family::MultiByte),
-    spec("euckr", c"euc_kr", Family::MultiByte),
+    fixed("big5", c"big5", Family::MultiByte, &BIG5),
+    fixed("cp932", c"cp932", Family::MultiByte, &CP932),
+    spec("euckr", c"cp949", Family::MultiByte),
     spec("gb2312", c"gb2312", Family::MultiByte),
-    spec("gb18030", c"gb18030", Family::MultiByte),
+    fixed("gb18030", c"gb18030", Family::MultiByte, &GB18030),
     spec("gbk", c"gbk", Family::MultiByte),
-    spec("sjis", c"shift_jis", Family::MultiByte),
-    spec("ujis", c"euc_jp", Family::MultiByte),
+    fixed("sjis", c"shift_jis", Family::MultiByte, &SJIS),
+    fixed("ujis", c"euc_jp", Family::MultiByte, &UJIS),
 ];
-
-/// Bytes MySQL's latin1 defines and cp1252 does not.
-const LATIN1_C1: [u8; 5] = [0x81, 0x8D, 0x8F, 0x90, 0x9D];
 
 /// Why a character set cannot be the connection's, for the error message.
 fn unsupported_reason(name: &str) -> &'static str {
@@ -123,6 +258,7 @@ pub(crate) struct Codec {
     /// Python codec name.
     python: &'static CStr,
     kind: Kind,
+    fixes: &'static Fixes,
 }
 
 /// UTF-8 (`utf8mb4`), the default.
@@ -131,6 +267,7 @@ pub(crate) static UTF8: LazyLock<Arc<Codec>> = LazyLock::new(|| {
         name: "utf8mb4",
         python: c"utf8",
         kind: Kind::Utf8 { mb3: false },
+        fixes: &Fixes::NONE,
     })
 });
 
@@ -164,6 +301,7 @@ impl Codec {
             name: spec.name,
             python: spec.python,
             kind,
+            fixes: spec.fixes,
         }))
     }
 
@@ -217,7 +355,16 @@ impl Codec {
                 }
                 Ok(PyString::new(py, &text))
             }
-            Kind::MultiByte => self.decode_with_python(py, bytes),
+            Kind::MultiByte => {
+                let decoded = self.decode_with_python(py, bytes)?;
+                let fixes = self.fixes.decode_as;
+                if fixes.iter().any(|(seq, ..)| contains(bytes, seq)) {
+                    // A byte match may straddle two characters; translating
+                    // the decoded text only touches the real ones.
+                    return Ok(self.decode_fixes(py, &decoded)?.cast_into::<PyString>()?);
+                }
+                Ok(decoded)
+            }
         }
     }
 
@@ -240,7 +387,33 @@ impl Codec {
         py: Python<'py>,
         bytes: &[u8],
     ) -> PyResult<Bound<'py, PyAny>> {
-        PyBytes::new(py, bytes).call_method1("decode", (self.python, "surrogateescape"))
+        let decoded =
+            PyBytes::new(py, bytes).call_method1("decode", (self.python, "surrogateescape"))?;
+        if self.fixes.decode_as.is_empty() {
+            Ok(decoded)
+        } else {
+            self.decode_fixes(py, &decoded)
+        }
+    }
+
+    /// `text` (decoded by Python's codec) with the server's characters.
+    fn decode_fixes<'py>(
+        &self,
+        py: Python<'py>,
+        text: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let table = PyDict::new(py);
+        for &(_, python, server) in self.fixes.decode_as {
+            table.set_item(u32::from(python), u32::from(server))?;
+        }
+        text.call_method1("translate", (table,))
+    }
+
+    /// `text` encoded in this character set.
+    pub(crate) fn encode(&self, py: Python<'_>, text: &str) -> PyResult<Vec<u8>> {
+        let mut out = Vec::with_capacity(text.len());
+        self.encode_into(py, &mut out, text)?;
+        Ok(out)
     }
 
     /// Appends `text` encoded in this character set.
@@ -273,14 +446,75 @@ impl Codec {
                     }
                 }
             }
-            Kind::MultiByte => {
-                let encoded = PyString::new(py, text)
-                    .call_method1("encode", (self.python, "strict"))
-                    .map_err(|err| self.encode_error(py, &err))?;
-                out.extend_from_slice(encoded.cast::<PyBytes>()?.as_bytes());
-            }
+            Kind::MultiByte => self.encode_multibyte(py, out, text)?,
         }
         Ok(())
+    }
+
+    /// Encodes non-ASCII text with Python's codec, refusing what the server
+    /// would read as anything else.
+    fn encode_multibyte(&self, py: Python<'_>, out: &mut Vec<u8>, text: &str) -> PyResult<()> {
+        if let Some(c) = text.chars().find(|c| self.fixes.missing.contains(c)) {
+            return Err(self.unencodable(c));
+        }
+        let swaps = self.fixes.encode_as;
+        let text: Cow<'_, str> = if text
+            .chars()
+            .any(|c| swaps.iter().any(|&(from, _)| from == c))
+        {
+            Cow::Owned(
+                text.chars()
+                    .map(|c| {
+                        swaps
+                            .iter()
+                            .find(|&&(from, _)| from == c)
+                            .map_or(c, |&(_, to)| to)
+                    })
+                    .collect(),
+            )
+        } else {
+            Cow::Borrowed(text)
+        };
+        let original = PyString::new(py, &text);
+        let encoded = original
+            .call_method1("encode", (self.python, "strict"))
+            .map_err(|err| self.encode_error(py, &err))?;
+        let encoded = encoded.cast::<PyBytes>()?.as_bytes();
+        // Python's codecs map a few characters one way only: shift_jis and
+        // euc_jp encode `¥` as 0x5C, which the server reads as a backslash
+        // (an escape: with the quote after it, a way out of the string), and
+        // cp932 encodes `¢` as the bytes of the full-width `￠`. Text must
+        // come back unchanged, or it is refused.
+        let back = self.decode_with_python(py, encoded)?;
+        if !PyAnyMethods::eq(back.as_any(), &original)? {
+            return Err(self.one_way_error(py, &text));
+        }
+        out.extend_from_slice(encoded);
+        Ok(())
+    }
+
+    /// The error for text that does not survive Python's codec both ways,
+    /// naming the first character that does not.
+    fn one_way_error(&self, py: Python<'_>, text: &str) -> PyErr {
+        let mut buf = [0u8; 4];
+        let mut survives = |c: char| -> PyResult<bool> {
+            let original = PyString::new(py, c.encode_utf8(&mut buf));
+            let encoded = original.call_method1("encode", (self.python, "strict"))?;
+            let back = self.decode_with_python(py, encoded.cast::<PyBytes>()?.as_bytes())?;
+            PyAnyMethods::eq(back.as_any(), &original)
+        };
+        for c in text.chars().filter(|c| !c.is_ascii()) {
+            if !survives(c).unwrap_or(false) {
+                return self.unencodable(c);
+            }
+        }
+        DataError::new_err((
+            0,
+            format!(
+                "text cannot be encoded unchanged in the connection's character set {}",
+                self.name
+            ),
+        ))
     }
 
     fn decode_with_python<'py>(
@@ -348,6 +582,13 @@ impl Codec {
     }
 }
 
+/// Whether `needle` occurs in `haystack`.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
 /// `bytes` as `&str`; only called on ASCII, which is valid UTF-8.
 fn ascii(bytes: &[u8]) -> &str {
     std::str::from_utf8(bytes).unwrap_or_default()
@@ -365,11 +606,9 @@ fn single_byte_table(py: Python<'_>, spec: Spec) -> PyResult<SingleByte> {
             }
         }
     }
-    if spec.name == "latin1" {
-        for byte in LATIN1_C1 {
-            if let Some(slot) = decode.get_mut(usize::from(byte)) {
-                *slot = Some(char::from(byte));
-            }
+    for &(byte, c) in spec.fixes.bytes {
+        if let Some(slot) = decode.get_mut(usize::from(byte)) {
+            *slot = c;
         }
     }
     let ascii_compatible = (0..128u8)

@@ -181,6 +181,11 @@ class Cursor:
         ``SELECT @_procname_0, …``. The procedure's own result sets come
         first, followed by the empty one of the ``CALL`` itself: read them
         all with :meth:`nextset`. Returns ``args`` unchanged.
+
+        ``procname`` may name the database too (``db.proc``): the first dot
+        separates them, so a procedure whose own name has a dot cannot be
+        called this way. The variables keep the whole name
+        (``@_db.proc_0``).
         """
         name = procname.replace("`", "``")
         if args:
@@ -189,7 +194,8 @@ class Cursor:
             assignments = ",".join(f"@`_{template}_{i}`=%s" for i in range(len(args)))
             self.execute(f"SET {assignments}", tuple(args))
         variables = ",".join(f"@`_{name}_{i}`" for i in range(len(args)))
-        self.execute(f"CALL `{name}`({variables})")
+        quoted = "`.`".join(name.split(".", 1))
+        self.execute(f"CALL `{quoted}`({variables})")
         return args
 
     def nextset(self) -> bool | None:
@@ -208,7 +214,8 @@ class Cursor:
         self._rows = [] if rows is None else rows
         self._pos = 0
         self.rowcount = rowcount
-        self.lastrowid = lastrowid
+        # PEP 249: None when the statement set no row id (it returned rows).
+        self.lastrowid = None if description is not None else lastrowid
 
     def _check_result(self) -> None:
         if self.description is None:
@@ -344,7 +351,7 @@ class SSCursor(Cursor):
         self.description = description
         self._stream = stream
         self.rowcount = rowcount
-        self.lastrowid = lastrowid
+        self.lastrowid = None if description is not None else lastrowid
 
     def _active(self) -> ResultStream:
         self._check_result()

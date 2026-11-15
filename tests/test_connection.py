@@ -64,8 +64,12 @@ def test_wrong_password_is_operational_error(server: Server) -> None:
 def test_closed_connection_raises_interface_error(server: Server) -> None:
     conn = server.connect()
     conn.close()
-    conn.close()  # idempotent
     assert not conn.open
+    # PEP 249: any use of a closed connection raises, closing it included.
+    with pytest.raises(rustmy.InterfaceError, match="already closed"):
+        conn.close()
+    with server.connect() as closed_inside:
+        closed_inside.close()  # leaving the block does not close it again
     with pytest.raises(rustmy.InterfaceError):
         conn.cursor().execute("SELECT 1")
 
