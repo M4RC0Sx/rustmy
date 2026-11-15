@@ -85,7 +85,15 @@ BATCH_SIZES = {
     "256 KiB": 256 * 1024,
     "1 MiB": 1024 * 1024,
 }
-#: Label of rustmy's default ``SSCursor._batch_bytes``.
+#: How the reference drivers appear in each sweep.
+SWEEP_LABELS = {
+    "SSCursor": {
+        "mysqlclient": "mysqlclient (row by row)",
+        "pymysql": "PyMySQL (row by row)",
+    },
+    "Cursor": {"mysqlclient": "mysqlclient", "pymysql": "PyMySQL"},
+}
+#: Label of rustmy's default ``Cursor._batch_bytes``.
 DEFAULT_BATCH = "4 KiB"
 
 
@@ -225,9 +233,10 @@ def timed(run: Callable[[Any, Any], None]) -> Callable[[Any, Any, int], float]:
 
 
 def with_batch(size: int) -> Any:
-    """rustmy's cursor module with SSCursor reading batches of ``size``."""
+    """rustmy's cursor module with cursors reading batches of ``size``."""
 
     class Cursors:
+        Cursor = type("Cursor", (rustmy.cursors.Cursor,), {"_batch_bytes": size})
         SSCursor = type("SSCursor", (rustmy.cursors.SSCursor,), {"_batch_bytes": size})
 
     return Cursors
@@ -334,19 +343,26 @@ def run_scenarios(connections: dict[str, Any], repeat: int) -> list[dict[str, An
     return results
 
 
-def run_sweep(connections: dict[str, Any], repeat: int) -> list[dict[str, Any]]:
-    """Iteration of narrow, mixed and ~1 KiB rows (where a small batch holds
-    few rows), and the time to the first row, per batch size.
+def run_sweep(
+    connections: dict[str, Any], repeat: int, kind: str
+) -> list[dict[str, Any]]:
+    """Narrow, mixed and ~1 KiB rows (where a small batch holds few rows) per
+    batch size: iterating an SSCursor (plus its time to the first row), or a
+    buffered Cursor's fetchall.
     """
-    panels: list[tuple[str, Callable[[Any, Any, int], float]]] = [
-        (f"iterate {ROWS // 1000}k {label}", timed(iterate("SSCursor", sql, ROWS)))
-        for label, sql in (
-            ("int/varchar", INTVARCHAR),
-            ("mixed", MIXED),
-            ("1 KiB", WIDE),
-        )
-    ]
-    panels.append((f"first row of {BIG_ROWS // 1_000_000}M", first_row_time))
+    tables = (("int/varchar", INTVARCHAR), ("mixed", MIXED), ("1 KiB", WIDE))
+    panels: list[tuple[str, Callable[[Any, Any, int], float]]]
+    if kind == "Cursor":
+        panels = [
+            (f"fetchall {ROWS // 1000}k {label}", timed(fetchall("Cursor", sql, ROWS)))
+            for label, sql in tables
+        ]
+    else:
+        panels = [
+            (f"iterate {ROWS // 1000}k {label}", timed(iterate("SSCursor", sql, ROWS)))
+            for label, sql in tables
+        ]
+        panels.append((f"first row of {BIG_ROWS // 1_000_000}M", first_row_time))
     sweep = []
     for title, measure in panels:
         seconds = {
@@ -358,7 +374,7 @@ def run_sweep(connections: dict[str, Any], repeat: int) -> list[dict[str, Any]]:
                 connections["rustmy"], with_batch(size), repeat
             )
         sweep.append({"rows": ROWS, "label": title, "seconds": seconds})
-        print(f"\nbatch sweep, SSCursor {title}")
+        print(f"\nbatch sweep, {kind} {title}")
         for config, value in seconds.items():
             ratio = seconds["mysqlclient"] / value
             print(f"  {config:<24}{value * 1000:>9.1f} ms   {ratio:>5.2f}x")
@@ -378,6 +394,12 @@ def main() -> None:
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--json", type=Path, metavar="PATH")
     parser.add_argument("--sweep-json", type=Path, metavar="PATH")
+    parser.add_argument(
+        "--sweep-cursor",
+        choices=["SSCursor", "Cursor"],
+        default="SSCursor",
+        help="cursor whose batch size is swept",
+    )
     parser.add_argument("--memory", action="store_true")
     parser.add_argument("--memory-probe", nargs=3, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -396,7 +418,7 @@ def main() -> None:
     print(f"server {meta['server']}; {meta['python']}; best of {args.repeat}\n")
 
     results = run_scenarios(connections, args.repeat)
-    sweep = run_sweep(connections, args.repeat)
+    sweep = run_sweep(connections, args.repeat, args.sweep_cursor)
     for conn in connections.values():
         conn.close()
     report: dict[str, Any] = {**meta, "scenarios": results}
@@ -411,11 +433,9 @@ def main() -> None:
             args.sweep_json,
             {
                 **meta,
-                "title": "SSCursor batch size: throughput relative to mysqlclient",
-                "labels": {
-                    "mysqlclient": "mysqlclient (row by row)",
-                    "pymysql": "PyMySQL (row by row)",
-                },
+                "title": f"{args.sweep_cursor} batch size: "
+                "throughput relative to mysqlclient",
+                "labels": SWEEP_LABELS[args.sweep_cursor],
                 "default": f"rustmy {DEFAULT_BATCH}",
                 "sweep": sweep,
             },

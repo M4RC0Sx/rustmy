@@ -39,9 +39,9 @@ DictRow: TypeAlias = dict[str, Any]
 class Cursor:
     """Buffered cursor: the whole result set is read when ``execute`` runs.
 
-    Rows are fetched from the server and converted to Python objects in one
-    go (with the GIL released while waiting on the network); the ``fetch*``
-    methods then just hand them out.
+    Rows are read in batches with the GIL released and each batch is
+    converted while the server sends the next one; the ``fetch*`` methods
+    then just hand them out. Ctrl+C interrupts a long read between batches.
     """
 
     #: Default number of rows returned by :meth:`fetchmany`.
@@ -52,6 +52,12 @@ class Cursor:
 
     #: Rows come back as dicts keyed by column name instead of tuples.
     _as_dict: ClassVar[bool] = False
+
+    #: Approximate bytes of rows read from the socket per batch: the
+    #: smallest size on par with the best in ``benches/cursors.py`` for both
+    #: buffered and streaming cursors, and the only one as quick as
+    #: mysqlclient to hand out the first row of a streamed result.
+    _batch_bytes: ClassVar[int] = 4 * 1024
 
     def __init__(self, connection: Connection) -> None:
         self._connection: Connection | None = connection
@@ -132,7 +138,9 @@ class Cursor:
         self._clear()
         self._last = (query, args)
         self._set_result(
-            connection._execute(query, args, as_dict=self._as_dict)  # noqa: SLF001
+            connection._execute(  # noqa: SLF001
+                query, args, as_dict=self._as_dict, batch_bytes=self._batch_bytes
+            )
         )
         return self.rowcount
 
@@ -187,7 +195,7 @@ class Cursor:
     def nextset(self) -> bool | None:
         """Advance to the next result set of a multi-result query."""
         result = self._get_connection()._next_result(  # noqa: SLF001
-            as_dict=self._as_dict
+            as_dict=self._as_dict, batch_bytes=self._batch_bytes
         )
         if result is None:
             return None
@@ -288,11 +296,6 @@ class SSCursor(Cursor):
     - Rows the client is slow to read keep the server waiting; past its
       ``net_write_timeout`` (60 s by default) it drops the connection.
     """
-
-    #: Approximate bytes of rows read from the socket per batch.
-    #: The smallest size on par with the best in ``benches/cursors.py``,
-    #: and the only one as quick as mysqlclient to hand out the first row.
-    _batch_bytes: ClassVar[int] = 4 * 1024
 
     def __init__(self, connection: Connection) -> None:
         super().__init__(connection)

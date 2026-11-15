@@ -159,9 +159,14 @@ class Connection:
         return self._conn.query(sql)
 
     def _execute(
-        self, query: str, args: Params, *, as_dict: bool = False
+        self,
+        query: str,
+        args: Params,
+        *,
+        as_dict: bool = False,
+        batch_bytes: int = 4096,
     ) -> QueryResult:
-        return self._conn.execute(query, args, as_dict)
+        return self._conn.execute(query, args, as_dict, batch_bytes)
 
     def _execute_streamed(
         self, query: str, args: Params, *, as_dict: bool, batch_bytes: int
@@ -176,8 +181,10 @@ class Connection:
     ) -> tuple[int, int | None, bytes | None] | None:
         return self._conn.executemany(query, seq_of_args, max_stmt_length)
 
-    def _next_result(self, *, as_dict: bool = False) -> QueryResult | None:
-        return self._conn.next_result(as_dict)
+    def _next_result(
+        self, *, as_dict: bool = False, batch_bytes: int = 4096
+    ) -> QueryResult | None:
+        return self._conn.next_result(as_dict, batch_bytes)
 
     def _next_result_streamed(
         self, *, as_dict: bool, batch_bytes: int

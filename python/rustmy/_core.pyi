@@ -22,9 +22,13 @@ StreamedResult: TypeAlias = tuple[
 ]
 
 class Connection:
-    def query(self, sql: bytes, /) -> QueryResult: ...
+    def query(self, sql: bytes, /, batch_bytes: int = 4096) -> QueryResult: ...
     def execute(
-        self, query: str, args: object = None, as_dict: bool = False
+        self,
+        query: str,
+        args: object = None,
+        as_dict: bool = False,
+        batch_bytes: int = 4096,
     ) -> QueryResult: ...
     def execute_streamed(
         self,
@@ -37,7 +41,9 @@ class Connection:
     def executemany(
         self, query: str, seq_of_args: Iterable[object], max_stmt_length: int
     ) -> tuple[int, int | None, bytes | None] | None: ...
-    def next_result(self, as_dict: bool = False) -> QueryResult | None: ...
+    def next_result(
+        self, as_dict: bool = False, batch_bytes: int = 4096
+    ) -> QueryResult | None: ...
     def next_result_streamed(
         self, as_dict: bool = False, batch_bytes: int = 4096
     ) -> StreamedResult | None: ...
