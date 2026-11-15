@@ -388,3 +388,76 @@ Times per configuration; the fastest is in bold.
 **Decision: 4 KiB** for buffered cursors too (one setting, `Cursor._batch_bytes`,
 shared with the streaming cursors): every size from 4 to 256 KiB is within
 noise, 1 MiB is slower.
+
+## Phase 2, block 3a: connection character sets (2026-11-15)
+
+Any MySQL character set with a Python codec can now be the connection's.
+Single-byte ones (latin1, cp1251…) are decoded and encoded in Rust through a
+256-entry table built at connect time from Python's own codec, so results
+are identical to Python's without calling it per cell; multi-byte ones (gbk,
+big5, sjis…) call CPython's decoder directly. ASCII text skips both.
+mysqlclient and PyMySQL decode every text cell through Python's codec
+machinery, ASCII included.
+
+`benches/charsets.py` reads text stored in utf8mb4 columns through
+connections in each character set (the server converts it, so every driver
+decodes the same bytes) and inserts it with `executemany`:
+
+```sh
+uv run --no-sync python benches/charsets.py --repeat 5 \
+    --json benches/results/phase2-block3a-charsets-py310.json
+uv run --no-sync python benches/report.py --section phase2-block3a-charsets \
+    benches/results/phase2-block3a-charsets-py310.json
+```
+
+<!-- results:phase2-block3a-charsets:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase2-block3a-charsets-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase2-block3a-charsets-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-15T20:22:51+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| fetchall 100k utf8mb4 (es + ru + zh) | **47.8 ms** | 60.6 ms | 194.4 ms | 1.27x | 4.06x |
+| fetchall 100k latin1 (Spanish) | **28.9 ms** | 51.2 ms | 128.2 ms | 1.77x | 4.43x |
+| fetchall 100k cp1251 (Russian) | **31.4 ms** | 56.2 ms | 134.6 ms | 1.79x | 4.29x |
+| fetchall 100k gbk (Chinese) | **28.8 ms** | 46.6 ms | 131.1 ms | 1.62x | 4.55x |
+| fetchall 100k latin1 (ASCII int/varchar) | **25.0 ms** | 65.5 ms | 287.9 ms | 2.62x | 11.53x |
+| executemany 10k latin1 (Spanish) | **23.0 ms** | 35.1 ms | 35.9 ms | 1.53x | 1.57x |
+| executemany 10k cp1251 (Russian) | **22.6 ms** | 33.5 ms | 38.3 ms | 1.49x | 1.70x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+<!-- results:phase2-block3a-charsets:end -->
+
+The UTF-8 path is unchanged (`spike.py` after the block; three runs gave
+int/varchar 22.8–24.1 ms against 22.4–23.7 ms before, i.e. within noise):
+
+```sh
+uv run --no-sync python benches/spike.py --repeat 7 \
+    --json benches/results/phase2-block3a-py310.json
+uv run --no-sync python benches/report.py --section phase2-block3a \
+    benches/results/phase2-block3a-py310.json
+```
+
+<!-- results:phase2-block3a:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase2-block3a-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase2-block3a-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 7 · 2026-11-15T20:23:55+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| fetchall 100k int/varchar | **23.6 ms** | 34.3 ms | 231.1 ms | 1.45x | 9.81x |
+| fetchall 100k mixed (double/datetime/date/decimal) | **43.8 ms** | 139.3 ms | 403.3 ms | 3.18x | 9.21x |
+| fetchall 100k datetime + date | **13.2 ms** | 92.5 ms | 272.2 ms | 7.02x | 20.64x |
+| fetchall 100k decimal | **11.5 ms** | 17.3 ms | 107.9 ms | 1.51x | 9.41x |
+| 10k x SELECT 1 | **650.9 ms** | 689.5 ms | 822.9 ms | 1.06x | 1.26x |
+| 10k x INSERT with params | **1182.1 ms** | 1208.7 ms | 1329.1 ms | 1.02x | 1.12x |
+| executemany 10k rows | **17.0 ms** | 30.5 ms | 30.9 ms | 1.80x | 1.82x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+<!-- results:phase2-block3a:end -->

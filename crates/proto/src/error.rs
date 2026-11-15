@@ -18,14 +18,15 @@ pub enum Error {
     Protocol(String),
 
     /// The server answered with an ERR packet.
-    #[error("({code}, {message:?})")]
+    #[error("({code}, {:?})", String::from_utf8_lossy(.message))]
     Server {
         /// MySQL error number, e.g. 1064 for a syntax error.
         code: u16,
         /// Five-character SQLSTATE, empty when the server did not send one.
         sql_state: String,
-        /// Human-readable message from the server.
-        message: String,
+        /// Human-readable message from the server, in the session's
+        /// character set (`character_set_results`) once connected.
+        message: Vec<u8>,
     },
 
     /// Invalid connection settings, e.g. an unreadable key file.

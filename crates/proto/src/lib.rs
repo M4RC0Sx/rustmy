@@ -9,6 +9,7 @@
 
 mod auth;
 mod buf;
+pub mod charset;
 mod column;
 mod conn;
 pub mod constants;

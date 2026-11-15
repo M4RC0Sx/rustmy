@@ -6,6 +6,7 @@
 //! module only builds objects.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
@@ -26,6 +27,7 @@ use rustmy_proto::constants::ColumnType;
 use rustmy_proto::constants::column_flag;
 use rustmy_proto::text;
 
+use crate::charset::Codec;
 use crate::errors::DataError;
 
 /// Python value a column is converted to.
@@ -84,10 +86,17 @@ pub(crate) struct Converter {
     decimal: Option<Py<PyType>>,
     /// One key per column for dict rows; `None` for tuple rows.
     keys: Option<Vec<Py<PyString>>>,
+    /// The session's character set: text (JSON included) arrives in it.
+    codec: Arc<Codec>,
 }
 
 impl Converter {
-    pub(crate) fn new(py: Python<'_>, columns: &[Column], as_dict: bool) -> PyResult<Self> {
+    pub(crate) fn new(
+        py: Python<'_>,
+        columns: &[Column],
+        as_dict: bool,
+        codec: &Arc<Codec>,
+    ) -> PyResult<Self> {
         let kinds: Vec<Kind> = columns.iter().map(kind).collect();
         let decimal = if kinds.contains(&Kind::Decimal) {
             Some(decimal_type(py)?.clone().unbind())
@@ -97,7 +106,8 @@ impl Converter {
         Ok(Self {
             kinds,
             decimal,
-            keys: as_dict.then(|| dict_keys(py, columns)),
+            keys: as_dict.then(|| dict_keys(py, columns, codec)),
+            codec: Arc::clone(codec),
         })
     }
 
@@ -109,9 +119,10 @@ impl Converter {
         mut push: impl FnMut(Bound<'py, PyAny>),
     ) -> PyResult<()> {
         let decimal = self.decimal.as_ref().map(|d| d.bind(py));
+        let codec = &*self.codec;
         let cell_value = |cell: Option<&[u8]>, kind: Kind| match cell {
             None => Ok(py.None().into_bound(py)),
-            Some(bytes) => value(py, kind, bytes, decimal),
+            Some(bytes) => value(py, kind, bytes, decimal, codec),
         };
         if let Some(keys) = &self.keys {
             for row in rows.rows() {
@@ -137,15 +148,16 @@ impl Converter {
 /// Dict keys: the column name, or `table.name` for a name already taken
 /// (as other MySQL drivers do; a name taken twice keeps the last value).
 /// Interned, so lookups with literal keys compare by identity.
-fn dict_keys(py: Python<'_>, columns: &[Column]) -> Vec<Py<PyString>> {
+fn dict_keys(py: Python<'_>, columns: &[Column], codec: &Codec) -> Vec<Py<PyString>> {
     let mut seen = HashSet::with_capacity(columns.len());
     columns
         .iter()
         .map(|c| {
-            let name = if seen.contains(c.name.as_str()) {
-                format!("{}.{}", c.table, c.name)
+            let column = codec.decode_lenient(py, &c.name);
+            let name = if seen.contains(column.as_str()) {
+                format!("{}.{column}", codec.decode_lenient(py, &c.table))
             } else {
-                c.name.clone()
+                column
             };
             let key = PyString::intern(py, &name).unbind();
             seen.insert(name);
@@ -161,6 +173,7 @@ pub(crate) fn result_to_py(
     py: Python<'_>,
     result: &QueryResult,
     as_dict: bool,
+    codec: &Arc<Codec>,
 ) -> PyResult<Py<PyAny>> {
     if result.columns.is_empty() {
         return (
@@ -172,11 +185,11 @@ pub(crate) fn result_to_py(
         )
             .into_py_any(py);
     }
-    let converter = Converter::new(py, &result.columns, as_dict)?;
+    let converter = Converter::new(py, &result.columns, as_dict, codec)?;
     let mut rows = Vec::with_capacity(result.rows.len());
     converter.convert(py, &result.rows, |row| rows.push(row))?;
     (
-        description(py, &result.columns)?,
+        description(py, &result.columns, codec)?,
         PyList::new(py, rows)?,
         result.rows.len(),
         result.last_insert_id,
@@ -189,12 +202,13 @@ pub(crate) fn result_to_py(
 pub(crate) fn description<'py>(
     py: Python<'py>,
     columns: &[Column],
+    codec: &Codec,
 ) -> PyResult<Bound<'py, PyTuple>> {
     let items = columns
         .iter()
         .map(|c| {
             (
-                c.name.as_str(),
+                codec.decode_lenient(py, &c.name),
                 c.column_type.0,
                 py.None(),
                 c.length,
@@ -213,6 +227,7 @@ fn value<'py>(
     kind: Kind,
     bytes: &[u8],
     decimal: Option<&Bound<'py, PyType>>,
+    codec: &Codec,
 ) -> PyResult<Bound<'py, PyAny>> {
     let invalid = || {
         DataError::new_err((
@@ -237,7 +252,7 @@ fn value<'py>(
         Kind::Date => Ok(date(py, bytes)),
         Kind::DateTime => Ok(datetime(py, bytes)),
         Kind::Time => time(py, bytes).ok_or_else(invalid),
-        Kind::Text => utf8(py, bytes).map(Bound::into_any),
+        Kind::Text => codec.decode(py, bytes).map(Bound::into_any),
         Kind::Bytes => Ok(PyBytes::new(py, bytes).into_any()),
         Kind::Null => Ok(py.None().into_bound(py)),
     }

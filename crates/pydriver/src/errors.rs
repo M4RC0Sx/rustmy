@@ -101,13 +101,20 @@ pub(crate) enum Phase {
     Command,
 }
 
-pub(crate) fn from_proto(err: ProtoError, phase: Phase, target: &str) -> PyErr {
+/// Converts a protocol error; `decode` turns the server's message (in the
+/// session's character set) into text.
+pub(crate) fn from_proto(
+    err: ProtoError,
+    phase: Phase,
+    target: &str,
+    decode: impl FnOnce(&[u8]) -> String,
+) -> PyErr {
     match err {
         ProtoError::Server {
             code,
             sql_state,
             message,
-        } => server_error(code, &sql_state, message),
+        } => server_error(code, &sql_state, decode(&message)),
         ProtoError::Io(io) => match phase {
             Phase::Connect => OperationalError::new_err((
                 client_code::CONN_HOST_ERROR,

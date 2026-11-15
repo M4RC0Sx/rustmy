@@ -113,8 +113,12 @@ fn selects_scalars_with_column_metadata() {
             .unwrap();
         assert_eq!(table(&result), [["1", "héllo", "NULL", "1.5"]]);
 
-        let names: Vec<_> = result.columns.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["one", "txt", "nothing", "dbl"], "{server:?}");
+        let names: Vec<_> = result.columns.iter().map(|c| c.name.as_slice()).collect();
+        assert_eq!(
+            names,
+            [&b"one"[..], b"txt", b"nothing", b"dbl"],
+            "{server:?}"
+        );
         // MySQL types integer literals as LONG, MariaDB as LONGLONG.
         let int_type = result.columns[0].column_type;
         assert!(

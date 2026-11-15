@@ -1,5 +1,6 @@
 //! `rustmy._core`: the native extension module behind the `rustmy` package.
 
+mod charset;
 mod connection;
 mod convert;
 mod errors;

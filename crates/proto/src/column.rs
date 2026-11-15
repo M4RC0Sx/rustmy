@@ -6,14 +6,15 @@ use crate::constants::ColumnType;
 use crate::constants::column_flag;
 use crate::error::Result;
 
-/// Metadata for one column of a result set.
+/// Metadata for one column of a result set. Names are raw bytes in the
+/// session's character set (`character_set_results`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Column {
-    pub schema: String,
-    pub table: String,
-    pub org_table: String,
-    pub name: String,
-    pub org_name: String,
+    pub schema: Vec<u8>,
+    pub table: Vec<u8>,
+    pub org_table: Vec<u8>,
+    pub name: Vec<u8>,
+    pub org_name: Vec<u8>,
     /// Collation id of the column's values (63 means binary).
     pub collation: u16,
     /// Maximum display length.
@@ -27,11 +28,11 @@ impl Column {
     pub(crate) fn parse(payload: &[u8]) -> Result<Self> {
         let mut r = Reader::new(payload);
         let _catalog = r.lenenc_bytes()?;
-        let schema = text(r.lenenc_bytes()?);
-        let table = text(r.lenenc_bytes()?);
-        let org_table = text(r.lenenc_bytes()?);
-        let name = text(r.lenenc_bytes()?);
-        let org_name = text(r.lenenc_bytes()?);
+        let schema = r.lenenc_bytes()?.to_vec();
+        let table = r.lenenc_bytes()?.to_vec();
+        let org_table = r.lenenc_bytes()?.to_vec();
+        let name = r.lenenc_bytes()?.to_vec();
+        let org_name = r.lenenc_bytes()?.to_vec();
         let _fixed_fields_len = r.lenenc_int()?;
         Ok(Self {
             schema,
@@ -60,10 +61,6 @@ impl Column {
     }
 }
 
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::Column;
@@ -85,9 +82,9 @@ mod tests {
         p.extend_from_slice(&[0, 0]);
 
         let col = Column::parse(&p).unwrap();
-        assert_eq!(col.name, "total");
-        assert_eq!(col.table, "o");
-        assert_eq!(col.org_table, "orders");
+        assert_eq!(col.name, b"total");
+        assert_eq!(col.table, b"o");
+        assert_eq!(col.org_table, b"orders");
         assert_eq!(col.column_type, ColumnType::NEWDECIMAL);
         assert_eq!(col.decimals, 2);
         assert!(col.is_unsigned());

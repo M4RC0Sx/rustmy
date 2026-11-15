@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::io::Write as _;
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::PyBool;
@@ -29,30 +30,19 @@ use pyo3::types::PyTimeAccess;
 use pyo3::types::PyTuple;
 use rustmy_proto::sql::escape_into;
 
+use crate::charset::Codec;
 use crate::convert::decimal_type;
 use crate::errors::ProgrammingError;
 
-/// How `bytes` parameters are written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BinaryLiteral {
-    /// `_binary'…'` with escaping: compact, safe when the connection
-    /// charset is UTF-8 or single-byte.
-    Escaped,
-    /// `X'…'`: twice the size, but safe with multi-byte legacy charsets
-    /// (gbk, big5, sjis…) where an escaped byte string could let a quote
-    /// slip through (CVE-2006-2753).
-    #[expect(
-        dead_code,
-        reason = "selected by non-UTF-8 charsets (Phase 2, block 3)"
-    )]
-    Hex,
-}
-
-/// Writes parameters as SQL literals for one connection's settings.
-#[derive(Debug, Clone, Copy)]
+/// Writes statements and parameters for one connection's settings: in its
+/// character set, escaping text before it is encoded (never encoded bytes,
+/// which is what lets a multi-byte character swallow an escaping
+/// backslash). Numbers, dates and the SQL around them are ASCII, which every
+/// supported character set encodes as itself.
+#[derive(Debug, Clone)]
 pub(crate) struct Encoder {
     pub(crate) no_backslash_escapes: bool,
-    pub(crate) binary: BinaryLiteral,
+    pub(crate) codec: Arc<Codec>,
 }
 
 /// Arguments of one `execute`: a sequence for `%s`, a mapping for
@@ -93,21 +83,28 @@ fn push_fmt(out: &mut Vec<u8>, args: fmt::Arguments<'_>) {
 impl Encoder {
     /// Appends `template` with its placeholders replaced by `args`.
     pub(crate) fn interpolate(
-        self,
+        &self,
+        py: Python<'_>,
         out: &mut Vec<u8>,
-        template: &[u8],
+        template: &str,
         args: &Args<'_>,
     ) -> PyResult<()> {
         let mut next_positional = 0;
         let mut run_start = 0;
         let mut pos = 0;
-        while let Some(offset) = template
+        let bytes = template.as_bytes();
+        while let Some(offset) = bytes
             .get(pos..)
             .and_then(|rest| rest.iter().position(|&b| b == b'%'))
         {
             let percent = pos + offset;
-            out.extend_from_slice(template.get(run_start..percent).unwrap_or_default());
-            match template.get(percent + 1) {
+            // `%` is ASCII, so these are character boundaries.
+            self.codec.encode_into(
+                py,
+                out,
+                template.get(run_start..percent).unwrap_or_default(),
+            )?;
+            match bytes.get(percent + 1) {
                 Some(b'%') => {
                     out.push(b'%');
                     pos = percent + 2;
@@ -130,21 +127,18 @@ impl Encoder {
                 }
                 Some(b'(') => {
                     let name_start = percent + 2;
-                    let close = template
+                    let close = bytes
                         .get(name_start..)
                         .and_then(|rest| rest.iter().position(|&b| b == b')'))
                         .map(|i| name_start + i)
                         .ok_or_else(|| programming_error("unterminated %(name)s placeholder"))?;
-                    if template.get(close + 1) != Some(&b's') {
+                    if bytes.get(close + 1) != Some(&b's') {
                         return Err(programming_error(
                             "unsupported placeholder: only %(name)s is allowed after %(",
                         ));
                     }
-                    let name =
-                        std::str::from_utf8(template.get(name_start..close).unwrap_or_default())
-                            .map_err(|_| {
-                                programming_error("placeholder name is not valid UTF-8")
-                            })?;
+                    // `(` and `)` are ASCII: character boundaries.
+                    let name = template.get(name_start..close).unwrap_or_default();
                     let Args::Named(mapping) = args else {
                         return Err(programming_error(format!(
                             "%({name})s placeholder needs mapping parameters"
@@ -168,7 +162,8 @@ impl Encoder {
             }
             run_start = pos;
         }
-        out.extend_from_slice(template.get(run_start..).unwrap_or_default());
+        self.codec
+            .encode_into(py, out, template.get(run_start..).unwrap_or_default())?;
         if let Args::Positional(values) = args
             && next_positional != values.len()
         {
@@ -182,7 +177,7 @@ impl Encoder {
     }
 
     /// Appends `value` as an SQL literal.
-    pub(crate) fn literal(self, out: &mut Vec<u8>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    pub(crate) fn literal(&self, out: &mut Vec<u8>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         if value.is_none() {
             out.extend_from_slice(b"NULL");
         } else if let Ok(flag) = value.cast::<PyBool>() {
@@ -192,9 +187,7 @@ impl Encoder {
         } else if let Ok(float) = value.cast::<PyFloat>() {
             write_float(out, float.value())?;
         } else if let Ok(text) = value.cast::<PyString>() {
-            out.push(b'\'');
-            escape_into(out, text.to_str()?.as_bytes(), self.no_backslash_escapes);
-            out.push(b'\'');
+            self.write_text(value.py(), out, text.to_str()?)?;
         } else if let Ok(bytes) = value.cast::<PyBytes>() {
             self.write_binary(out, bytes.as_bytes());
         } else if let Ok(bytes) = value.cast::<PyByteArray>() {
@@ -250,22 +243,41 @@ impl Encoder {
         Ok(())
     }
 
-    fn write_binary(self, out: &mut Vec<u8>, bytes: &[u8]) {
-        match self.binary {
-            BinaryLiteral::Escaped => {
-                out.extend_from_slice(b"_binary'");
-                escape_into(out, bytes, self.no_backslash_escapes);
-                out.push(b'\'');
+    /// A quoted string literal: escaped as text, then encoded.
+    fn write_text(&self, py: Python<'_>, out: &mut Vec<u8>, text: &str) -> PyResult<()> {
+        out.push(b'\'');
+        if text.is_ascii() || self.codec.is_utf8mb4() {
+            // Already in the connection's encoding.
+            escape_into(out, text.as_bytes(), self.no_backslash_escapes);
+        } else {
+            let mut escaped = Vec::with_capacity(text.len() + 8);
+            escape_into(&mut escaped, text.as_bytes(), self.no_backslash_escapes);
+            // Escaping only inserts ASCII into valid UTF-8.
+            let escaped = std::str::from_utf8(&escaped)
+                .map_err(|e| programming_error(format!("escaping broke UTF-8: {e}")))?;
+            self.codec.encode_into(py, out, escaped)?;
+        }
+        out.push(b'\'');
+        Ok(())
+    }
+
+    /// `_binary'…'` with escaping where that is safe (UTF-8, single-byte
+    /// character sets); `X'…'`, twice the size, with multi-byte legacy ones
+    /// (gbk, big5, sjis…), where an escaped byte string could let a quote
+    /// slip through (CVE-2006-2753).
+    fn write_binary(&self, out: &mut Vec<u8>, bytes: &[u8]) {
+        if self.codec.needs_hex_binary() {
+            out.reserve(bytes.len() * 2 + 3);
+            out.extend_from_slice(b"X'");
+            for &byte in bytes {
+                out.push(hex_digit(byte >> 4));
+                out.push(hex_digit(byte & 0x0F));
             }
-            BinaryLiteral::Hex => {
-                out.reserve(bytes.len() * 2 + 3);
-                out.extend_from_slice(b"X'");
-                for &byte in bytes {
-                    out.push(hex_digit(byte >> 4));
-                    out.push(hex_digit(byte & 0x0F));
-                }
-                out.push(b'\'');
-            }
+            out.push(b'\'');
+        } else {
+            out.extend_from_slice(b"_binary'");
+            escape_into(out, bytes, self.no_backslash_escapes);
+            out.push(b'\'');
         }
     }
 }
@@ -395,9 +407,14 @@ pub(crate) fn has_placeholder(text: &[u8]) -> bool {
     false
 }
 
-/// `template` with `%%` turned into `%` (it holds no placeholders).
-pub(crate) fn unescape_percent(encoder: Encoder, template: &[u8]) -> PyResult<Vec<u8>> {
+/// `template` with `%%` turned into `%` (it holds no placeholders),
+/// encoded in the connection's character set.
+pub(crate) fn unescape_percent(
+    encoder: &Encoder,
+    py: Python<'_>,
+    template: &str,
+) -> PyResult<Vec<u8>> {
     let mut out = Vec::with_capacity(template.len());
-    encoder.interpolate(&mut out, template, &Args::empty())?;
+    encoder.interpolate(py, &mut out, template, &Args::empty())?;
     Ok(out)
 }

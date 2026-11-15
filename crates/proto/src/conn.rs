@@ -19,8 +19,8 @@ use crate::auth::parsec_response;
 use crate::auth::trim_nonce;
 use crate::buf::Reader;
 use crate::buf::put_nul_bytes;
+use crate::charset::handshake_collation;
 use crate::column::Column;
-use crate::constants::DEFAULT_COLLATION;
 use crate::constants::capability;
 use crate::constants::command;
 use crate::constants::status;
@@ -81,6 +81,10 @@ pub struct Opts {
     pub write_timeout: Option<Duration>,
     /// Extra capability flags, e.g. `MULTI_STATEMENTS` or `FOUND_ROWS`.
     pub client_flag: u32,
+    /// Character set of the session, as the server names it (`utf8mb4`,
+    /// `latin1`...). Its collation is the server's default when the server's
+    /// default character set is this one, else the character set's own.
+    pub charset: String,
     pub tls: TlsOpts,
     /// PEM file with the server's RSA public key, used to encrypt the
     /// password over plain TCP instead of asking the server for its key.
@@ -100,6 +104,7 @@ impl Default for Opts {
             read_timeout: None,
             write_timeout: None,
             client_flag: 0,
+            charset: "utf8mb4".to_owned(),
             tls: TlsOpts::default(),
             server_public_key: None,
         }
@@ -304,6 +309,10 @@ pub struct Conn {
     greeting_nonce: Vec<u8>,
     /// Pinned RSA key (`Opts::server_public_key`), also for `COM_CHANGE_USER`.
     pinned_key: Option<rsa::PublicKey>,
+    /// Session collation sent in the handshake, also for `COM_CHANGE_USER`.
+    collation: u8,
+    /// The server's default collation, from its greeting.
+    server_collation: u8,
     /// Scratch buffer for control packets.
     buf: Vec<u8>,
     /// Streamed result set with rows still on the wire.
@@ -342,11 +351,16 @@ impl Conn {
             wanted |= capability::SSL;
         }
         let capabilities = wanted & greeting.capabilities;
+        let collation =
+            handshake_collation(&opts.charset, greeting.collation, greeting.is_mariadb())
+                .ok_or_else(|| {
+                    Error::Config(format!("unknown character set {:?}", opts.charset))
+                })?;
 
         if use_tls {
             // SSLRequest goes out in plain text, then the same socket is
             // wrapped in TLS and the sequence continues inside it.
-            stream.write_packet(&ssl_request(capabilities, DEFAULT_COLLATION))?;
+            stream.write_packet(&ssl_request(capabilities, collation))?;
             let (raw, seq) = stream.into_parts()?;
             stream = PacketStream::from_parts(raw.upgrade(&opts.tls, &opts.host)?, seq);
         }
@@ -367,6 +381,8 @@ impl Conn {
                 .as_deref()
                 .map(load_public_key)
                 .transpose()?,
+            collation,
+            server_collation: greeting.collation,
             buf,
             pending: None,
             last_stream_id: 0,
@@ -412,7 +428,7 @@ impl Conn {
         let auth_response = self.first_response(plugin, password, &nonce)?;
         let response = HandshakeResponse {
             capabilities: self.capabilities,
-            collation: DEFAULT_COLLATION,
+            collation: self.collation,
             user: opts.user.as_bytes(),
             auth_response: &auth_response,
             database: opts.database.as_deref().map(str::as_bytes),
@@ -770,7 +786,7 @@ impl Conn {
         payload.push(auth_len);
         payload.extend_from_slice(&auth_response);
         put_nul_bytes(&mut payload, database.unwrap_or_default().as_bytes());
-        payload.extend_from_slice(&u16::from(DEFAULT_COLLATION).to_le_bytes());
+        payload.extend_from_slice(&u16::from(self.collation).to_le_bytes());
         put_nul_bytes(&mut payload, plugin.name());
         self.stream.write_command(command::CHANGE_USER, &payload)?;
         self.auth_exchange(password.as_bytes(), plugin, nonce)
@@ -854,5 +870,19 @@ impl Conn {
     #[must_use]
     pub const fn capabilities(&self) -> u32 {
         self.capabilities
+    }
+
+    /// Collation id requested in the handshake.
+    #[must_use]
+    pub const fn collation(&self) -> u8 {
+        self.collation
+    }
+
+    /// The server's default character set, from its greeting. MySQL's
+    /// `COM_RESET_CONNECTION` returns the session to it, not to the one
+    /// chosen in the handshake (MariaDB keeps the latter).
+    #[must_use]
+    pub fn server_charset(&self) -> Option<&'static str> {
+        crate::charset::charset_of(self.server_collation)
     }
 }

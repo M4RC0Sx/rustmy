@@ -13,7 +13,6 @@ from rustmy import _core
 from rustmy import _tls
 from rustmy import err
 from rustmy.converters import escape_string
-from rustmy.converters import literal
 from rustmy.cursors import Cursor
 
 
@@ -33,8 +32,6 @@ if TYPE_CHECKING:
 # Server status flags (see the protocol's SERVER_STATUS_* values).
 _STATUS_AUTOCOMMIT = 1 << 1
 _STATUS_NO_BACKSLASH_ESCAPES = 1 << 9
-
-_SUPPORTED_CHARSETS = frozenset({"utf8mb4", "utf8", "utf8mb3"})
 
 PathArg: TypeAlias = "str | PathLike[str]"
 
@@ -75,6 +72,7 @@ class Connection:
         passwd: str | None = None,
         db: str | None = None,
         charset: str = "utf8mb4",
+        collation: str | None = None,
         connect_timeout: float | None = None,
         read_timeout: float | None = None,
         write_timeout: float | None = None,
@@ -95,6 +93,14 @@ class Connection:
         ``database`` for compatibility with other MySQL drivers.
         ``autocommit=None`` keeps the server's default.
 
+        ``charset`` is the session's character set (default ``utf8mb4``;
+        ``utf8`` means ``utf8mb4``): queries are encoded and text results
+        decoded in it. Any MySQL character set with a Python codec works.
+        Without ``collation`` the session uses the server's default collation
+        for it (what its tables use, so comparisons with user variables
+        work), set in the handshake at no extra cost; with ``collation``,
+        ``SET NAMES … COLLATE …`` runs after connecting.
+
         TLS: ``ssl_mode`` is one of ``disabled``, ``preferred`` (default),
         ``required`` (encrypted, server not verified), ``verify_ca`` and
         ``verify_identity``. Passing ``ssl_ca`` alone means
@@ -110,9 +116,6 @@ class Connection:
         PyMySQL does. ``server_public_key`` (a PEM file) pins the key
         instead, so a man in the middle cannot substitute its own.
         """
-        if charset.lower() not in _SUPPORTED_CHARSETS:
-            msg = f"charset {charset!r} is not supported yet; use utf8mb4"
-            raise err.NotSupportedError(0, msg)
         tls = _tls.resolve(
             ssl_mode=ssl_mode,
             ssl_ca=ssl_ca,
@@ -131,6 +134,7 @@ class Connection:
             read_timeout=read_timeout,
             write_timeout=write_timeout,
             client_flag=client_flag,
+            charset=charset,
             ssl_mode=tls.mode,
             ssl_ca=tls.ca,
             ssl_cert=tls.cert,
@@ -140,6 +144,11 @@ class Connection:
             ),
         )
         self.cursorclass = cursorclass
+        # The session gets the character set (with the server's default
+        # collation for it) in the handshake; SET NAMES is only needed for
+        # an explicit collation or after set_character_set().
+        self._collation = collation
+        self._set_names = collation is not None
         self._init_command = init_command
         self._autocommit_setting = autocommit
         try:
@@ -148,14 +157,22 @@ class Connection:
             self._conn.close()
             raise
 
-    def _init_session(self) -> None:
-        """Apply the per-session settings chosen at connect time."""
+    def _init_session(self, *, after_reset: bool = False) -> None:
+        """Apply the per-session settings chosen at connect time.
+
+        MySQL's reset returns the session to the server's default character
+        set rather than the one negotiated at connect time (MariaDB keeps
+        it), so a different one is set again.
+        """
+        conn = self._conn
+        if self._set_names or (after_reset and conn.charset != conn.server_charset):
+            conn.set_character_set(conn.charset, self._collation)
         if self._init_command is not None:
-            self._query(self._init_command.encode())
+            self._query(self._init_command)
         if self._autocommit_setting is not None:
             self.autocommit(self._autocommit_setting)
 
-    def _query(self, sql: bytes) -> QueryResult:
+    def _query(self, sql: str) -> QueryResult:
         return self._conn.query(sql)
 
     def _execute(
@@ -218,15 +235,15 @@ class Connection:
         return (cursorclass or self.cursorclass)(self)
 
     def commit(self) -> None:
-        self._query(b"COMMIT")
+        self._query("COMMIT")
 
     def rollback(self) -> None:
-        self._query(b"ROLLBACK")
+        self._query("ROLLBACK")
 
     def autocommit(self, on: bool) -> None:  # noqa: FBT001  # MySQLdb-compatible
         """Enable or disable autocommit mode."""
         if self.get_autocommit() != on:
-            self._query(b"SET autocommit=1" if on else b"SET autocommit=0")
+            self._query("SET autocommit=1" if on else "SET autocommit=0")
 
     def get_autocommit(self) -> bool:
         return bool(self._conn.server_status & _STATUS_AUTOCOMMIT)
@@ -240,7 +257,8 @@ class Connection:
         return escape_string(value, no_backslash_escapes=self.no_backslash_escapes)
 
     def literal(self, value: object) -> str:
-        return literal(value, no_backslash_escapes=self.no_backslash_escapes)
+        """``value`` as an SQL literal for this connection."""
+        return self._conn.literal(value)
 
     def ping(self) -> None:
         """Check that the server is reachable; raises if it is not."""
@@ -259,7 +277,7 @@ class Connection:
         again. Useful for connection pools.
         """
         self._conn.reset_connection()
-        self._init_session()
+        self._init_session(after_reset=True)
 
     def change_user(
         self, user: str, password: str = "", database: str | None = None
@@ -294,7 +312,26 @@ class Connection:
         return self._conn.server_version
 
     def character_set_name(self) -> str:
-        return "utf8mb4"
+        """The session's character set, as MySQL names it."""
+        return self._conn.charset
+
+    @property
+    def encoding(self) -> str:
+        """Python codec of the session's character set."""
+        return self._conn.encoding
+
+    def set_character_set(self, charset: str, collation: str | None = None) -> None:
+        """Switch the session to ``charset`` (and ``collation``, if given).
+
+        Queries are encoded and results decoded in it from now on, and it
+        survives :meth:`reset_connection` and :meth:`change_user`.
+        """
+        self._conn.set_character_set(charset, collation)
+        self._collation = collation
+        self._set_names = True
+
+    def _decode_statement(self, statement: bytes) -> str:
+        return self._conn.decode_statement(statement)
 
     def __enter__(self) -> Self:
         return self
