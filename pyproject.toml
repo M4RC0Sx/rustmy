@@ -129,6 +129,12 @@ ignore = [
     "S608",   # SQL built from the tests' own constants, not user input
     "DTZ001", # MySQL DATETIME values are naive by definition
 ]
+"python/rustmy/constants/*.py" = [
+    "N999", # module names match the other MySQL drivers' (`from rustmy.constants import ER`)
+]
+"scripts/**" = [
+    "T201", # command-line reports go to stdout
+]
 "benches/**" = [
     "T201", # command-line reports go to stdout
     "S101", # sanity asserts on benchmark results
@@ -152,7 +158,7 @@ namespace_packages = true
 show_error_codes = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 mypy_path = "python"
-files = ["python", "tests", "benches"]
+files = ["python", "tests", "benches", "scripts"]
 
 [[tool.mypy.overrides]]
 # Benchmark-only dependencies (bench group, absent from the dev env); the

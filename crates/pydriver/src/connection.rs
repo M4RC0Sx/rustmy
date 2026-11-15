@@ -16,6 +16,7 @@ use pyo3::exceptions::PyUserWarning;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use pyo3::types::PyDict;
 use pyo3::types::PyList;
 use pyo3::types::PyString;
 use rustmy_proto::Conn;
@@ -32,6 +33,7 @@ use rustmy_proto::sql::insert_values;
 use crate::charset::Codec;
 use crate::charset::UTF8;
 use crate::convert::Converter;
+use crate::convert::Custom;
 use crate::convert::description;
 use crate::convert::result_to_py;
 use crate::errors::InterfaceError;
@@ -81,6 +83,8 @@ pub(crate) struct Connection {
     open_stream: AtomicU64,
     /// The session's character set; `set_character_set` replaces it.
     codec: Mutex<Arc<Codec>>,
+    /// `conv=` decoders and encoders that differ from the defaults.
+    custom: Mutex<Option<Arc<Custom>>>,
 }
 
 /// `(affected_rows, last_insert_id, last_statement)` of a batched
@@ -213,6 +217,7 @@ impl Connection {
     {
         let to_pyerr = |failure| self.failure_to_pyerr(failure);
         let codec = self.codec();
+        let custom = self.custom();
         self.locked(py, breaks_on_io, |session| {
             // One GIL release covers the statement and its first batch, so
             // a small query costs no more than before.
@@ -233,7 +238,7 @@ impl Connection {
             let Some((id, mut outcome)) = reading else {
                 return result_to_py(py, &head, as_dict, &codec).map(Some);
             };
-            let converter = Converter::new(py, &head.columns, as_dict, &codec)?;
+            let converter = Converter::new(py, &head.columns, as_dict, &codec, custom.as_deref())?;
             let mut rows = Vec::new();
             let mut raw = std::mem::take(&mut head.rows);
             loop {
@@ -369,7 +374,8 @@ impl Connection {
                 .into_py_any(py);
         };
         let codec = slf.get().codec();
-        let converter = Converter::new(py, &head.columns, as_dict, &codec)?;
+        let custom = slf.get().custom();
+        let converter = Converter::new(py, &head.columns, as_dict, &codec, custom.as_deref())?;
         let stream = ResultStream::new(
             slf.clone().unbind(),
             id,
@@ -391,6 +397,14 @@ impl Connection {
     /// The session's character set.
     pub(crate) fn codec(&self) -> Arc<Codec> {
         Arc::clone(&self.codec.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// The custom `conv=` converters, if any.
+    fn custom(&self) -> Option<Arc<Custom>> {
+        self.custom
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// `query` in the session's character set, with `args` interpolated if
@@ -440,6 +454,7 @@ impl Connection {
         Ok(Encoder {
             no_backslash_escapes,
             codec: self.codec(),
+            custom: self.custom(),
         })
     }
 
@@ -747,6 +762,26 @@ impl Connection {
         Ok(())
     }
 
+    /// Installs the `conv=` decoders and encoders that differ from the
+    /// defaults (`rustmy.converters.split_conv`); `conv` is passed to every
+    /// encoder as its second argument.
+    #[pyo3(signature = (decoders, encoders, conv))]
+    fn set_converters(
+        &self,
+        decoders: Option<Bound<'_, PyDict>>,
+        encoders: Option<Bound<'_, PyDict>>,
+        conv: Bound<'_, PyAny>,
+    ) {
+        let custom = (decoders.is_some() || encoders.is_some()).then(|| {
+            Arc::new(Custom {
+                decoders: decoders.map(Bound::unbind),
+                encoders: encoders.map(Bound::unbind),
+                conv: conv.unbind(),
+            })
+        });
+        *self.custom.lock().unwrap_or_else(PoisonError::into_inner) = custom;
+    }
+
     /// The session's character set, as MySQL names it.
     #[getter]
     fn charset(&self) -> &'static str {
@@ -888,6 +923,7 @@ pub(crate) fn connect(
         generation: AtomicU64::new(0),
         open_stream: AtomicU64::new(0),
         codec: Mutex::new(codec),
+        custom: Mutex::new(None),
     })
 }
 
@@ -939,6 +975,7 @@ fn utf8_encoder(no_backslash_escapes: bool) -> Encoder {
     Encoder {
         no_backslash_escapes,
         codec: Arc::clone(&UTF8),
+        custom: None,
     }
 }
 

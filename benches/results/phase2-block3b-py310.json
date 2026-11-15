@@ -1,0 +1,77 @@
+{
+  "date": "2026-11-15T20:54:51+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 7,
+  "scenarios": [
+    {
+      "name": "fetchall 100k int/varchar",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.02368145800573984,
+        "mysqlclient": 0.035104375005175825,
+        "pymysql": 0.23313287500059232
+      }
+    },
+    {
+      "name": "fetchall 100k mixed (double/datetime/date/decimal)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.043539207996218465,
+        "mysqlclient": 0.1395488749985816,
+        "pymysql": 0.4147435410050093
+      }
+    },
+    {
+      "name": "fetchall 100k datetime + date",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.01331991600454785,
+        "mysqlclient": 0.09344112499820767,
+        "pymysql": 0.27861004199803574
+      }
+    },
+    {
+      "name": "fetchall 100k decimal",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.011662166994938161,
+        "mysqlclient": 0.017593917000340298,
+        "pymysql": 0.10940466700412799
+      }
+    },
+    {
+      "name": "10k x SELECT 1",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.6557054169970797,
+        "mysqlclient": 0.679633334002574,
+        "pymysql": 0.8180289590018219
+      }
+    },
+    {
+      "name": "10k x INSERT with params",
+      "informative": false,
+      "seconds": {
+        "rustmy": 1.2010732499984442,
+        "mysqlclient": 1.2201743329933379,
+        "pymysql": 1.3176345829997445
+      }
+    },
+    {
+      "name": "executemany 10k rows",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.017854958001407795,
+        "mysqlclient": 0.030751874997804407,
+        "pymysql": 0.031266582998796366
+      }
+    }
+  ]
+}
