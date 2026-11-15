@@ -165,3 +165,13 @@ def test_executed_shows_last_query(cursor: rustmy.Cursor) -> None:
     assert cursor._executed is None  # noqa: SLF001
     cursor.execute("SELECT %s", ("x",))
     assert cursor._executed == "SELECT 'x'"  # noqa: SLF001
+
+
+def test_executed_shows_the_last_batch(cursor: rustmy.Cursor, table: str) -> None:
+    cursor.max_stmt_length = 40
+    query = f"INSERT INTO {table} (n, s) VALUES (%s, %s)"
+    cursor.executemany(query, [(1, "a"), (2, "b'c"), (3, "d")])
+    assert cursor._executed == f"INSERT INTO {table} (n, s) VALUES (3, 'd')"  # noqa: SLF001
+    # Nothing to run leaves the previous statement in place.
+    cursor.executemany(query, [])
+    assert cursor._executed == f"INSERT INTO {table} (n, s) VALUES (3, 'd')"  # noqa: SLF001

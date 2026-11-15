@@ -128,6 +128,7 @@ pub(crate) fn from_proto(err: ProtoError, phase: Phase, target: &str) -> PyErr {
         )),
         ProtoError::Config(message) => InterfaceError::new_err((0, message)),
         ProtoError::Unsupported(message) => NotSupportedError::new_err((0, message)),
+        err @ ProtoError::ResultDiscarded => ProgrammingError::new_err((0, err.to_string())),
         other => InterfaceError::new_err((0, other.to_string())),
     }
 }

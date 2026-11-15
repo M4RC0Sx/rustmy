@@ -6,6 +6,8 @@ import os
 
 from typing import TYPE_CHECKING
 from typing import TypeAlias
+from typing import TypeVar
+from typing import overload
 
 from rustmy import _core
 from rustmy import _tls
@@ -24,6 +26,7 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
     from rustmy._core import QueryResult
+    from rustmy._core import StreamedResult
     from rustmy.converters import Params
 
 
@@ -34,6 +37,8 @@ _STATUS_NO_BACKSLASH_ESCAPES = 1 << 9
 _SUPPORTED_CHARSETS = frozenset({"utf8mb4", "utf8", "utf8mb3"})
 
 PathArg: TypeAlias = "str | PathLike[str]"
+
+_CursorT = TypeVar("_CursorT", bound=Cursor)
 
 
 class Connection:
@@ -153,21 +158,56 @@ class Connection:
     def _query(self, sql: bytes) -> QueryResult:
         return self._conn.query(sql)
 
-    def _execute(self, query: str, args: Params) -> QueryResult:
-        return self._conn.execute(query, args)
+    def _execute(
+        self, query: str, args: Params, *, as_dict: bool = False
+    ) -> QueryResult:
+        return self._conn.execute(query, args, as_dict)
+
+    def _execute_streamed(
+        self, query: str, args: Params, *, as_dict: bool, batch_bytes: int
+    ) -> StreamedResult:
+        return self._conn.execute_streamed(query, args, as_dict, batch_bytes)
 
     def _mogrify(self, query: str, args: Params) -> str:
         return self._conn.mogrify(query, args)
 
     def _executemany(
         self, query: str, seq_of_args: Iterable[Params], max_stmt_length: int
-    ) -> tuple[int, int | None] | None:
+    ) -> tuple[int, int | None, bytes | None] | None:
         return self._conn.executemany(query, seq_of_args, max_stmt_length)
 
-    def _next_result(self) -> QueryResult | None:
-        return self._conn.next_result()
+    def _next_result(self, *, as_dict: bool = False) -> QueryResult | None:
+        return self._conn.next_result(as_dict)
 
-    def cursor(self, cursorclass: type[Cursor] | None = None) -> Cursor:
+    def _next_result_streamed(
+        self, *, as_dict: bool, batch_bytes: int
+    ) -> StreamedResult | None:
+        return self._conn.next_result_streamed(as_dict, batch_bytes)
+
+    @overload
+    def cursor(self, cursorclass: None = None, *, cursor: None = None) -> Cursor: ...
+    @overload
+    def cursor(
+        self, cursorclass: type[_CursorT], *, cursor: None = None
+    ) -> _CursorT: ...
+    @overload
+    def cursor(
+        self, cursorclass: None = None, *, cursor: type[_CursorT]
+    ) -> _CursorT: ...
+    def cursor(
+        self,
+        cursorclass: type[Cursor] | None = None,
+        *,
+        cursor: type[Cursor] | None = None,
+    ) -> Cursor:
+        """Create a cursor of ``cursorclass``, by default the one given to
+        ``connect()``. ``cursor=`` is accepted as an alias (PyMySQL's name).
+        """
+        if cursor is not None:
+            if cursorclass is not None:
+                msg = "pass cursorclass or cursor, not both"
+                raise TypeError(msg)
+            cursorclass = cursor
         return (cursorclass or self.cursorclass)(self)
 
     def commit(self) -> None:

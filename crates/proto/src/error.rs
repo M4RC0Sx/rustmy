@@ -36,6 +36,11 @@ pub enum Error {
     #[error("TLS error: {0}")]
     Tls(String),
 
+    /// Rows of a streamed result set were requested after another command
+    /// discarded them.
+    #[error("result set discarded: another command ran before all its rows were read")]
+    ResultDiscarded,
+
     /// A valid server request that this client does not implement yet.
     #[error("unsupported: {0}")]
     Unsupported(String),

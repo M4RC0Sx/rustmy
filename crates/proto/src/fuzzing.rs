@@ -103,8 +103,9 @@ pub fn text_values(data: &[u8]) {
 }
 
 /// The whole client against a server that answers with `data`: handshake,
-/// authentication (every plugin, RSA, auth switches), queries, multiple
-/// results and the other commands.
+/// authentication (every plugin, RSA, auth switches), queries, streamed
+/// result sets (batches, skips, rows left for the next command to discard),
+/// multiple results and the other commands.
 pub fn session(data: &[u8]) {
     let opts = Opts {
         user: "fuzz".to_owned(),
@@ -123,6 +124,16 @@ pub fn session(data: &[u8]) {
     };
     if conn.query(b"SELECT 1").is_ok() {
         while let Ok(Some(_)) = conn.next_result() {}
+    }
+    if let Ok((mut head, Some(id))) = conn.query_streamed(b"SELECT 2") {
+        let _ = conn.read_rows(id, &mut head.rows, 1);
+        let _ = conn.skip_rows(id, 1);
+        head.rows.clear();
+        let _ = conn.read_rows(id, &mut head.rows, 64);
+    }
+    // Discards whatever the stream left, then streams the next result.
+    if let Ok(Some((mut head, Some(id)))) = conn.next_result_streamed() {
+        let _ = conn.read_rows(id, &mut head.rows, usize::MAX);
     }
     let _ = conn.ping();
     let _ = conn.select_db("db");
