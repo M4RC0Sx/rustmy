@@ -14,11 +14,13 @@ use pyo3::exceptions::PyUserWarning;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use pyo3::types::PyList;
 use pyo3::types::PyString;
 use rustmy_proto::Conn;
 use rustmy_proto::Error as ProtoError;
 use rustmy_proto::Opts;
 use rustmy_proto::QueryResult;
+use rustmy_proto::ReadOutcome;
 use rustmy_proto::SslMode;
 use rustmy_proto::StreamId;
 use rustmy_proto::TlsOpts;
@@ -83,6 +85,40 @@ type BatchTotals<'py> = (u64, Option<u64>, Option<Bound<'py, PyBytes>>);
 const ABANDONED_STREAM_WARNING: &std::ffi::CStr =
     c"previous unbuffered result was left incomplete; its remaining rows were discarded";
 
+/// Response of a statement as it starts: the head (OK packet or column
+/// definitions) and, for a result set, the id its rows are read with.
+type Head = Option<(QueryResult, Option<StreamId>)>;
+
+/// Errors after which the stream is in an unknown state.
+fn breaks_on_io(err: &ProtoError) -> bool {
+    matches!(err, ProtoError::Io(_) | ProtoError::Protocol(_))
+}
+
+/// Exclusive use of the open connection for one command, which may release
+/// and re-acquire the GIL several times (to read a result in batches).
+struct Session<'a> {
+    conn: &'a mut Conn,
+    breaks: fn(&ProtoError) -> bool,
+    broken: bool,
+}
+
+impl Session<'_> {
+    /// Runs `f` with the GIL released.
+    fn io<T, F>(&mut self, py: Python<'_>, f: F) -> Result<T, Failure>
+    where
+        T: Send,
+        F: FnOnce(&mut Conn) -> rustmy_proto::Result<T> + Send,
+    {
+        let conn = &mut *self.conn;
+        py.detach(|| f(conn)).map_err(|err| {
+            if (self.breaks)(&err) {
+                self.broken = true;
+            }
+            Failure::Proto(err)
+        })
+    }
+}
+
 impl Connection {
     /// Runs `f` on the open connection with the GIL released.
     ///
@@ -93,9 +129,7 @@ impl Connection {
         T: Send,
         F: FnOnce(&mut Conn) -> rustmy_proto::Result<T> + Send,
     {
-        self.run(py, f, |err| {
-            matches!(err, ProtoError::Io(_) | ProtoError::Protocol(_))
-        })
+        self.run(py, f, breaks_on_io)
     }
 
     /// Like [`Self::with_conn`], with `breaks` deciding which errors leave
@@ -105,35 +139,124 @@ impl Connection {
         T: Send,
         F: FnOnce(&mut Conn) -> rustmy_proto::Result<T> + Send,
     {
+        self.locked(py, breaks, |session| {
+            session
+                .io(py, f)
+                .map_err(|failure| self.failure_to_pyerr(failure))
+        })
+    }
+
+    /// Runs one command with the connection locked throughout, even while
+    /// `f` holds the GIL between I/O calls: another thread using the
+    /// connection meanwhile fails fast with `ProgrammingError` (the lock is
+    /// only ever tried, never waited for, so holding it with the GIL cannot
+    /// deadlock). Errors for which `breaks` holds leave the connection
+    /// unusable.
+    fn locked<T>(
+        &self,
+        py: Python<'_>,
+        breaks: fn(&ProtoError) -> bool,
+        f: impl FnOnce(&mut Session<'_>) -> PyResult<T>,
+    ) -> PyResult<T> {
         // Warn before running, so that warnings turned into errors leave the
         // streamed result set untouched.
         if self.open_stream.load(Ordering::SeqCst) != 0 {
             warn_abandoned_stream(py)?;
         }
-        py.detach(|| {
-            let mut state = match self.state.try_lock() {
-                Ok(guard) => guard,
-                Err(TryLockError::WouldBlock) => return Err(Failure::Busy),
-                // A panic cannot happen inside the protocol code (it is
-                // panic-free by lint policy); recover the state regardless.
-                Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        let mut state = match self.state.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::WouldBlock) => return Err(self.failure_to_pyerr(Failure::Busy)),
+            // A panic cannot happen inside the protocol code (it is
+            // panic-free by lint policy); recover the state regardless.
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        };
+        let conn = match &mut *state {
+            State::Open(conn) => conn,
+            State::Broken => return Err(self.failure_to_pyerr(Failure::Broken)),
+            State::Closed => return Err(self.failure_to_pyerr(Failure::Closed)),
+        };
+        // Any pending streamed rows are about to be discarded.
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.open_stream.store(0, Ordering::SeqCst);
+        let mut session = Session {
+            conn,
+            breaks,
+            broken: false,
+        };
+        let result = f(&mut session);
+        if session.broken {
+            *state = State::Broken;
+        }
+        result
+    }
+
+    /// Runs a statement and reads its whole result in batches of about
+    /// `batch_bytes`: each batch is read with the GIL released and converted
+    /// while the server keeps sending the next one, so network and
+    /// conversion overlap. Signals are checked between batches, so Ctrl+C
+    /// interrupts a long read (the next command discards what is left).
+    /// `None` when `start` finds no statement to read (no more results).
+    fn buffered<F>(
+        &self,
+        py: Python<'_>,
+        as_dict: bool,
+        batch_bytes: usize,
+        start: F,
+    ) -> PyResult<Option<Py<PyAny>>>
+    where
+        F: FnOnce(&mut Conn) -> rustmy_proto::Result<Head> + Send,
+    {
+        let to_pyerr = |failure| self.failure_to_pyerr(failure);
+        self.locked(py, breaks_on_io, |session| {
+            // One GIL release covers the statement and its first batch, so
+            // a small query costs no more than before.
+            let first = session
+                .io(py, |conn| {
+                    let Some((mut head, id)) = start(conn)? else {
+                        return Ok(None);
+                    };
+                    let outcome = id
+                        .map(|id| conn.read_rows(id, &mut head.rows, batch_bytes))
+                        .transpose()?;
+                    Ok(Some((head, id.zip(outcome))))
+                })
+                .map_err(to_pyerr)?;
+            let Some((mut head, reading)) = first else {
+                return Ok(None);
             };
-            let conn = match &mut *state {
-                State::Open(conn) => conn,
-                State::Broken => return Err(Failure::Broken),
-                State::Closed => return Err(Failure::Closed),
+            let Some((id, mut outcome)) = reading else {
+                return result_to_py(py, &head, as_dict).map(Some);
             };
-            // Any pending streamed rows are about to be discarded.
-            self.generation.fetch_add(1, Ordering::SeqCst);
-            self.open_stream.store(0, Ordering::SeqCst);
-            f(conn).map_err(|err| {
-                if breaks(&err) {
-                    *state = State::Broken;
+            let converter = Converter::new(py, &head.columns, as_dict)?;
+            let mut rows = Vec::new();
+            let mut raw = std::mem::take(&mut head.rows);
+            loop {
+                if let Err(err) = converter.convert(py, &raw, |row| rows.push(row)) {
+                    if outcome == ReadOutcome::More {
+                        // Keep the connection in sync before reporting.
+                        let _ = session.io(py, |conn| conn.skip_rows(id, usize::MAX));
+                    }
+                    return Err(err);
                 }
-                Failure::Proto(err)
-            })
+                if let ReadOutcome::Done { warnings } = outcome {
+                    let count = rows.len();
+                    return (
+                        description(py, &head.columns)?,
+                        PyList::new(py, rows)?,
+                        count,
+                        head.last_insert_id,
+                        warnings,
+                    )
+                        .into_py_any(py)
+                        .map(Some);
+                }
+                py.check_signals()?;
+                raw.clear();
+                outcome = session
+                    .io(py, |conn| conn.read_rows(id, &mut raw, batch_bytes))
+                    .map_err(to_pyerr)?;
+            }
         })
-        .map_err(|failure| self.failure_to_pyerr(failure))
     }
 
     /// Runs `f` for the streamed result set started at `generation`, with
@@ -341,25 +464,32 @@ impl Connection {
 #[pymethods]
 impl Connection {
     /// Runs one SQL statement; see `convert::result_to_py` for the result.
-    fn query(&self, py: Python<'_>, sql: &[u8]) -> PyResult<Py<PyAny>> {
-        let result = self.with_conn(py, |conn| conn.query(sql))?;
-        result_to_py(py, &result, false)
+    #[pyo3(signature = (sql, batch_bytes = 4096))]
+    fn query(&self, py: Python<'_>, sql: &[u8], batch_bytes: usize) -> PyResult<Py<PyAny>> {
+        let result = self.buffered(py, false, batch_bytes, |conn| {
+            conn.query_streamed(sql).map(Some)
+        })?;
+        Ok(result.unwrap_or_else(|| py.None()))
     }
 
-    /// Interpolates `args` (if any) into `query` and runs it. Without
-    /// `args` the query is sent as is, so `%` needs no escaping. Rows are
-    /// dicts with `as_dict`, else tuples.
-    #[pyo3(signature = (query, args = None, as_dict = false))]
+    /// Interpolates `args` (if any) into `query` and runs it, reading the
+    /// whole result in batches of about `batch_bytes`. Without `args` the
+    /// query is sent as is, so `%` needs no escaping. Rows are dicts with
+    /// `as_dict`, else tuples.
+    #[pyo3(signature = (query, args = None, as_dict = false, batch_bytes = 4096))]
     fn execute(
         &self,
         py: Python<'_>,
         query: &Bound<'_, PyString>,
         args: Option<&Bound<'_, PyAny>>,
         as_dict: bool,
+        batch_bytes: usize,
     ) -> PyResult<Py<PyAny>> {
         let sql = self.statement(query, args)?;
-        let result = self.with_conn(py, |conn| conn.query(&sql))?;
-        result_to_py(py, &result, as_dict)
+        let result = self.buffered(py, as_dict, batch_bytes, |conn| {
+            conn.query_streamed(&sql).map(Some)
+        })?;
+        Ok(result.unwrap_or_else(|| py.None()))
     }
 
     /// Like `execute`, but the rows stay on the server's side of the socket
@@ -453,11 +583,14 @@ impl Connection {
     }
 
     /// Next result of a multi-result query, or `None` when there is none.
-    #[pyo3(signature = (as_dict = false))]
-    fn next_result(&self, py: Python<'_>, as_dict: bool) -> PyResult<Option<Py<PyAny>>> {
-        self.with_conn(py, Conn::next_result)?
-            .map(|result| result_to_py(py, &result, as_dict))
-            .transpose()
+    #[pyo3(signature = (as_dict = false, batch_bytes = 4096))]
+    fn next_result(
+        &self,
+        py: Python<'_>,
+        as_dict: bool,
+        batch_bytes: usize,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        self.buffered(py, as_dict, batch_bytes, Conn::next_result_streamed)
     }
 
     /// Like `next_result`, streaming the rows as `execute_streamed` does.

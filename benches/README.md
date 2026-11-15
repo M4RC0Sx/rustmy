@@ -264,3 +264,127 @@ Times per configuration; the fastest is in bold.
 as quick as mysqlclient to return the first row. Reading one row per batch
 costs only ~10% more on narrow rows (about 20 ns per batch for releasing the
 GIL and taking the lock), so small batches carry no hidden cost.
+
+## Phase 2, block 2b: buffered cursors read in batches (2026-11-15)
+
+Block 2 showed that iterating an `SSCursor` was faster than a buffered
+`Cursor.fetchall()`, and an `SSCursor` reading its whole result in one batch
+was exactly as slow as the buffered cursor: the gain comes from overlapping
+the network with the conversion. While a batch is converted, the server keeps
+sending the next one; reading everything first and converting afterwards
+serialises the two. The buffered cursors now read in batches too (the
+connection stays locked for the whole statement, only the GIL is released
+per batch), and check for signals between batches, so Ctrl+C interrupts a
+long read.
+
+The general benchmark, before → after (`spike.py`):
+
+```sh
+uv run --no-sync python benches/spike.py --repeat 7 \
+    --json benches/results/phase2-block2b-py310.json
+uv run --no-sync python benches/report.py --section phase2-block2b \
+    benches/results/phase2-block2b-py310.json
+```
+
+<!-- results:phase2-block2b:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase2-block2b-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase2-block2b-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 7 · 2026-11-15T19:35:33+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| fetchall 100k int/varchar | **23.7 ms** | 32.7 ms | 238.4 ms | 1.38x | 10.08x |
+| fetchall 100k mixed (double/datetime/date/decimal) | **44.1 ms** | 139.8 ms | 415.6 ms | 3.17x | 9.42x |
+| fetchall 100k datetime + date | **13.7 ms** | 94.5 ms | 278.8 ms | 6.90x | 20.36x |
+| fetchall 100k decimal | **11.8 ms** | 17.4 ms | 110.1 ms | 1.48x | 9.35x |
+| 10k x SELECT 1 | **644.8 ms** | 674.1 ms | 825.2 ms | 1.05x | 1.28x |
+| 10k x INSERT with params | **1168.3 ms** | 1221.9 ms | 1297.8 ms | 1.05x | 1.11x |
+| executemany 10k rows | **17.3 ms** | 31.0 ms | 30.8 ms | 1.79x | 1.78x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+<!-- results:phase2-block2b:end -->
+
+Fetch scenarios went from 1.00x to 1.38x (int/varchar), 2.24x to 3.17x
+(mixed), 5.29x to 6.90x (dates) and 1.00x to 1.48x (decimal) against
+mysqlclient; small queries are unchanged (one GIL release still covers the
+statement and its first batch). The geometric mean went from 1.58x to 1.89x.
+
+The cursor benchmark, now with the buffered cursors' batch size swept:
+
+```sh
+uv run --no-sync python benches/cursors.py --repeat 5 --memory \
+    --sweep-cursor Cursor \
+    --json benches/results/phase2-block2b-cursors-py310.json \
+    --sweep-json benches/results/phase2-block2b-batch-py310.json
+uv run --no-sync python benches/report.py --section phase2-block2b-cursors \
+    benches/results/phase2-block2b-cursors-py310.json
+uv run --no-sync python benches/report.py --section phase2-block2b-batch \
+    benches/results/phase2-block2b-batch-py310.json
+```
+
+<!-- results:phase2-block2b-cursors:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase2-block2b-cursors-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase2-block2b-cursors-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-15T19:35:50+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| Cursor fetchall 100k int/varchar | **22.4 ms** | 35.4 ms | 240.9 ms | 1.58x | 10.75x |
+| DictCursor fetchall 100k int/varchar | **25.7 ms** | 38.4 ms | 264.7 ms | 1.50x | 10.30x |
+| DictCursor fetchall 100k mixed | **46.6 ms** | 150.4 ms | 468.8 ms | 3.23x | 10.06x |
+| SSCursor iterate 100k int/varchar | **20.8 ms** | 49.4 ms | 285.6 ms | 2.37x | 13.70x |
+| SSCursor iterate 100k mixed | **39.1 ms** | 141.5 ms | 464.1 ms | 3.62x | 11.87x |
+| SSCursor fetchmany(1000) 100k int/varchar | 20.9 ms | **20.6 ms** | 274.2 ms | 0.98x | 13.09x |
+| SSCursor fetchone 100k int/varchar | **29.5 ms** | 47.6 ms | 279.9 ms | 1.61x | 9.49x |
+| SSCursor fetchall 100k int/varchar | 23.6 ms | **22.8 ms** | 286.3 ms | 0.97x | 12.15x |
+| SSDictCursor iterate 100k int/varchar | **21.3 ms** | 57.4 ms | 302.6 ms | 2.70x | 14.21x |
+| SSCursor iterate 1M int/varchar | **135.0 ms** | 414.4 ms | 2078.8 ms | 3.07x | 15.40x |
+| SSCursor first row of 1M | 0.3 ms | **0.2 ms** | 0.4 ms | 0.90x | 1.38x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+
+Peak memory growth while reading the result set, each in a fresh process (buffered: the whole result at once, as `fetchall()` holds it; streaming: iterating):
+
+| Cursor | Rows | rustmy | mysqlclient | PyMySQL |
+|---|--:|--:|--:|--:|
+| Cursor | 100,000 | 20.1 MiB | 27.7 MiB | 20.0 MiB |
+| SSCursor | 100,000 | 0.0 MiB | 0.1 MiB | 0.0 MiB |
+| Cursor | 1,000,000 | 199.3 MiB | 288.9 MiB | 206.2 MiB |
+| SSCursor | 1,000,000 | 0.1 MiB | 0.0 MiB | 0.5 MiB |
+<!-- results:phase2-block2b-cursors:end -->
+
+The buffered read no longer holds the whole raw result next to the Python
+objects: the peak for 1M rows went from 316 MiB to 199 MiB, below
+mysqlclient (289 MiB) and PyMySQL (206 MiB).
+
+<!-- results:phase2-block2b-batch:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase2-block2b-batch-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase2-block2b-batch-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-15T19:35:50+00:00
+
+| Configuration | fetchall 100k int/varchar | fetchall 100k mixed | fetchall 100k 1 KiB | vs mysqlclient (fetchall 100k int/varchar) | vs mysqlclient (fetchall 100k mixed) | vs mysqlclient (fetchall 100k 1 KiB) |
+|---|--:|--:|--:|--:|--:|--:|
+| mysqlclient | 34.2 ms | 143.0 ms | 287.7 ms | 1.00x | 1.00x | 1.00x |
+| PyMySQL | 259.6 ms | 444.6 ms | 287.5 ms | 0.13x | 0.32x | 1.00x |
+| rustmy 4 KiB (default) | 23.9 ms | 43.2 ms | 273.1 ms | 1.43x | 3.31x | 1.05x |
+| rustmy 8 KiB | 23.4 ms | 43.1 ms | 272.6 ms | 1.46x | 3.32x | 1.06x |
+| rustmy 16 KiB | **22.5 ms** | **42.7 ms** | 272.1 ms | 1.52x | 3.35x | 1.06x |
+| rustmy 64 KiB | 23.4 ms | 43.7 ms | 270.0 ms | 1.46x | 3.27x | 1.07x |
+| rustmy 256 KiB | 23.6 ms | 43.8 ms | 270.5 ms | 1.45x | 3.26x | 1.06x |
+| rustmy 1 MiB | 25.7 ms | 45.7 ms | **260.9 ms** | 1.33x | 3.13x | 1.10x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:phase2-block2b-batch:end -->
+
+**Decision: 4 KiB** for buffered cursors too (one setting, `Cursor._batch_bytes`,
+shared with the streaming cursors): every size from 4 to 256 KiB is within
+noise, 1 MiB is slower.

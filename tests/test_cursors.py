@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import _thread
 import contextlib
 import threading
 import time
@@ -493,3 +494,86 @@ def test_failed_execute_leaves_no_stale_result(
     assert cursor.rowcount == -1
     with pytest.raises(rustmy.ProgrammingError, match="no result set"):
         cursor.fetchall()
+
+
+# Buffered reads in batches ------------------------------------------------
+
+#: MANY with a pause at row 2000, after earlier rows were sent.
+PAUSED = (
+    "SELECT n, SLEEP(IF(n = 2000, {pause}, 0)) AS z "
+    f"FROM ({MANY} LIMIT 10000) AS numbers"
+)
+
+
+class TinyBufferedCursor(Cursor):
+    _batch_bytes = 1
+
+
+class TinyBufferedDictCursor(DictCursor):
+    _batch_bytes = 1
+
+
+def test_buffered_result_read_in_many_batches(conn: rustmy.Connection) -> None:
+    cursor = conn.cursor(TinyBufferedCursor)
+    assert cursor.execute(MANY) == 10_000
+    rows = cursor.fetchall()
+    assert rows[0] == (0, "row-0")
+    assert rows[-1] == (9999, "row-9999")
+    dict_cursor = conn.cursor(TinyBufferedDictCursor)
+    dict_cursor.execute(MANY)
+    assert dict_cursor.fetchall()[1234] == {"n": 1234, "s": "row-1234"}
+
+
+def test_buffered_server_error_mid_result(cursor: Cursor) -> None:
+    with pytest.raises(rustmy.OperationalError) as excinfo:
+        cursor.execute(
+            "SELECT n, IF(n < 5000, 1, (SELECT 1 UNION ALL SELECT 2)) AS x "
+            f"FROM ({MANY} LIMIT 10000) AS numbers"
+        )
+    assert excinfo.value.args[0] == 1242
+    assert cursor.description is None
+    assert cursor.execute("SELECT 1") == 1
+
+
+def test_buffered_read_keeps_the_connection(conn: rustmy.Connection) -> None:
+    # Another thread cannot run a command between two batches.
+    errors: list[Exception] = []
+
+    def intruder() -> None:
+        time.sleep(0.1)
+        try:
+            conn.ping()
+        except rustmy.ProgrammingError as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=intruder)
+    thread.start()
+    cursor = conn.cursor()
+    assert cursor.execute(PAUSED.format(pause=0.5)) == 10_000
+    thread.join()
+    assert len(errors) == 1
+    assert "in use by another thread" in str(errors[0])
+
+
+def test_ctrl_c_interrupts_a_long_buffered_read(conn: rustmy.Connection) -> None:
+    # Pauses at rows 2000 (0.2 s) and 9000 (1 s); Ctrl+C arrives during the
+    # first. Checked between batches, it stops the read right after that
+    # pause instead of when the whole result has arrived.
+    cursor = conn.cursor()
+    timer = threading.Timer(0.1, _thread.interrupt_main)
+    timer.start()
+    start = time.perf_counter()
+    with pytest.raises(KeyboardInterrupt):
+        cursor.execute(
+            "SELECT n, SLEEP(CASE n WHEN 2000 THEN 0.2 WHEN 9000 THEN 1 ELSE 0 END) "
+            f"FROM ({MANY} LIMIT 10000) AS numbers"
+        )
+    elapsed = time.perf_counter() - start
+    timer.join()
+    assert elapsed < 0.8
+    assert cursor.description is None
+    # The next command discards the rest quietly.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert cursor.execute("SELECT 1") == 1
+    assert cursor.fetchall() == [(1,)]

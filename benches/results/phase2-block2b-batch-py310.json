@@ -1,0 +1,62 @@
+{
+  "date": "2026-11-15T19:35:50+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 5,
+  "title": "Cursor batch size: throughput relative to mysqlclient",
+  "labels": {
+    "mysqlclient": "mysqlclient",
+    "pymysql": "PyMySQL"
+  },
+  "default": "rustmy 4 KiB",
+  "sweep": [
+    {
+      "rows": 100000,
+      "label": "fetchall 100k int/varchar",
+      "seconds": {
+        "mysqlclient": 0.03421800000069197,
+        "pymysql": 0.25955791600063094,
+        "rustmy 4 KiB": 0.023938458998600254,
+        "rustmy 8 KiB": 0.023449917000107234,
+        "rustmy 16 KiB": 0.022540916997968452,
+        "rustmy 64 KiB": 0.02339991700137034,
+        "rustmy 256 KiB": 0.02356504199997289,
+        "rustmy 1 MiB": 0.025676666002254933
+      }
+    },
+    {
+      "rows": 100000,
+      "label": "fetchall 100k mixed",
+      "seconds": {
+        "mysqlclient": 0.14303450000079465,
+        "pymysql": 0.44458762500289595,
+        "rustmy 4 KiB": 0.04316199999811943,
+        "rustmy 8 KiB": 0.04313516699767206,
+        "rustmy 16 KiB": 0.04272154100181069,
+        "rustmy 64 KiB": 0.04374933299914119,
+        "rustmy 256 KiB": 0.043813166998006636,
+        "rustmy 1 MiB": 0.04569833300047321
+      }
+    },
+    {
+      "rows": 100000,
+      "label": "fetchall 100k 1 KiB",
+      "seconds": {
+        "mysqlclient": 0.28765929200017126,
+        "pymysql": 0.2874512499984121,
+        "rustmy 4 KiB": 0.273110458998417,
+        "rustmy 8 KiB": 0.2725904589970014,
+        "rustmy 16 KiB": 0.27214104200174916,
+        "rustmy 64 KiB": 0.2700134170008823,
+        "rustmy 256 KiB": 0.27045245800036355,
+        "rustmy 1 MiB": 0.2608794579973619
+      }
+    }
+  ]
+}
