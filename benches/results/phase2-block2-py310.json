@@ -1,0 +1,151 @@
+{
+  "date": "2026-11-15T19:06:24+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 5,
+  "scenarios": [
+    {
+      "name": "Cursor fetchall 100k int/varchar",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.03521508400081075,
+        "mysqlclient": 0.0353934169979766,
+        "pymysql": 0.23800316699998803
+      }
+    },
+    {
+      "name": "DictCursor fetchall 100k int/varchar",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.039442249999410706,
+        "mysqlclient": 0.03913983299935353,
+        "pymysql": 0.2615704999989248
+      }
+    },
+    {
+      "name": "DictCursor fetchall 100k mixed",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.06979545799913467,
+        "mysqlclient": 0.14956262499981676,
+        "pymysql": 0.46924829199997475
+      }
+    },
+    {
+      "name": "SSCursor iterate 100k int/varchar",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.021020832999056438,
+        "mysqlclient": 0.049445041000581114,
+        "pymysql": 0.283223624999664
+      }
+    },
+    {
+      "name": "SSCursor iterate 100k mixed",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.04117050000058953,
+        "mysqlclient": 0.1406669999996666,
+        "pymysql": 0.4674589169990213
+      }
+    },
+    {
+      "name": "SSCursor fetchmany(1000) 100k int/varchar",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.020996084000216797,
+        "mysqlclient": 0.02074829199773376,
+        "pymysql": 0.2742822090003756
+      }
+    },
+    {
+      "name": "SSCursor fetchone 100k int/varchar",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.029859957998269238,
+        "mysqlclient": 0.047585791999154026,
+        "pymysql": 0.28045270900111063
+      }
+    },
+    {
+      "name": "SSCursor fetchall 100k int/varchar",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.02351391699994565,
+        "mysqlclient": 0.023012500001641456,
+        "pymysql": 0.28369241600012174
+      }
+    },
+    {
+      "name": "SSDictCursor iterate 100k int/varchar",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.021391375001257984,
+        "mysqlclient": 0.05655991700041341,
+        "pymysql": 0.30069716700018034
+      }
+    },
+    {
+      "name": "SSCursor iterate 1M int/varchar",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.1330348330011475,
+        "mysqlclient": 0.41995208299704245,
+        "pymysql": 2.078700292000576
+      }
+    },
+    {
+      "name": "SSCursor first row of 1M",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.0002916670018748846,
+        "mysqlclient": 0.00026200000138487667,
+        "pymysql": 0.00040420799996354617
+      }
+    }
+  ],
+  "memory": [
+    {
+      "rows": 100000,
+      "cursor": "Cursor",
+      "peak_mib": {
+        "rustmy": 27.3,
+        "mysqlclient": 27.3,
+        "pymysql": 20.0
+      }
+    },
+    {
+      "rows": 100000,
+      "cursor": "SSCursor",
+      "peak_mib": {
+        "rustmy": 0.1,
+        "mysqlclient": 0.0,
+        "pymysql": 0.1
+      }
+    },
+    {
+      "rows": 1000000,
+      "cursor": "Cursor",
+      "peak_mib": {
+        "rustmy": 312.2,
+        "mysqlclient": 288.8,
+        "pymysql": 206.2
+      }
+    },
+    {
+      "rows": 1000000,
+      "cursor": "SSCursor",
+      "peak_mib": {
+        "rustmy": 0.2,
+        "mysqlclient": 0.0,
+        "pymysql": 0.5
+      }
+    }
+  ]
+}

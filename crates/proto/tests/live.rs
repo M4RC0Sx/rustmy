@@ -17,6 +17,8 @@ use rustmy_proto::Conn;
 use rustmy_proto::Error;
 use rustmy_proto::Opts;
 use rustmy_proto::QueryResult;
+use rustmy_proto::ReadOutcome;
+use rustmy_proto::RowSet;
 use rustmy_proto::SslMode;
 use rustmy_proto::TlsOpts;
 use rustmy_proto::constants::ColumnType;
@@ -185,16 +187,29 @@ fn server_error_leaves_connection_usable() {
     }
 }
 
+const DIGITS: &str = "(SELECT 0 d UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL \
+     SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL \
+     SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9)";
+
+/// 10,000 rows: `n` from 0 to 9999 in order and a short padding column.
+fn many_rows_sql() -> String {
+    format!(
+        "SELECT a.d * 1000 + b.d * 100 + c.d * 10 + e.d AS n, REPEAT('x', e.d) AS pad \
+         FROM {DIGITS} a, {DIGITS} b, {DIGITS} c, {DIGITS} e ORDER BY n"
+    )
+}
+
+/// First cell of every row, as UTF-8.
+fn first_cells(rows: &RowSet) -> Vec<String> {
+    rows.rows()
+        .map(|row| String::from_utf8(row.cells().next().unwrap().unwrap().to_vec()).unwrap())
+        .collect()
+}
+
 #[test]
 #[ignore = "needs `docker compose up -d --wait`"]
 fn many_rows() {
-    const DIGITS: &str = "(SELECT 0 d UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL \
-         SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL \
-         SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9)";
-    let sql = format!(
-        "SELECT a.d * 1000 + b.d * 100 + c.d * 10 + e.d AS n, REPEAT('x', e.d) AS pad \
-         FROM {DIGITS} a, {DIGITS} b, {DIGITS} c, {DIGITS} e ORDER BY n"
-    );
+    let sql = many_rows_sql();
     for server in servers() {
         let mut conn = connect(server);
         let result = conn.query(sql.as_bytes()).unwrap();
@@ -640,5 +655,135 @@ fn read_timeout_interrupts_a_slow_query() {
         let err = conn.query(b"SELECT SLEEP(3)").unwrap_err();
         assert!(matches!(err, Error::Io(_)), "{server:?}: {err}");
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+}
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn streamed_rows_arrive_in_batches() {
+    let sql = many_rows_sql();
+    for server in servers() {
+        let mut conn = connect(server);
+        let (head, id) = conn.query_streamed(sql.as_bytes()).unwrap();
+        let id = id.expect("a result set");
+        assert_eq!(head.columns.len(), 2);
+        assert!(head.rows.is_empty());
+
+        let mut rows = head.rows;
+        let mut seen = Vec::new();
+        let mut batches = 0;
+        loop {
+            rows.clear();
+            let outcome = conn.read_rows(id, &mut rows, 4096).unwrap();
+            batches += 1;
+            seen.extend(first_cells(&rows));
+            if matches!(outcome, ReadOutcome::Done { .. }) {
+                break;
+            }
+            assert!(!rows.is_empty(), "{server:?}: a batch holds a row at least");
+        }
+        let expected: Vec<String> = (0..10_000).map(|n| n.to_string()).collect();
+        assert_eq!(seen, expected, "{server:?}");
+        assert!(batches > 10, "{server:?}: {batches} batches");
+
+        // Finished: the id no longer reads anything.
+        assert!(matches!(
+            conn.read_rows(id, &mut rows, 1),
+            Err(Error::ResultDiscarded)
+        ));
+        assert_eq!(table(&conn.query(b"SELECT 2").unwrap()), [["2"]]);
+    }
+}
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn the_next_command_discards_unread_streamed_rows() {
+    let sql = many_rows_sql();
+    for server in servers() {
+        let mut conn = connect(server);
+        let (head, id) = conn.query_streamed(sql.as_bytes()).unwrap();
+        let id = id.unwrap();
+        assert_eq!(conn.skip_rows(id, 10).unwrap(), (10, ReadOutcome::More));
+        let mut rows = head.rows;
+        conn.read_rows(id, &mut rows, 1).unwrap();
+        assert_eq!(first_cells(&rows), ["10"], "{server:?}");
+
+        assert_eq!(table(&conn.query(b"SELECT 2").unwrap()), [["2"]]);
+        assert!(matches!(
+            conn.read_rows(id, &mut rows, 1),
+            Err(Error::ResultDiscarded)
+        ));
+        assert!(matches!(conn.skip_rows(id, 1), Err(Error::ResultDiscarded)));
+
+        // Skipping past the end stops there.
+        let (_, id) = conn.query_streamed(b"SELECT 1 UNION ALL SELECT 2").unwrap();
+        let (skipped, outcome) = conn.skip_rows(id.unwrap(), 5).unwrap();
+        assert_eq!(skipped, 2);
+        assert!(matches!(outcome, ReadOutcome::Done { .. }));
+        conn.ping().unwrap();
+    }
+}
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn streamed_multiple_results() {
+    for server in servers() {
+        let mut o = opts(server, "rustmy");
+        o.client_flag = capability::MULTI_STATEMENTS;
+        let mut conn = Conn::connect(&o).unwrap();
+
+        let (_, first) = conn
+            .query_streamed(b"SELECT 1 UNION ALL SELECT 2; DO 0; SELECT 3")
+            .unwrap();
+        assert!(first.is_some());
+        // Moving on discards the rows left in the first result.
+        let (ok, none) = conn.next_result_streamed().unwrap().unwrap();
+        assert!(none.is_none() && ok.columns.is_empty(), "{server:?}");
+        let (mut third, id) = conn.next_result_streamed().unwrap().unwrap();
+        let outcome = conn
+            .read_rows(id.unwrap(), &mut third.rows, usize::MAX)
+            .unwrap();
+        assert!(matches!(outcome, ReadOutcome::Done { .. }));
+        assert_eq!(first_cells(&third.rows), ["3"]);
+        assert!(conn.next_result_streamed().unwrap().is_none());
+
+        // Unread rows and unread results are both drained by a command.
+        conn.query_streamed(b"SELECT 1 UNION ALL SELECT 2; SELECT 3")
+            .unwrap();
+        conn.ping().unwrap();
+        assert!(!conn.has_more_results());
+        assert_eq!(table(&conn.query(b"SELECT 4").unwrap()), [["4"]]);
+    }
+}
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn server_error_mid_stream_ends_the_result_set() {
+    // The scalar subquery fails at run time, at the row with n = 5000,
+    // after the rows before it were sent (the ordered derived table is
+    // materialised, so they come first).
+    let sql = format!(
+        "SELECT n, IF(n < 5000, 1, (SELECT 1 UNION ALL SELECT 2)) AS x \
+         FROM ({} LIMIT 10000) AS numbers",
+        many_rows_sql()
+    );
+    for server in servers() {
+        let mut conn = connect(server);
+        let (mut head, id) = conn.query_streamed(sql.as_bytes()).unwrap();
+        let id = id.unwrap();
+        let err = conn.read_rows(id, &mut head.rows, usize::MAX).unwrap_err();
+        assert!(
+            matches!(err, Error::Server { code: 1242, .. }),
+            "{server:?}: {err}"
+        );
+        assert_eq!(head.rows.len(), 5000, "{server:?}: rows before the error");
+        assert!(matches!(
+            conn.read_rows(id, &mut head.rows, 1),
+            Err(Error::ResultDiscarded)
+        ));
+
+        // Discarding such a result swallows its error: nobody reads it.
+        conn.query_streamed(sql.as_bytes()).unwrap();
+        assert_eq!(table(&conn.query(b"SELECT 2").unwrap()), [["2"]]);
     }
 }

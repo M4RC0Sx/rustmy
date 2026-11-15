@@ -1,8 +1,11 @@
 //! Text-protocol values to Python objects.
 //!
-//! Each column's converter is chosen once per result set; rows are then
-//! converted in a tight loop straight from the contiguous row buffer. Byte
-//! parsing lives in `rustmy_proto::text`; this module only builds objects.
+//! Each column's converter (and, for dict rows, each key) is chosen once per
+//! result set; rows are then converted in a tight loop straight from the
+//! contiguous row buffer. Byte parsing lives in `rustmy_proto::text`; this
+//! module only builds objects.
+
+use std::collections::HashSet;
 
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
@@ -11,12 +14,14 @@ use pyo3::types::PyBytes;
 use pyo3::types::PyDate;
 use pyo3::types::PyDateTime;
 use pyo3::types::PyDelta;
+use pyo3::types::PyDict;
 use pyo3::types::PyList;
 use pyo3::types::PyString;
 use pyo3::types::PyTuple;
 use pyo3::types::PyType;
 use rustmy_proto::Column;
 use rustmy_proto::QueryResult;
+use rustmy_proto::RowSet;
 use rustmy_proto::constants::ColumnType;
 use rustmy_proto::constants::column_flag;
 use rustmy_proto::text;
@@ -71,10 +76,92 @@ pub(crate) fn decimal_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
     DECIMAL.import(py, "decimal", "Decimal")
 }
 
+/// How the rows of one result set become Python objects, decided once from
+/// its columns.
+#[derive(Debug)]
+pub(crate) struct Converter {
+    kinds: Vec<Kind>,
+    decimal: Option<Py<PyType>>,
+    /// One key per column for dict rows; `None` for tuple rows.
+    keys: Option<Vec<Py<PyString>>>,
+}
+
+impl Converter {
+    pub(crate) fn new(py: Python<'_>, columns: &[Column], as_dict: bool) -> PyResult<Self> {
+        let kinds: Vec<Kind> = columns.iter().map(kind).collect();
+        let decimal = if kinds.contains(&Kind::Decimal) {
+            Some(decimal_type(py)?.clone().unbind())
+        } else {
+            None
+        };
+        Ok(Self {
+            kinds,
+            decimal,
+            keys: as_dict.then(|| dict_keys(py, columns)),
+        })
+    }
+
+    /// Converts every row of `rows`, handing each object to `push`.
+    pub(crate) fn convert<'py>(
+        &self,
+        py: Python<'py>,
+        rows: &RowSet,
+        mut push: impl FnMut(Bound<'py, PyAny>),
+    ) -> PyResult<()> {
+        let decimal = self.decimal.as_ref().map(|d| d.bind(py));
+        let cell_value = |cell: Option<&[u8]>, kind: Kind| match cell {
+            None => Ok(py.None().into_bound(py)),
+            Some(bytes) => value(py, kind, bytes, decimal),
+        };
+        if let Some(keys) = &self.keys {
+            for row in rows.rows() {
+                let dict = PyDict::new(py);
+                for ((cell, &kind), key) in row.cells().zip(&self.kinds).zip(keys) {
+                    dict.set_item(key.bind(py), cell_value(cell, kind)?)?;
+                }
+                push(dict.into_any());
+            }
+        } else {
+            let mut values = Vec::with_capacity(self.kinds.len());
+            for row in rows.rows() {
+                for (cell, &kind) in row.cells().zip(&self.kinds) {
+                    values.push(cell_value(cell, kind)?);
+                }
+                push(PyTuple::new(py, values.drain(..))?.into_any());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Dict keys: the column name, or `table.name` for a name already taken
+/// (as other MySQL drivers do; a name taken twice keeps the last value).
+/// Interned, so lookups with literal keys compare by identity.
+fn dict_keys(py: Python<'_>, columns: &[Column]) -> Vec<Py<PyString>> {
+    let mut seen = HashSet::with_capacity(columns.len());
+    columns
+        .iter()
+        .map(|c| {
+            let name = if seen.contains(c.name.as_str()) {
+                format!("{}.{}", c.table, c.name)
+            } else {
+                c.name.clone()
+            };
+            let key = PyString::intern(py, &name).unbind();
+            seen.insert(name);
+            key
+        })
+        .collect()
+}
+
 /// `(description, rows, rowcount, last_insert_id, warnings)`. For statements
 /// without a result set, description and rows are `None` and rowcount is the
-/// number of affected rows.
-pub(crate) fn result_to_py(py: Python<'_>, result: &QueryResult) -> PyResult<Py<PyAny>> {
+/// number of affected rows. Rows are dicts with `as_dict`, else tuples.
+pub(crate) fn result_to_py(
+    py: Python<'_>,
+    result: &QueryResult,
+    as_dict: bool,
+) -> PyResult<Py<PyAny>> {
     if result.columns.is_empty() {
         return (
             py.None(),
@@ -85,9 +172,12 @@ pub(crate) fn result_to_py(py: Python<'_>, result: &QueryResult) -> PyResult<Py<
         )
             .into_py_any(py);
     }
+    let converter = Converter::new(py, &result.columns, as_dict)?;
+    let mut rows = Vec::with_capacity(result.rows.len());
+    converter.convert(py, &result.rows, |row| rows.push(row))?;
     (
         description(py, &result.columns)?,
-        rows(py, result)?,
+        PyList::new(py, rows)?,
         result.rows.len(),
         result.last_insert_id,
         result.warnings,
@@ -96,7 +186,10 @@ pub(crate) fn result_to_py(py: Python<'_>, result: &QueryResult) -> PyResult<Py<
 }
 
 /// PEP 249 `cursor.description`: one 7-item tuple per column.
-fn description<'py>(py: Python<'py>, columns: &[Column]) -> PyResult<Bound<'py, PyTuple>> {
+pub(crate) fn description<'py>(
+    py: Python<'py>,
+    columns: &[Column],
+) -> PyResult<Bound<'py, PyTuple>> {
     let items = columns
         .iter()
         .map(|c| {
@@ -113,27 +206,6 @@ fn description<'py>(py: Python<'py>, columns: &[Column]) -> PyResult<Bound<'py, 
         })
         .collect::<PyResult<Vec<_>>>()?;
     PyTuple::new(py, items)
-}
-
-fn rows<'py>(py: Python<'py>, result: &QueryResult) -> PyResult<Bound<'py, PyList>> {
-    let kinds: Vec<Kind> = result.columns.iter().map(kind).collect();
-    let decimal = if kinds.contains(&Kind::Decimal) {
-        Some(decimal_type(py)?)
-    } else {
-        None
-    };
-    let mut out = Vec::with_capacity(result.rows.len());
-    let mut values = Vec::with_capacity(kinds.len());
-    for row in result.rows.rows() {
-        for (cell, &kind) in row.cells().zip(&kinds) {
-            values.push(match cell {
-                None => py.None().into_bound(py),
-                Some(bytes) => value(py, kind, bytes, decimal)?,
-            });
-        }
-        out.push(PyTuple::new(py, values.drain(..))?);
-    }
-    PyList::new(py, out)
 }
 
 fn value<'py>(

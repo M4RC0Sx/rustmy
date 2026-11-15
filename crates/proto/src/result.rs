@@ -109,6 +109,18 @@ impl RowSet {
         self.cells.is_empty()
     }
 
+    /// Drops every row, keeping the column count and the allocations, so
+    /// the next batch of a streamed result set reuses them.
+    pub fn clear(&mut self) {
+        self.data.clear();
+        self.cells.clear();
+    }
+
+    /// Bytes of row data held.
+    pub(crate) const fn data_len(&self) -> usize {
+        self.data.len()
+    }
+
     /// Number of cells per row.
     #[must_use]
     pub const fn columns(&self) -> usize {
@@ -218,6 +230,23 @@ pub(crate) enum RowPacket {
     End(OkPacket),
 }
 
+/// Tells a row packet from the end of the result set: `None` for a row, the
+/// terminator's fields at the end, or the server error that aborted it.
+pub(crate) fn row_terminator(payload: &[u8], deprecate_eof: bool) -> Result<Option<OkPacket>> {
+    // A row can only start with 0xFE when its first cell is at least 16 MiB
+    // long, so a short 0xFE packet is always the terminator.
+    match payload.first() {
+        Some(0xFE) if payload.len() < crate::MAX_PACKET_PAYLOAD => if deprecate_eof {
+            parse_ok(payload)
+        } else {
+            parse_eof(payload)
+        }
+        .map(Some),
+        Some(0xFF) => Err(parse_err(payload)),
+        _ => Ok(None),
+    }
+}
+
 /// Classifies the packet just appended to `rows` at `range`: indexes it if it
 /// is a row, removes it from the buffer if it terminates the result set.
 pub(crate) fn accept_row_packet(
@@ -226,26 +255,16 @@ pub(crate) fn accept_row_packet(
     deprecate_eof: bool,
 ) -> Result<RowPacket> {
     let payload = rows.data.get(range.clone()).unwrap_or_default();
-    // A row can only start with 0xFE when its first cell is at least 16 MiB
-    // long, so a short 0xFE packet is always the terminator.
-    let outcome = match payload.first() {
-        Some(0xFE) if payload.len() < crate::MAX_PACKET_PAYLOAD => {
-            let end = if deprecate_eof {
-                parse_ok(payload)?
-            } else {
-                parse_eof(payload)?
-            };
-            Some(Ok(end))
-        }
-        Some(0xFF) => Some(Err(parse_err(payload))),
-        _ => None,
-    };
-    match outcome {
-        Some(end) => {
+    match row_terminator(payload, deprecate_eof) {
+        Ok(None) => rows.push_row(range).map(|()| RowPacket::Row),
+        Ok(Some(end)) => {
             rows.data.truncate(range.start);
-            end.map(RowPacket::End)
+            Ok(RowPacket::End(end))
         }
-        None => rows.push_row(range).map(|()| RowPacket::Row),
+        Err(err) => {
+            rows.data.truncate(range.start);
+            Err(err)
+        }
     }
 }
 

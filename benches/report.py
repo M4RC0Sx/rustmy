@@ -4,7 +4,8 @@
         benches/results/phase0-py310.json benches/results/phase0-py314.json
 
 Writes ``<output>-light.svg`` and ``<output>-dark.svg`` (one panel per input
-file, or one panel per row count for an ``executemany.py`` sweep) and rewrites
+file, or one panel per row count or scenario for an ``executemany.py`` or
+``cursors.py --sweep-json`` sweep) and rewrites
 the block between the ``results:SECTION:start`` / ``results:SECTION:end``
 markers of ``benches/README.md`` (``--section``, default ``phase0``).
 """
@@ -189,14 +190,21 @@ def finish(fig: Any, theme: Theme, path: Path, title: str) -> None:
     plt.close(fig)
 
 
-#: How the reference drivers appear in the sweep (their default batch size).
+#: How the reference drivers appear in the executemany sweep (their default
+#: batch size); other sweeps name them in their own ``labels``.
 SWEEP_LABELS = {"mysqlclient": "mysqlclient (64 KiB)", "pymysql": "PyMySQL (~1 MB)"}
 
 
-def sweep_label(config: str, default: str) -> str:
-    if config == default:
+def sweep_label(config: str, run: dict[str, Any]) -> str:
+    if config == run["default"]:
         return f"{config} (default)"
-    return SWEEP_LABELS.get(config, config)
+    labels: dict[str, str] = run.get("labels", SWEEP_LABELS)
+    return labels.get(config, config)
+
+
+def panel_title(panel: dict[str, Any]) -> str:
+    title: str = panel.get("label", f"{panel['rows']:,} rows")
+    return title
 
 
 def driver_of(config: str) -> str:
@@ -234,17 +242,13 @@ def plot_sweep(run: dict[str, Any], theme: Theme, path: Path) -> None:
             )
             if driver_of(config) != "mysqlclient":
                 bar_label(ax, theme, value, i, longest)
-        style_axis(ax, theme, f"{panel['rows']:,} rows", longest)
-    names = [sweep_label(c, run["default"]) for c in configs]
+        style_axis(ax, theme, panel_title(panel), longest)
+    names = [sweep_label(c, run) for c in configs]
     first = axes[0][0]
     first.set_yticks(range(len(names)), names, color=theme.text, fontsize=9)
     first.invert_yaxis()
-    finish(
-        fig,
-        theme,
-        path,
-        f"executemany INSERT: throughput relative to mysqlclient ({run['python']})",
-    )
+    title = run.get("title", "executemany INSERT: throughput relative to mysqlclient")
+    finish(fig, theme, path, f"{title} ({run['python']})")
 
 
 def table(run: dict[str, Any]) -> str:
@@ -283,16 +287,16 @@ def sweep_table(run: dict[str, Any]) -> str:
     panels = run["sweep"]
     header = (
         "| Configuration | "
-        + " | ".join(f"{p['rows']:,} rows" for p in panels)
+        + " | ".join(panel_title(p) for p in panels)
         + " | "
-        + " | ".join(f"vs mysqlclient ({p['rows']:,})" for p in panels)
+        + " | ".join(f"vs mysqlclient ({panel_title(p)})" for p in panels)
         + " |\n|---|"
         + "--:|" * (2 * len(panels))
         + "\n"
     )
     lines = []
     for config in panels[0]["seconds"]:
-        name = sweep_label(config, run["default"])
+        name = sweep_label(config, run)
         times = []
         for p in panels:
             seconds = p["seconds"][config]
@@ -313,6 +317,23 @@ def sweep_table(run: dict[str, Any]) -> str:
     return f"{setup}\n\n{header}" + "\n".join(lines) + "\n"
 
 
+def memory_table(run: dict[str, Any]) -> str:
+    """Peak memory growth while reading a result set (``cursors.py --memory``)."""
+    header = (
+        "| Cursor | Rows | rustmy | mysqlclient | PyMySQL |\n|---|--:|--:|--:|--:|\n"
+    )
+    lines = []
+    for entry in run["memory"]:
+        peak = entry["peak_mib"]
+        cells = " | ".join(f"{peak[d]:.1f} MiB" for d in DRIVERS)
+        lines.append(f"| {entry['cursor']} | {entry['rows']:,} | {cells} |")
+    return (
+        "\nPeak memory growth while reading the result set, each in a fresh "
+        "process (buffered: the whole result at once, as `fetchall()` holds it; "
+        "streaming: iterating):\n\n" + header + "\n".join(lines) + "\n"
+    )
+
+
 def readme_block(runs: list[dict[str, Any]], output: Path) -> str:
     rel = output.relative_to(HERE).as_posix()
     picture = (
@@ -330,6 +351,7 @@ def readme_block(runs: list[dict[str, Any]], output: Path) -> str:
         "\nTimes per driver; the fastest is in bold. Ratios above 1 mean rustmy "
         "is faster.\n"
     )
+    note += "".join(memory_table(run) for run in runs if "memory" in run)
     if any(s["informative"] for run in runs for s in run["scenarios"]):
         note += (
             "¹ Not comparable yet: rustmy runs one INSERT per row, mysqlclient "

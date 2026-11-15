@@ -32,10 +32,12 @@ use crate::handshake::ssl_request;
 use crate::packet::PacketStream;
 use crate::result::QueryResult;
 use crate::result::RowPacket;
+use crate::result::RowSet;
 use crate::result::accept_row_packet;
 use crate::result::parse_eof;
 use crate::result::parse_err;
 use crate::result::parse_ok;
+use crate::result::row_terminator;
 use crate::tls::SslMode;
 use crate::tls::TlsOpts;
 use crate::tls::client_config;
@@ -268,6 +270,27 @@ fn load_public_key(path: &std::path::Path) -> Result<rsa::PublicKey> {
         .map_err(|e| Error::Config(format!("server_public_key {}: {e}", path.display())))
 }
 
+/// Identifies a result set whose rows are being streamed, so that reading
+/// more rows fails once another command has discarded them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamId(u64);
+
+/// Where a streamed result set stands after a read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOutcome {
+    /// More rows (or the terminator) are still on the wire.
+    More,
+    /// The result set ended; the terminator carried this many warnings.
+    Done { warnings: u16 },
+}
+
+/// The result set whose rows are still unread on the wire.
+#[derive(Debug, Clone, Copy)]
+struct Pending {
+    id: StreamId,
+    deprecate_eof: bool,
+}
+
 /// An authenticated connection to a MySQL or MariaDB server.
 #[derive(Debug)]
 pub struct Conn {
@@ -283,6 +306,10 @@ pub struct Conn {
     pinned_key: Option<rsa::PublicKey>,
     /// Scratch buffer for control packets.
     buf: Vec<u8>,
+    /// Streamed result set with rows still on the wire.
+    pending: Option<Pending>,
+    /// Last [`StreamId`] handed out.
+    last_stream_id: u64,
 }
 
 impl Conn {
@@ -341,6 +368,8 @@ impl Conn {
                 .map(load_public_key)
                 .transpose()?,
             buf,
+            pending: None,
+            last_stream_id: 0,
         };
         conn.authenticate(opts)?;
         Ok(conn)
@@ -485,9 +514,122 @@ impl Conn {
     ///
     /// I/O failures, protocol violations or an ERR packet from the server.
     pub fn query(&mut self, sql: &[u8]) -> Result<QueryResult> {
+        let (result, stream) = self.query_streamed(sql)?;
+        self.read_all(result, stream)
+    }
+
+    /// Like [`Conn::query`], but leaves the rows on the wire: the result
+    /// has the columns and no rows, and the [`StreamId`] (present when there
+    /// is a result set) reads them with [`Conn::read_rows`].
+    ///
+    /// Until every row is read, the next command discards the rest first.
+    ///
+    /// # Errors
+    ///
+    /// I/O failures, protocol violations or an ERR packet from the server.
+    pub fn query_streamed(&mut self, sql: &[u8]) -> Result<(QueryResult, Option<StreamId>)> {
         self.drain_results()?;
         self.stream.write_command(command::QUERY, sql)?;
-        self.read_result()
+        self.read_head()
+    }
+
+    /// Reads rows of the streamed result set `id` into `rows`, stopping
+    /// once `rows` holds at least `max_bytes` more bytes than before (always
+    /// after one row at least) or at the end of the result set.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ResultDiscarded`] if `id` is not the pending result set,
+    /// I/O failures, protocol violations, or an ERR packet that aborted the
+    /// result set (which then counts as ended).
+    pub fn read_rows(
+        &mut self,
+        id: StreamId,
+        rows: &mut RowSet,
+        max_bytes: usize,
+    ) -> Result<ReadOutcome> {
+        let pending = self.pending_rows(id)?;
+        let limit = rows.data_len().saturating_add(max_bytes);
+        loop {
+            let packet = self
+                .stream
+                .read_into(rows.data_mut())
+                .and_then(|range| accept_row_packet(rows, range, pending.deprecate_eof));
+            match packet {
+                Ok(RowPacket::Row) => {
+                    if rows.data_len() >= limit {
+                        return Ok(ReadOutcome::More);
+                    }
+                }
+                Ok(RowPacket::End(end)) => {
+                    self.pending = None;
+                    self.status = end.status;
+                    return Ok(ReadOutcome::Done {
+                        warnings: end.warnings,
+                    });
+                }
+                Err(err) => {
+                    self.pending = None;
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    /// Reads and drops up to `limit` rows of the streamed result set `id`
+    /// without decoding them. Returns how many were skipped.
+    ///
+    /// # Errors
+    ///
+    /// As [`Conn::read_rows`].
+    pub fn skip_rows(&mut self, id: StreamId, limit: usize) -> Result<(usize, ReadOutcome)> {
+        let pending = self.pending_rows(id)?;
+        let mut skipped = 0;
+        while skipped < limit {
+            let end = self
+                .read_packet()
+                .and_then(|()| row_terminator(&self.buf, pending.deprecate_eof));
+            match end {
+                Ok(None) => skipped += 1,
+                Ok(Some(end)) => {
+                    self.pending = None;
+                    self.status = end.status;
+                    return Ok((
+                        skipped,
+                        ReadOutcome::Done {
+                            warnings: end.warnings,
+                        },
+                    ));
+                }
+                Err(err) => {
+                    self.pending = None;
+                    return Err(err);
+                }
+            }
+        }
+        Ok((skipped, ReadOutcome::More))
+    }
+
+    fn pending_rows(&self, id: StreamId) -> Result<Pending> {
+        match self.pending {
+            Some(pending) if pending.id == id => Ok(pending),
+            _ => Err(Error::ResultDiscarded),
+        }
+    }
+
+    /// Reads the remaining rows of `stream` into `result`.
+    fn read_all(
+        &mut self,
+        mut result: QueryResult,
+        stream: Option<StreamId>,
+    ) -> Result<QueryResult> {
+        if let Some(id) = stream
+            && let ReadOutcome::Done { warnings } =
+                self.read_rows(id, &mut result.rows, usize::MAX)?
+        {
+            result.warnings = warnings;
+        }
+        Ok(result)
     }
 
     /// Whether the server has more results queued for the last query
@@ -503,14 +645,30 @@ impl Conn {
     ///
     /// I/O failures, protocol violations or an ERR packet from the server.
     pub fn next_result(&mut self) -> Result<Option<QueryResult>> {
+        self.next_result_streamed()?
+            .map(|(result, stream)| self.read_all(result, stream))
+            .transpose()
+    }
+
+    /// Like [`Conn::next_result`], leaving the rows on the wire as
+    /// [`Conn::query_streamed`] does. Unread rows of the current result set
+    /// are discarded first.
+    ///
+    /// # Errors
+    ///
+    /// I/O failures, protocol violations or an ERR packet from the server.
+    pub fn next_result_streamed(&mut self) -> Result<Option<(QueryResult, Option<StreamId>)>> {
+        self.discard_pending_rows()?;
         if self.has_more_results() {
-            self.read_result().map(Some)
+            self.read_head().map(Some)
         } else {
             Ok(None)
         }
     }
 
-    fn read_result(&mut self) -> Result<QueryResult> {
+    /// Reads the start of a statement's response: the OK packet, or the
+    /// column definitions of a result set, whose rows stay pending.
+    fn read_head(&mut self) -> Result<(QueryResult, Option<StreamId>)> {
         // An error ends the whole response, including queued results.
         self.status &= !status::MORE_RESULTS_EXISTS;
         self.read_packet()?;
@@ -518,7 +676,7 @@ impl Conn {
             Some(0x00) => {
                 let ok = parse_ok(&self.buf)?;
                 self.status = ok.status;
-                Ok(QueryResult::from_ok(ok))
+                Ok((QueryResult::from_ok(ok), None))
             }
             Some(0xFF) => Err(parse_err(&self.buf)),
             Some(0xFB) => {
@@ -532,13 +690,13 @@ impl Conn {
             }
             Some(_) => {
                 let count = Reader::new(&self.buf).lenenc_len()?;
-                self.read_rowset(count)
+                self.read_columns(count)
             }
             None => Err(Error::protocol("empty response packet")),
         }
     }
 
-    fn read_rowset(&mut self, count: usize) -> Result<QueryResult> {
+    fn read_columns(&mut self, count: usize) -> Result<(QueryResult, Option<StreamId>)> {
         let deprecate_eof = self.capabilities & capability::DEPRECATE_EOF != 0;
         // Cap the preallocation: `count` comes from the server.
         let mut columns = Vec::with_capacity(count.min(4096));
@@ -553,19 +711,10 @@ impl Conn {
             }
             self.status = parse_eof(&self.buf)?.status;
         }
-
-        let mut result = QueryResult::rowset(columns);
-        loop {
-            let range = self.stream.read_into(result.rows.data_mut())?;
-            match accept_row_packet(&mut result.rows, range, deprecate_eof)? {
-                RowPacket::Row => {}
-                RowPacket::End(end) => {
-                    self.status = end.status;
-                    result.warnings = end.warnings;
-                    return Ok(result);
-                }
-            }
-        }
+        self.last_stream_id += 1;
+        let id = StreamId(self.last_stream_id);
+        self.pending = Some(Pending { id, deprecate_eof });
+        Ok((QueryResult::rowset(columns), Some(id)))
     }
 
     /// Switches the default database (`COM_INIT_DB`).
@@ -627,12 +776,31 @@ impl Conn {
         self.auth_exchange(password.as_bytes(), plugin, nonce)
     }
 
-    /// Discards unread results of a previous multi-result query.
+    /// Discards unread rows of a streamed result set and unread results of
+    /// a previous multi-result query, so the connection never gets out of
+    /// sync.
     fn drain_results(&mut self) -> Result<()> {
+        self.discard_pending_rows()?;
         while self.has_more_results() {
-            self.read_result()?;
+            // Queued results nobody asked for: their rows are never decoded.
+            if self.read_head()?.1.is_some() {
+                self.discard_pending_rows()?;
+            }
         }
         Ok(())
+    }
+
+    /// Reads and drops the rows of the pending result set, if any. A server
+    /// error among them ends that result set and is not reported: it
+    /// belongs to a result nobody reads any more.
+    fn discard_pending_rows(&mut self) -> Result<()> {
+        let Some(pending) = self.pending else {
+            return Ok(());
+        };
+        match self.skip_rows(pending.id, usize::MAX) {
+            Ok(_) | Err(Error::Server { .. }) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     /// Reads the reply to a command that answers OK or ERR.

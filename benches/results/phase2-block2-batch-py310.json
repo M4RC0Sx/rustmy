@@ -1,0 +1,76 @@
+{
+  "date": "2026-11-15T19:06:24+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 5,
+  "title": "SSCursor batch size: throughput relative to mysqlclient",
+  "labels": {
+    "mysqlclient": "mysqlclient (row by row)",
+    "pymysql": "PyMySQL (row by row)"
+  },
+  "default": "rustmy 4 KiB",
+  "sweep": [
+    {
+      "rows": 100000,
+      "label": "iterate 100k int/varchar",
+      "seconds": {
+        "mysqlclient": 0.050531916996988,
+        "pymysql": 0.2843396250027581,
+        "rustmy 4 KiB": 0.02101270799903432,
+        "rustmy 8 KiB": 0.020902041000226745,
+        "rustmy 16 KiB": 0.02098854199721245,
+        "rustmy 64 KiB": 0.019585458998335525,
+        "rustmy 256 KiB": 0.021161083001061343,
+        "rustmy 1 MiB": 0.022769125000195345
+      }
+    },
+    {
+      "rows": 100000,
+      "label": "iterate 100k mixed",
+      "seconds": {
+        "mysqlclient": 0.14353195799776586,
+        "pymysql": 0.4775959580001654,
+        "rustmy 4 KiB": 0.041056874997593695,
+        "rustmy 8 KiB": 0.03990729200086207,
+        "rustmy 16 KiB": 0.04040575000180979,
+        "rustmy 64 KiB": 0.04136537500016857,
+        "rustmy 256 KiB": 0.04166487499969662,
+        "rustmy 1 MiB": 0.043791500000224914
+      }
+    },
+    {
+      "rows": 100000,
+      "label": "iterate 100k 1 KiB",
+      "seconds": {
+        "mysqlclient": 0.2587090420020104,
+        "pymysql": 0.28261816699887277,
+        "rustmy 4 KiB": 0.2604816659986682,
+        "rustmy 8 KiB": 0.26005637500202283,
+        "rustmy 16 KiB": 0.25916145800147206,
+        "rustmy 64 KiB": 0.2530976659982116,
+        "rustmy 256 KiB": 0.2549139999973704,
+        "rustmy 1 MiB": 0.25723270799790043
+      }
+    },
+    {
+      "rows": 100000,
+      "label": "first row of 1M",
+      "seconds": {
+        "mysqlclient": 0.00023904199770186096,
+        "pymysql": 0.0003954579988203477,
+        "rustmy 4 KiB": 0.00027341699751559645,
+        "rustmy 8 KiB": 0.000274417001492111,
+        "rustmy 16 KiB": 0.000380000001314329,
+        "rustmy 64 KiB": 0.0007721250003669411,
+        "rustmy 256 KiB": 0.0024664169977768324,
+        "rustmy 1 MiB": 0.008443875001830747
+      }
+    }
+  ]
+}

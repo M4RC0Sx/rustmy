@@ -26,6 +26,8 @@ mod tls;
 pub use column::Column;
 pub use conn::Conn;
 pub use conn::Opts;
+pub use conn::ReadOutcome;
+pub use conn::StreamId;
 pub use error::Error;
 pub use error::Result;
 pub use result::QueryResult;
