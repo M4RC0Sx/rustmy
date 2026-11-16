@@ -30,7 +30,11 @@ jobs:
         with:
           ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: taiki-e/install-action@cargo-fuzz
+      # cargo-fuzz has no @<tool> shortcut tag in install-action (that ref is
+      # a stale branch that installs nothing): name it as a tool instead.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       # Keep the corpus between runs so each week builds on the last.
       - uses: actions/cache@v6
         with:
