@@ -32,9 +32,10 @@ jobs:
       # The PyO3 cdylib cannot link a native test binary; Python tests cover it.
       - run: cargo nextest run --workspace --exclude rustmy-pydriver
       # THIRD-PARTY-LICENSES ships in every wheel: it must match the crates
-      # compiled in (regenerate with the command in about.toml).
+      # compiled in (regenerate with the command in about.toml). --locked, not
+      # --frozen: the other platforms' crates may not be in this runner's cache.
       - uses: taiki-e/install-action@cargo-about
-      - run: cargo about generate --frozen -m crates/pydriver/Cargo.toml about.hbs -o THIRD-PARTY-LICENSES
+      - run: cargo about generate --locked -m crates/pydriver/Cargo.toml about.hbs -o THIRD-PARTY-LICENSES
       - run: git diff --exit-code THIRD-PARTY-LICENSES
 
   rust-integration:
