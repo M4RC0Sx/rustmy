@@ -69,7 +69,7 @@ def test_dict_rows(conn: rustmy.Connection, cursor_class: type[Cursor]) -> None:
     assert cursor.description is not None
     assert [d[0] for d in cursor.description] == ["a", "b", "c"]
     assert cursor.fetchone() == {"a": 1, "b": "x", "c": None}
-    assert cursor.fetchall() == [{"a": 2, "b": "y", "c": 3}]
+    assert cursor.fetchall() == ({"a": 2, "b": "y", "c": 3},)
     assert cursor.fetchone() is None
 
 
@@ -87,21 +87,21 @@ def test_dict_keys_for_repeated_names(cursor: Cursor) -> None:
     dict_cursor.execute(
         "SELECT a.id, b.id, a.v FROM (SELECT 1 AS id, 'a' AS v) a, (SELECT 2 AS id) b"
     )
-    assert dict_cursor.fetchall() == [{"id": 1, "b.id": 2, "v": "a"}]
+    assert dict_cursor.fetchall() == ({"id": 1, "b.id": 2, "v": "a"},)
 
     # Without a table the name becomes ".x"; a third copy overwrites the
     # second, as in PyMySQL and mysqlclient.
     dict_cursor.execute("SELECT 1 AS x, 2 AS x, 3 AS x")
-    assert dict_cursor.fetchall() == [{"x": 1, ".x": 3}]
+    assert dict_cursor.fetchall() == ({"x": 1, ".x": 3},)
 
 
 def test_dict_cursor_nextset_and_dml(server: Server) -> None:
     with server.connect(client_flag=MULTI_STATEMENTS) as conn:
         cursor = conn.cursor(DictCursor)
         cursor.execute("SELECT 1 AS a; SELECT 2 AS b")
-        assert cursor.fetchall() == [{"a": 1}]
+        assert cursor.fetchall() == ({"a": 1},)
         assert cursor.nextset() is True
-        assert cursor.fetchall() == [{"b": 2}]
+        assert cursor.fetchall() == ({"b": 2},)
         cursor.execute("CREATE TEMPORARY TABLE t (id INT)")
         assert cursor.execute("INSERT INTO t VALUES (1), (2)") == 2
 
@@ -117,12 +117,12 @@ def test_scroll(cursor: Cursor) -> None:
     assert cursor.rownumber == 0
     cursor.scroll(3, mode="absolute")
     assert cursor.fetchone() == (4,)
-    assert cursor.fetchall() == []
+    assert cursor.fetchall() == ()
     # fetchall() keeps the rows, so scrolling back still works.
     cursor.scroll(0, "absolute")
-    assert cursor.fetchall() == [(1,), (2,), (3,), (4,)]
+    assert cursor.fetchall() == ((1,), (2,), (3,), (4,))
     cursor.scroll(0, "absolute")
-    assert cursor.fetchmany(2) == [(1,), (2,)]
+    assert cursor.fetchmany(2) == ((1,), (2,))
 
 
 @pytest.mark.parametrize(
@@ -178,16 +178,16 @@ def test_callproc(
     assert cursor._executed == (  # noqa: SLF001
         f"CALL `{quoted}`(@`_{quoted}_0`,@`_{quoted}_1`,@`_{quoted}_2`)"
     )
-    assert cursor.fetchall() == [(21,)]
+    assert cursor.fetchall() == ((21,),)
     assert cursor.nextset() is True
-    assert cursor.fetchall() == [("hi!",)]
+    assert cursor.fetchall() == (("hi!",),)
     # The empty result of the CALL itself.
     assert cursor.nextset() is True
     assert cursor.description is None
     assert cursor.nextset() is None
 
     cursor.execute(f"SELECT @`_{quoted}_1`, @`_{quoted}_2`")
-    assert cursor.fetchall() == [(42, "HI")]
+    assert cursor.fetchall() == ((42, "HI"),)
 
 
 def test_callproc_with_a_database_name(conn: rustmy.Connection, procedure: str) -> None:
@@ -201,11 +201,11 @@ def test_callproc_with_a_database_name(conn: rustmy.Connection, procedure: str) 
         assert cursor._executed == (  # noqa: SLF001
             f"CALL `rustmy_test`.`{quoted}`({variable}_0`,{variable}_1`,{variable}_2`)"
         )
-        assert cursor.fetchall() == [(2,)]
+        assert cursor.fetchall() == ((2,),)
         while cursor.nextset():
             pass
         cursor.execute(f"SELECT {variable}_1`, {variable}_2`")
-        assert cursor.fetchall() == [(4, "AB")]
+        assert cursor.fetchall() == ((4, "AB"),)
     finally:
         cursor.execute("USE rustmy_test")
 
@@ -216,7 +216,7 @@ def test_callproc_without_args(cursor: Cursor) -> None:
     try:
         assert cursor.callproc(name) == ()
         assert cursor._executed == f"CALL `{name}`()"  # noqa: SLF001
-        assert cursor.fetchall() == [("ok",)]
+        assert cursor.fetchall() == (("ok",),)
     finally:
         cursor.execute(f"DROP PROCEDURE {name}")
 
@@ -237,19 +237,19 @@ def test_streams_large_results(ss: SSCursor) -> None:
     assert count == 10_000
     assert ss.rownumber == 10_000
     assert ss.fetchone() is None
-    assert ss.fetchall() == []
+    assert ss.fetchall() == ()
 
 
 def test_ss_fetch_methods(ss: SSCursor) -> None:
     ss.execute(SEQ)
     assert ss.fetchone() == (1,)
-    assert ss.fetchmany() == [(2,)]
+    assert ss.fetchmany() == ((2,),)
     ss.arraysize = 5
-    assert ss.fetchmany() == [(3,), (4,)]
-    assert ss.fetchmany() == []
+    assert ss.fetchmany() == ((3,), (4,))
+    assert ss.fetchmany() == ()
     ss.execute(SEQ)
-    assert ss.fetchmany(3) == [(1,), (2,), (3,)]
-    assert ss.fetchall() == [(4,)]
+    assert ss.fetchmany(3) == ((1,), (2,), (3,))
+    assert ss.fetchall() == ((4,),)
     ss.execute(SEQ)
     assert list(ss.fetchall_unbuffered()) == [(1,), (2,), (3,), (4,)]
 
@@ -296,11 +296,11 @@ def test_ss_nextset(server: Server) -> None:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             assert ss.nextset() is True
-        assert ss.fetchall() == [("two",)]
+        assert ss.fetchall() == (("two",),)
         assert ss.nextset() is True
         assert ss.nextset() is None
         ss.execute("SELECT 4")
-        assert ss.fetchall() == [(4,)]
+        assert ss.fetchall() == ((4,),)
 
 
 def test_ss_dict_scroll_and_nextset(server: Server) -> None:
@@ -310,7 +310,7 @@ def test_ss_dict_scroll_and_nextset(server: Server) -> None:
         ss.scroll(2)
         assert ss.fetchone() == {"n": 3}
         assert ss.nextset() is True
-        assert ss.fetchall() == [{"x": 1, ".x": 2}]
+        assert ss.fetchall() == ({"x": 1, ".x": 2},)
 
 
 def test_ss_rows_before_a_server_error_are_delivered(ss: SSCursor) -> None:
@@ -323,14 +323,14 @@ def test_ss_rows_before_a_server_error_are_delivered(ss: SSCursor) -> None:
     )
     rows: list[tuple[Any, ...]] = []
     with pytest.raises(rustmy.OperationalError) as excinfo:
-        while (batch := ss.fetchmany(1000)) != []:
+        while (batch := ss.fetchmany(1000)) != ():
             rows.extend(batch)
     assert excinfo.value.args[0] == 1242
     assert [n for n, _ in rows] == list(range(5000))
     # The error ended the result set; the connection is fine.
     assert ss.fetchone() is None
     ss.execute("SELECT 1")
-    assert ss.fetchall() == [(1,)]
+    assert ss.fetchall() == ((1,),)
 
 
 # Streaming and the rest of the connection -------------------------------
@@ -346,13 +346,13 @@ def test_another_command_discards_unread_rows(
         other.execute("SELECT 'other'")
     # The warning points at the caller, not at rustmy internals.
     assert record[0].filename == __file__
-    assert other.fetchall() == [("other",)]
+    assert other.fetchall() == (("other",),)
     for fetch in (ss.fetchone, ss.fetchall, lambda: ss.scroll(1)):
         with pytest.raises(rustmy.ProgrammingError, match="discarded"):
             fetch()
     # The cursor can run a new query.
     ss.execute(SEQ)
-    assert ss.fetchall() == [(1,), (2,), (3,), (4,)]
+    assert ss.fetchall() == ((1,), (2,), (3,), (4,))
 
 
 def test_discard_does_not_depend_on_rows_already_read(conn: rustmy.Connection) -> None:
@@ -402,7 +402,7 @@ def test_finished_or_closed_streams_discard_nothing(conn: rustmy.Connection) -> 
         warnings.simplefilter("error")
         # Every row fetched (even without seeing the end): nothing to lose.
         ss.execute(SEQ)
-        assert ss.fetchmany(4) == [(1,), (2,), (3,), (4,)]
+        assert ss.fetchmany(4) == ((1,), (2,), (3,), (4,))
         other.execute("SELECT 1")
         assert ss.fetchone() is None
         # Closing drops the rest quietly.
@@ -417,7 +417,7 @@ def test_finished_or_closed_streams_discard_nothing(conn: rustmy.Connection) -> 
         ss = conn.cursor(SSCursor)
         ss.execute(MANY)
         ss.execute(SEQ)
-        assert ss.fetchall() == [(1,), (2,), (3,), (4,)]
+        assert ss.fetchall() == ((1,), (2,), (3,), (4,))
     assert other.execute("SELECT 3") == 1
 
 
@@ -500,7 +500,7 @@ def test_concurrent_use_of_one_stream_is_refused_not_corrupted(
         thread.join()
     assert sorted(seen) == list(range(10_000))
     ss.execute("SELECT 1")
-    assert ss.fetchall() == [(1,)]
+    assert ss.fetchall() == ((1,),)
 
 
 @pytest.mark.parametrize("cursor_class", [Cursor, DictCursor, SSCursor])
@@ -608,4 +608,28 @@ def test_ctrl_c_interrupts_a_long_buffered_read(conn: rustmy.Connection) -> None
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         assert cursor.execute("SELECT 1") == 1
-    assert cursor.fetchall() == [(1,)]
+    assert cursor.fetchall() == ((1,),)
+
+
+@pytest.mark.parametrize("cursor_class", [Cursor, DictCursor, SSCursor, SSDictCursor])
+def test_fetch_methods_return_tuples(
+    conn: rustmy.Connection, cursor_class: type[Cursor]
+) -> None:
+    """As mysqlclient: ``fetchmany``/``fetchall`` return tuples, and exactly
+    ``()`` when no rows are left, which code such as Django's uses as the
+    end marker of ``iter(cursor.fetchmany, ())``.
+    """
+    cursor = conn.cursor(cursor_class)
+    cursor.execute("SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3")
+    first = cursor.fetchmany(2)
+    rest = cursor.fetchall()
+    assert type(first) is tuple
+    assert type(rest) is tuple
+    assert len(first) == 2
+    assert len(rest) == 1
+    assert cursor.fetchmany(5) == ()
+    assert cursor.fetchall() == ()
+    cursor.execute("SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3")
+    batches = list(iter(lambda: cursor.fetchmany(2), ()))
+    assert [len(batch) for batch in batches] == [2, 1]
+    cursor.close()

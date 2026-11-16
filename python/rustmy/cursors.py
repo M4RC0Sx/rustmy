@@ -64,7 +64,7 @@ class Cursor:
         self.description: Description | None = None
         self.rowcount: int = -1
         self.lastrowid: int | None = None
-        self._rows: list[Any] = []
+        self._rows: tuple[Any, ...] = ()
         self._pos = 0
         # The last statement: a template and its arguments (interpolated on
         # demand by ``_executed``), or the exact bytes sent.
@@ -83,7 +83,7 @@ class Cursor:
     def close(self) -> None:
         self._discard()
         self._connection = None
-        self._rows = []
+        self._rows = ()
 
     def __enter__(self) -> Self:
         return self
@@ -110,7 +110,7 @@ class Cursor:
         """
         self._discard()
         self.description = None
-        self._rows = []
+        self._rows = ()
         self._pos = 0
         self.rowcount = -1
 
@@ -159,7 +159,7 @@ class Cursor:
         if batched is not None:
             rowcount, lastrowid, last_statement = batched
             self.description = None
-            self._rows = []
+            self._rows = ()
             self._pos = 0
             self.rowcount = rowcount
             if lastrowid is not None:
@@ -211,7 +211,7 @@ class Cursor:
     def _set_result(self, result: QueryResult) -> None:
         description, rows, rowcount, lastrowid, _warnings = result
         self.description = description
-        self._rows = [] if rows is None else rows
+        self._rows = () if rows is None else rows
         self._pos = 0
         self.rowcount = rowcount
         # PEP 249: None when the statement set no row id (it returned rows).
@@ -229,16 +229,16 @@ class Cursor:
         self._pos += 1
         return row
 
-    def fetchmany(self, size: int | None = None) -> list[Row]:
+    def fetchmany(self, size: int | None = None) -> tuple[Row, ...]:
         self._check_result()
         end = self._pos + (self.arraysize if size is None else size)
         rows = self._rows[self._pos : end]
         self._pos += len(rows)
         return rows
 
-    def fetchall(self) -> list[Row]:
+    def fetchall(self) -> tuple[Row, ...]:
         self._check_result()
-        # From the start, hand the list itself over instead of copying it.
+        # From the start, hand the (immutable) tuple itself over.
         rows = self._rows if self._pos == 0 else self._rows[self._pos :]
         self._pos = len(self._rows)
         return rows
@@ -278,8 +278,8 @@ class DictCursor(Cursor):
     if TYPE_CHECKING:
 
         def fetchone(self) -> DictRow | None: ...  # type: ignore[override]
-        def fetchmany(self, size: int | None = None) -> list[DictRow]: ...  # type: ignore[override]
-        def fetchall(self) -> list[DictRow]: ...  # type: ignore[override]
+        def fetchmany(self, size: int | None = None) -> tuple[DictRow, ...]: ...  # type: ignore[override]
+        def fetchall(self) -> tuple[DictRow, ...]: ...  # type: ignore[override]
         def __iter__(self) -> Iterator[DictRow]: ...  # type: ignore[override]
 
 
@@ -363,10 +363,10 @@ class SSCursor(Cursor):
         row: Row | None = self._active().fetchone()
         return row
 
-    def fetchmany(self, size: int | None = None) -> list[Row]:
+    def fetchmany(self, size: int | None = None) -> tuple[Row, ...]:
         return self._active().fetchmany(self.arraysize if size is None else size)
 
-    def fetchall(self) -> list[Row]:
+    def fetchall(self) -> tuple[Row, ...]:
         """Fetch every remaining row into a list (iterate the cursor instead
         to keep memory flat).
         """
@@ -408,8 +408,8 @@ class SSDictCursor(SSCursor):
     if TYPE_CHECKING:
 
         def fetchone(self) -> DictRow | None: ...  # type: ignore[override]
-        def fetchmany(self, size: int | None = None) -> list[DictRow]: ...  # type: ignore[override]
-        def fetchall(self) -> list[DictRow]: ...  # type: ignore[override]
+        def fetchmany(self, size: int | None = None) -> tuple[DictRow, ...]: ...  # type: ignore[override]
+        def fetchall(self) -> tuple[DictRow, ...]: ...  # type: ignore[override]
         def fetchall_unbuffered(self) -> Iterator[DictRow]: ...  # type: ignore[override]
         def __iter__(self) -> Iterator[DictRow]: ...  # type: ignore[override]
 

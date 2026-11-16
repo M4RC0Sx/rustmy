@@ -17,8 +17,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
-use pyo3::types::PyList;
 use pyo3::types::PyString;
+use pyo3::types::PyTuple;
 use rustmy_proto::Conn;
 use rustmy_proto::Error as ProtoError;
 use rustmy_proto::Opts;
@@ -254,7 +254,7 @@ impl Connection {
                     let count = rows.len();
                     return (
                         description(py, &head.columns, &codec)?,
-                        PyList::new(py, rows)?,
+                        PyTuple::new(py, rows)?,
                         count,
                         head.last_insert_id,
                         warnings,

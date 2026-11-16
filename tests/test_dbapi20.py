@@ -119,7 +119,7 @@ class _Compliance(dbapi20.DatabaseAPI20Test):  # type: ignore[misc]
                 f"INSERT INTO {self.table_prefix}booze VALUES (%s)", ("x" * 20,)
             )
             cur.execute(f"SELECT name FROM {self.table_prefix}booze")
-            assert cur.fetchall() == [("x" * 20,)]
+            assert cur.fetchall() == (("x" * 20,),)
 
 
 @pytest.mark.integration
