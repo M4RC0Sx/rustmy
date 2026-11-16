@@ -148,10 +148,19 @@ jobs:
       - name: Smoke test (Alpine)
         if: ${{ matrix.platform.alpine }}
         run: |
+          # uv's CPython builds for every version but 3.10.
           docker run --rm --network host -v "$PWD:/work" -w /work \
             -e RUSTMY_SMOKE_HOST -e RUSTMY_SMOKE_PASSWORD -e RUSTMY_SMOKE_VERSION \
             ghcr.io/astral-sh/uv:alpine \
-            sh -c 'apk add --no-cache bash >/dev/null && scripts/smoke_wheels.sh dist "$0"' "$PYTHONS"
+            sh -c 'apk add --no-cache bash >/dev/null && scripts/smoke_wheels.sh dist "$0"' "${PYTHONS/3.10 /}"
+          # CPython 3.10 on musl names extensions *-linux-gnu.so (fixed in 3.11),
+          # and so do the cp310 musllinux wheels built with it (as other projects'
+          # are); uv's 3.10 build expects *-linux-musl.so and loads none of them.
+          # Test 3.10 with the official Alpine image, as Alpine users run it.
+          docker run --rm --network host -v "$PWD:/work" \
+            -e RUSTMY_SMOKE_HOST -e RUSTMY_SMOKE_PASSWORD -e RUSTMY_SMOKE_VERSION \
+            python:3.10-alpine \
+            sh -c 'pip install -q --root-user-action=ignore --no-index --find-links /work/dist rustmy && cd /tmp && python /work/scripts/smoke_test.py'
 
   # macOS and Windows runners have no Docker: the server is installed natively.
   # Import-only where no server can run (`server: false`), listed here:
