@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "rustmy-proto"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "rustmy-pydriver"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "pyo3",
  "rustmy-proto",

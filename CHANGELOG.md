@@ -2,6 +2,20 @@
 
 All notable changes to rustmy are documented in this file. Versions follow [Semantic Versioning](https://semver.org) and entries come from [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.0.1](https://github.com/M4RC0Sx/rustmy/compare/v1.0.0...v1.0.1) (2026-11-16)
+
+### Bug Fixes
+
+* fetchall() and fetchmany() return tuples, as mysqlclient does ([#25](https://github.com/M4RC0Sx/rustmy/issues/25)) ([216cc27](https://github.com/M4RC0Sx/rustmy/commit/216cc279ef7cd64a0d80ef7f24be9a355b774d51))
+
+### Build System
+
+* leave our own crates out of THIRD-PARTY-LICENSES ([#27](https://github.com/M4RC0Sx/rustmy/issues/27)) ([75574e5](https://github.com/M4RC0Sx/rustmy/commit/75574e548323df9b35c975f0d95be4e1690f105c))
+
+### Continuous Integration
+
+* fix fuzz workflow ([#24](https://github.com/M4RC0Sx/rustmy/issues/24)) ([558dc91](https://github.com/M4RC0Sx/rustmy/commit/558dc91ccd8293ee24231401b0440c1b7668b8df))
+
 ## 1.0.0 (2026-11-16)
 
 ### Features
