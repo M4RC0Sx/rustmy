@@ -2,8 +2,8 @@
 
     uv run --no-sync python scripts/generate_er.py [--dump PATH]
 
-Starts every supported server version with ``docker compose`` (as the
-integration test loop in CLAUDE.md does) and reads its error catalogue:
+Starts every supported server version with ``docker compose`` (one at a
+time, as the CI's integration jobs do) and reads its error catalogue:
 MySQL's ``performance_schema.events_errors_summary_global_by_error`` (codes
 below 10000; the rest are server log messages that never reach clients) and
 MariaDB's ``perror``. Names from every version are kept, so renamed errors

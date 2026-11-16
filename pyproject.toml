@@ -8,17 +8,40 @@ description = "Fast DB-API 2.0 driver for MySQL/MariaDB written in Rust, no syst
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
-license-files = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"]
-keywords = ["mysql", "mariadb", "dbapi", "database", "driver", "sqlalchemy"]
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "THIRD-PARTY-LICENSES"]
+authors = [{ name = "M4RC0Sx", email = "contact@marcosalonso.dev" }]
+maintainers = [{ name = "M4RC0Sx", email = "contact@marcosalonso.dev" }]
+keywords = [
+    "mysql",
+    "mariadb",
+    "dbapi",
+    "pep249",
+    "database",
+    "driver",
+    "sqlalchemy",
+    "rust",
+    "free-threading",
+]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Programming Language :: Python :: Free Threading :: 2 - Beta",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
     "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
 # Version comes from [workspace.package] in Cargo.toml.
@@ -28,7 +51,12 @@ dynamic = ["version"]
 sqlalchemy = ["sqlalchemy>=2.0"]
 
 [project.urls]
+Homepage = "https://github.com/M4RC0Sx/rustmy"
+Documentation = "https://github.com/M4RC0Sx/rustmy#readme"
 Repository = "https://github.com/M4RC0Sx/rustmy"
+Issues = "https://github.com/M4RC0Sx/rustmy/issues"
+Changelog = "https://github.com/M4RC0Sx/rustmy/blob/master/CHANGELOG.md"
+Benchmarks = "https://github.com/M4RC0Sx/rustmy/blob/master/benches/README.md"
 
 [project.entry-points."sqlalchemy.dialects"]
 "mysql.rustmy" = "rustmy.dialect:RustmyMySQLDialect"
@@ -42,6 +70,7 @@ dev = [
     "pymysql>=1.1",
     "pytest>=8.4",
     "pytest-asyncio>=1.2",
+    "pytest-codspeed>=5.0",
     "pytest-cov>=7.0",
     "pytest-mock>=3.15",
     "pytest-randomly>=4.0",

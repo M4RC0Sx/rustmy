@@ -4,6 +4,7 @@
 [package]
 name = "rustmy-fuzz"
 version = "0.0.0"
+authors = ["M4RC0Sx <contact@marcosalonso.dev>"]
 edition = "2024"
 publish = false
 

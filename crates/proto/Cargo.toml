@@ -2,6 +2,7 @@
 name = "rustmy-proto"
 description = "Pure-Rust MySQL/MariaDB wire protocol core used by rustmy"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
