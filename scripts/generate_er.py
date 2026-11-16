@@ -61,7 +61,7 @@ def mysql_catalogue() -> dict[str, int]:
         host="127.0.0.1",
         port=13306,
         user="root",
-        password="rustmy",  # noqa: S106  # docker test server
+        password="rustmy",  # docker test server
         ssl_mode="disabled",
     ) as conn:
         cursor = conn.cursor()

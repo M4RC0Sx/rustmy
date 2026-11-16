@@ -24,6 +24,7 @@ tests/docker/certs/
 .ruff_cache/
 .pytest_cache/
 .hypothesis/
+.cache/
 .benchmarks/
 .coverage
 .coverage.*

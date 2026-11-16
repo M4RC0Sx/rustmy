@@ -2703,6 +2703,12 @@ wheels = [
 name = "rustmy"
 source = { editable = "." }
 
+[package.optional-dependencies]
+sqlalchemy = [
+    { name = "sqlalchemy", version = "2.0.57", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "sqlalchemy", version = "2.1.8", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+
 [package.dev-dependencies]
 bench = [
     { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -2731,6 +2737,8 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0" }]
+provides-extras = ["sqlalchemy"]
 
 [package.metadata.requires-dev]
 bench = [

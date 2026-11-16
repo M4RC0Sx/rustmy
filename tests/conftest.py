@@ -46,6 +46,9 @@ def _selected_servers() -> tuple[list[str], bool]:
 
 _SERVERS, _EXPLICIT = _selected_servers()
 
+# SQLAlchemy's dialect suite is a pytest session of its own (see its pytest.ini).
+collect_ignore = ["sqla_suite"]
+
 # Property tests run against real servers: no per-example deadline (network
 # latency varies) and, on failure, the blob that replays the exact example
 # (`@reproduce_failure`). The seed is random on purpose, CI included: every

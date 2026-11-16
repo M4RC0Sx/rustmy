@@ -16,6 +16,7 @@ driver-agnostic (``DRIVERS``), so it can be added later.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 
 from dataclasses import dataclass
 from dataclasses import field
@@ -229,6 +230,11 @@ CASES = [
     ),
     Case("param_sequence", "SELECT 1 IN %s, 4 IN %s", ((1, 2, 3), [1, 2, 3])),
     Case("param_named", "SELECT %(a)s, %(b)s, %(a)s", {"a": 1, "b": "x"}),
+    Case(
+        "param_uuid",
+        "SELECT %s",
+        (uuid.UUID("12345678-1234-5678-1234-567812345678"),),
+    ),
     Case("param_percent", "SELECT '100%%', %s", ("%s",)),
     Case("no_params_percent", "SELECT '100%'"),
     # DML: rowcount and lastrowid.
@@ -426,6 +432,18 @@ ZERO_DATE_STRINGS = (
     (_str("2024-00-10"), _str("2024-01-00 00:00:00"), ("NoneType", None)),
 )
 
+
+def _percent_error(template: str = "%s, %s") -> str:
+    """The message of Python's own % operator for too few arguments."""
+    try:
+        _ = template % (1,)
+    except TypeError as exc:
+        return str(exc)
+    raise AssertionError
+
+
+_PERCENT_TOO_FEW = _percent_error()
+
 #: Differences decided on purpose, with each driver's side.
 INTENDED_DIFFERENCES: dict[str, Difference] = {
     "zero_dates": Difference(
@@ -462,7 +480,9 @@ INTENDED_DIFFERENCES: dict[str, Difference] = {
         "is the driver's own.",
         RESULT,
         rustmy=("ProgrammingError", 0),
-        pymysql=("ProgrammingError", "not enough arguments for format string"),
+        # PyMySQL passes on the message of Python's % operator, which
+        # changes between Python versions (3.15 adds "(got 1)").
+        pymysql=("ProgrammingError", _PERCENT_TOO_FEW),
     ),
     "missing_named_param": Difference(
         "A missing named parameter is a ProgrammingError (PEP 249), not the "

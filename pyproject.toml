@@ -24,8 +24,15 @@ classifiers = [
 # Version comes from [workspace.package] in Cargo.toml.
 dynamic = ["version"]
 
+[project.optional-dependencies]
+sqlalchemy = ["sqlalchemy>=2.0"]
+
 [project.urls]
 Repository = "https://github.com/M4RC0Sx/rustmy"
+
+[project.entry-points."sqlalchemy.dialects"]
+"mysql.rustmy" = "rustmy.dialect:RustmyMySQLDialect"
+"mariadb.rustmy" = "rustmy.dialect:RustmyMariaDBDialect"
 
 [dependency-groups]
 dev = [
@@ -136,6 +143,7 @@ ignore = [
 ]
 "scripts/**" = [
     "T201", # command-line reports go to stdout
+    "S106", # throwaway credentials of the docker test servers
 ]
 "benches/**" = [
     "T201", # command-line reports go to stdout
@@ -143,6 +151,10 @@ ignore = [
     "S105", # throwaway credentials of the docker test servers
     "S608", # SQL built from the script's own constants, not user input
 ]
+
+[tool.ruff.lint.flake8-type-checking]
+# SQLAlchemy evaluates the annotations of mapped classes at runtime.
+runtime-evaluated-base-classes = ["sqlalchemy.orm.DeclarativeBase"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
@@ -174,6 +186,17 @@ ignore_missing_imports = true
 # Skipping it makes the module `Any`, so subclassing it needs no casts.
 module = ["tests.dbapi20"]
 follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# SQLAlchemy's test suite (sqlalchemy.testing) ships no annotations, and
+# replacing a suite class by redefining its name is how the suite is meant to
+# be customised.
+module = ["tests.sqla_suite.*"]
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+disallow_subclassing_any = false
+warn_return_any = false
+disable_error_code = ["no-redef"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

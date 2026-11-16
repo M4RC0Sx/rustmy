@@ -14,6 +14,7 @@ fast path: only entries that differ from it are called from Python.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -150,6 +151,7 @@ encoders: dict[type, Encoder] = dict.fromkeys(
         bytearray,
         memoryview,
         Decimal,
+        uuid.UUID,
         dt.date,
         dt.datetime,
         dt.time,
