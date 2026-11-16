@@ -103,9 +103,9 @@ def test_multi_statements_is_off_by_default(
     with server.connect(multi_statements=True) as multi:
         cursor = multi.cursor()
         cursor.execute("SELECT 1; SELECT 2")
-        assert cursor.fetchall() == [(1,)]
+        assert cursor.fetchall() == ((1,),)
         assert cursor.nextset()
-        assert cursor.fetchall() == [(2,)]
+        assert cursor.fetchall() == ((2,),)
 
 
 def _sql_mode(conn: rustmy.Connection) -> set[str]:
@@ -221,7 +221,7 @@ def test_conv_in_streaming_and_dict_cursors(server: Server) -> None:
         assert list(streamed) == [(2.5,), (3.5,)]
         dicts = conn.cursor(DictCursor)
         dicts.execute(sql)
-        assert dicts.fetchall() == [{"d": 2.5}, {"d": 3.5}]
+        assert dicts.fetchall() == ({"d": 2.5}, {"d": 3.5})
 
 
 # conv: encoders -----------------------------------------------------------------
@@ -256,7 +256,7 @@ def test_conv_encoders(server: Server) -> None:
         cursor.execute("CREATE TEMPORARY TABLE t (c VARCHAR(10))")
         cursor.executemany("INSERT INTO t VALUES (%s)", [(Color.RED,), (Color.GREEN,)])
         cursor.execute("SELECT c FROM t ORDER BY c")
-        assert cursor.fetchall() == [("green",), ("red",)]
+        assert cursor.fetchall() == (("green",), ("red",))
 
 
 def test_conv_encoder_must_return_text(server: Server) -> None:

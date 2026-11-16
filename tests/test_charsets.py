@@ -247,14 +247,14 @@ def test_text_and_bytes_round_trip(
         # Through a utf8mb4 column: the server converts in both directions.
         cursor.execute(f"INSERT INTO {table} VALUES (%s, %s)", (1, text))
         cursor.execute(f"SELECT s FROM {table} WHERE s = %s", (text,))
-        assert cursor.fetchall() == [(text,)]
+        assert cursor.fetchall() == ((text,),)
         other.commit()
     # Stored correctly, as seen from a utf8mb4 session (in a new transaction:
     # REPEATABLE READ would hide the other session's commit).
     conn.rollback()
     cursor = conn.cursor()
     cursor.execute(f"SELECT s FROM {table}")
-    assert cursor.fetchall() == [(text,)]
+    assert cursor.fetchall() == ((text,),)
 
 
 @pytest.mark.parametrize("charset", SUPPORTED)
@@ -297,7 +297,7 @@ def test_streaming_dict_and_executemany(
         assert list(streamed) == rows
         dicts = other.cursor(DictCursor)
         dicts.execute(f"SELECT s AS `{text[:3]}` FROM {table} WHERE id = 7")
-        assert dicts.fetchall() == [{text[:3]: f"{text} 7"}]
+        assert dicts.fetchall() == ({text[:3]: f"{text} 7"},)
 
 
 # The server's definition of each character set --------------------------------

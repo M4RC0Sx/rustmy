@@ -163,7 +163,7 @@ from rustmy.cursors import DictCursor
 
 with conn.cursor(DictCursor) as cursor:
     cursor.execute("SELECT id, name FROM products ORDER BY id LIMIT 2")
-    print(cursor.fetchall())  # [{'id': 1, 'name': 'tea'}, {'id': 2, 'name': 'coffee'}]
+    print(cursor.fetchall())  # ({'id': 1, 'name': 'tea'}, {'id': 2, 'name': 'coffee'})
 ```
 
 `rustmy.connect(..., cursorclass=DictCursor)` makes it the default.

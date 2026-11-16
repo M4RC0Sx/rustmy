@@ -110,7 +110,7 @@ def session(server: Server, request: pytest.FixtureRequest) -> Iterator[rustmy.C
 
 def _check_text(cursor: rustmy.Cursor, value: str, encoding: str = "utf8") -> None:
     cursor.execute("SELECT %s, HEX(CONVERT(%s USING utf8mb4)), 'end'", (value, value))
-    assert cursor.fetchall() == [(value, _hex(value.encode()), "end")]
+    assert cursor.fetchall() == ((value, _hex(value.encode()), "end"),)
     assert cursor.description is not None
     assert len(cursor.description) == 3
     if encoding != "utf8":
@@ -127,7 +127,7 @@ def test_text_round_trips(session: rustmy.Cursor, value: str) -> None:
 @given(value=st.binary())
 def test_bytes_round_trip(session: rustmy.Cursor, value: bytes) -> None:
     session.execute("SELECT %s, HEX(%s), 'end'", (value, value))
-    assert session.fetchall() == [(value, _hex(value), "end")]
+    assert session.fetchall() == ((value, _hex(value), "end"),)
 
 
 @given(value=payloads)
@@ -156,7 +156,7 @@ def test_executemany_round_trips(
         del session.max_stmt_length
     assert inserted == len(rows)
     session.execute("SELECT s, b FROM probe ORDER BY id")
-    assert session.fetchall() == rows
+    assert session.fetchall() == tuple(rows)
 
 
 # Multi-byte character sets ---------------------------------------------------
@@ -239,4 +239,4 @@ def test_multibyte_bytes_round_trip(
 ) -> None:
     cursor, *_ = multibyte
     cursor.execute("SELECT %s, HEX(%s), 'end'", (value, value))
-    assert cursor.fetchall() == [(value, _hex(value), "end")]
+    assert cursor.fetchall() == ((value, _hex(value), "end"),)

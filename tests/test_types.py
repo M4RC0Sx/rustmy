@@ -81,7 +81,7 @@ def test_zero_date_is_none(cursor: rustmy.Cursor) -> None:
     cursor.execute("CREATE TEMPORARY TABLE t (d DATE, ts DATETIME)")
     cursor.execute("INSERT INTO t VALUES ('0000-00-00', '0000-00-00 00:00:00')")
     cursor.execute("SELECT d, ts FROM t")
-    assert cursor.fetchall() == [(None, None)]
+    assert cursor.fetchall() == ((None, None),)
 
 
 # `SELECT %s` keeps these types: the literal alone tells the server the type.
