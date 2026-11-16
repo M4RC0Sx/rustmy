@@ -2613,8 +2613,6 @@ limitations under the License.
 Apache License 2.0 (Apache-2.0)
 --------------------------------------------------------------------------------
 Used by:
-- rustmy-proto 0.0.0 (https://github.com/M4RC0Sx/rustmy)
-- rustmy-pydriver 0.0.0 (https://github.com/M4RC0Sx/rustmy)
 - libc 0.2.191 (https://github.com/rust-lang/libc)
 - proc-macro2 1.0.107 (https://github.com/dtolnay/proc-macro2)
 - pyo3-ffi 0.30.1 (https://github.com/pyo3/pyo3)

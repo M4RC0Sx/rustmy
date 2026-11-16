@@ -30,3 +30,6 @@ ignore-build-dependencies = true
 ignore-dev-dependencies = true
 # Crates whose license files cargo-about cannot find on its own.
 workarounds = ["ring", "rustls"]
+# Our own crates (publish = false) are not third-party, and listing them would
+# put the workspace version in the file: it changes on master at every release.
+private = { ignore = true }
