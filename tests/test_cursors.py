@@ -581,12 +581,14 @@ def test_ctrl_c_interrupts_a_long_buffered_read(conn: rustmy.Connection) -> None
     # first. Checked between batches, it stops the read right after that
     # pause instead of when the whole result has arrived.
     cursor = conn.cursor()
-    # Python code in a gc callback can take the interrupt instead, and
-    # CPython drops exceptions raised there (unraisable). Hypothesis installs
-    # one once a property test has run in the same process, so the outcome
-    # depended on test order: run without callbacks.
-    callbacks = gc.callbacks[:]
-    gc.callbacks.clear()
+    # Python code that the cyclic collector runs while rows are converted
+    # (gc callbacks, finalizers, weakref callbacks) can take the interrupt
+    # instead, and CPython drops exceptions raised there (unraisable).
+    # Earlier tests leave such code behind depending on order: hypothesis's
+    # gc callback, SQLAlchemy's weakref callbacks (seen in CI). Collect first,
+    # then keep the collector off during the read.
+    gc.collect()
+    gc.disable()
     try:
         timer = threading.Timer(0.1, _thread.interrupt_main)
         timer.start()
@@ -599,7 +601,7 @@ def test_ctrl_c_interrupts_a_long_buffered_read(conn: rustmy.Connection) -> None
         elapsed = time.perf_counter() - start
         timer.join()
     finally:
-        gc.callbacks[:] = callbacks
+        gc.enable()
     assert elapsed < 0.8
     assert cursor.description is None
     # The next command discards the rest quietly.
