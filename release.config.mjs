@@ -6,9 +6,11 @@
 // declares it dynamic; maturin copies it into the wheels), so the release
 // commit carries Cargo.toml and Cargo.lock, written by scripts/set_version.py.
 //
-// With RELEASE_PLAN=1 only the analysis runs and the next version is written
-// to .release-version: the workflow's plan step, which builds and tests the
-// wheels with that version before anything is tagged or published.
+// With RELEASE_PLAN=1 only the analysis and the release notes run (in
+// --dry-run, so the notes are printed, not written) and the next version is
+// written to .release-version: the workflow's plan step, which builds and
+// tests the wheels with that version before anything is tagged or published.
+// The notes are rendered there so a pull request into master rehearses them.
 
 const planOnly = process.env.RELEASE_PLAN === "1";
 
@@ -73,7 +75,7 @@ export default {
   branches: ["master"],
   tagFormat: "v${version}",
   plugins: planOnly
-    ? [commitAnalyzer, exec]
+    ? [commitAnalyzer, releaseNotes, exec]
     : [
         commitAnalyzer,
         releaseNotes,
