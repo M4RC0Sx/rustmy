@@ -57,7 +57,7 @@ jobs:
       PLATFORM_PYTHONS: ${{ matrix.platform.pythons || '3.10 3.11 3.12 3.13 3.14 3.14t 3.15 3.15t' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
       - name: Stamp the release version
         if: inputs.version != ''
         run: uv run --no-project scripts/set_version.py "${{ inputs.version }}"
@@ -93,7 +93,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
       - name: Stamp the release version
         if: inputs.version != ''
         run: uv run --no-project scripts/set_version.py "${{ inputs.version }}"
@@ -140,7 +140,7 @@ jobs:
         with:
           name: wheels-${{ matrix.platform.name }}
           path: dist
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
         if: ${{ !matrix.platform.alpine }}
       - name: Smoke test
         if: ${{ !matrix.platform.alpine }}
@@ -184,6 +184,6 @@ jobs:
         with:
           mysql-version: "8.4"
           root-password: rustmy
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
       - name: Smoke test
         run: scripts/smoke_wheels.sh dist "$PLATFORM_PYTHONS"
