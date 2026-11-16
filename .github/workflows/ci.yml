@@ -1,8 +1,10 @@
 name: CI
 
+# develop is the integration branch; master only receives release PRs from
+# develop (validated by the pull_request trigger) and release-bot commits.
 on:
   push:
-    branches: [master]
+    branches: [develop]
   pull_request:
 
 concurrency:
@@ -17,7 +19,7 @@ jobs:
     name: Rust (fmt, clippy, tests)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -25,14 +27,66 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The fuzzing hooks are compiled out of normal builds; lint them too.
+      - run: cargo clippy -p rustmy-proto --all-targets --features fuzzing -- -D warnings
       # The PyO3 cdylib cannot link a native test binary; Python tests cover it.
       - run: cargo nextest run --workspace --exclude rustmy-pydriver
+      # THIRD-PARTY-LICENSES ships in every wheel: it must match the crates
+      # compiled in (regenerate with the command in about.toml). --locked, not
+      # --frozen: the other platforms' crates may not be in this runner's cache.
+      - uses: taiki-e/install-action@cargo-about
+      - run: cargo about generate --locked -m crates/pydriver/Cargo.toml about.hbs -o THIRD-PARTY-LICENSES
+      - run: git diff --exit-code THIRD-PARTY-LICENSES
+
+  rust-integration:
+    name: Integration (${{ matrix.server }} ${{ matrix.version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every server line still under vendor support (LTS releases plus the
+        # latest innovation/rolling release, which surfaces changes first),
+        # plus MySQL 8.0: upstream EOL, but still widely deployed.
+        include:
+          - { server: mysql, version: "8.0" }
+          - { server: mysql, version: "8.4" }
+          - { server: mysql, version: "9.7" }
+          - { server: mysql, version: "26.10" }
+          - { server: mariadb, version: "10.11" }
+          - { server: mariadb, version: "11.4" }
+          - { server: mariadb, version: "11.8" }
+          - { server: mariadb, version: "12.3" }
+          - { server: mariadb, version: "13.0" }
+    env:
+      MYSQL_VERSION: ${{ matrix.version }}
+      MARIADB_VERSION: ${{ matrix.version }}
+      RUSTMY_TEST_SERVERS: ${{ matrix.server }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: docker compose up -d --wait ${{ matrix.server }}
+      - run: cargo nextest run -p rustmy-proto --run-ignored only --no-capture
+      - uses: astral-sh/setup-uv@v10.3.3
+      # Two passes on the same server: Python 3.10 resolves SQLAlchemy 2.0,
+      # Python 3.15 the latest line (2.1 needs Python 3.11+).
+      - run: uv sync --locked
+      - run: uv run pytest -m integration
+      - run: uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db ${{ matrix.server }}
+      - name: Python 3.15
+        env:
+          UV_PROJECT_ENVIRONMENT: .venv-3.15
+        run: |
+          uv sync --locked --python 3.15
+          uv run --python 3.15 pytest -m integration
+          uv run --python 3.15 pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db ${{ matrix.server }}
 
   deny:
     name: cargo-deny (licenses, advisories)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   python:
@@ -44,14 +98,20 @@ jobs:
         # Every supported CPython plus the free-threaded builds ("t").
         python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
       - run: uv run ruff check
       - run: uv run ruff format --check
       - run: uv run mypy
-      - run: uv run pytest --cov --cov-report=term-missing -m "not integration"
+      # Every Python against the default servers (MySQL 8.4, MariaDB 11.4):
+      # the driver, and the dialect with the SQLAlchemy this Python resolves.
+      - run: docker compose up -d --wait mysql mariadb
+      - run: uv run pytest --cov --cov-report=term-missing
+        env:
+          RUSTMY_TEST_SERVERS: mysql,mariadb
+      - run: uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db mysql --db mariadb

@@ -7,3 +7,11 @@ or the MIT license (LICENSE-MIT), at your option.
 rustmy is an independent project. "MySQL" is a trademark of Oracle
 Corporation and "MariaDB" is a trademark of MariaDB plc; rustmy is not
 affiliated with or endorsed by either.
+
+Third-party material in this repository:
+
+- tests/dbapi20.py: the Python DB API 2.0 compliance test suite by Stuart
+  Bishop, public domain ("This software is Public Domain and may be used
+  without restrictions"), kept byte for byte from
+  https://github.com/baztian/dbapi-compliance (commit ea7cb1b4). Used only
+  by the test suite.

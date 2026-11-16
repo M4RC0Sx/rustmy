@@ -7,6 +7,36 @@
 // The protocol core parses untrusted server bytes: it stays 100% safe Rust.
 #![forbid(unsafe_code)]
 
+mod auth;
+mod buf;
+pub mod charset;
+mod column;
+mod conn;
+pub mod constants;
+mod error;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
+mod handshake;
+mod packet;
+mod result;
+pub mod sql;
+pub mod text;
+mod tls;
+
+pub use column::Column;
+pub use conn::Conn;
+pub use conn::Opts;
+pub use conn::ReadOutcome;
+pub use conn::StreamId;
+pub use error::Error;
+pub use error::Result;
+pub use result::QueryResult;
+pub use result::RowRef;
+pub use result::RowSet;
+pub use tls::SslMode;
+pub use tls::TlsOpts;
+
 /// Maximum payload carried by a single protocol packet (2^24 - 1 bytes).
 ///
 /// Larger payloads are split across consecutive packets.

@@ -1,0 +1,16 @@
+THIRD-PARTY LICENSES
+
+rustmy's wheels contain the following Rust crates, compiled in. Their licenses
+follow, grouped by license; each lists the crates that use it.
+{{#each licenses}}
+
+================================================================================
+{{{name}}} ({{{id}}})
+--------------------------------------------------------------------------------
+Used by:
+{{#each used_by}}
+- {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

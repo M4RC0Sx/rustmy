@@ -1,0 +1,77 @@
+{
+  "date": "2026-11-15T20:22:51+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 5,
+  "scenarios": [
+    {
+      "name": "fetchall 100k utf8mb4 (es + ru + zh)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.04783474999931059,
+        "mysqlclient": 0.060628791001363425,
+        "pymysql": 0.194380666998768
+      }
+    },
+    {
+      "name": "fetchall 100k latin1 (Spanish)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.028941459000634495,
+        "mysqlclient": 0.051171167000575224,
+        "pymysql": 0.1281550409985357
+      }
+    },
+    {
+      "name": "fetchall 100k cp1251 (Russian)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.031371458000649,
+        "mysqlclient": 0.05617833399810479,
+        "pymysql": 0.13463675000093644
+      }
+    },
+    {
+      "name": "fetchall 100k gbk (Chinese)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.028845542001363356,
+        "mysqlclient": 0.046644625002954854,
+        "pymysql": 0.1311176669987617
+      }
+    },
+    {
+      "name": "fetchall 100k latin1 (ASCII int/varchar)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.024969541998871136,
+        "mysqlclient": 0.06546754200098803,
+        "pymysql": 0.2879065419983817
+      }
+    },
+    {
+      "name": "executemany 10k latin1 (Spanish)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.02295787500042934,
+        "mysqlclient": 0.03506616700178711,
+        "pymysql": 0.035939207999035716
+      }
+    },
+    {
+      "name": "executemany 10k cp1251 (Russian)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.022561415997188305,
+        "mysqlclient": 0.03354479200061178,
+        "pymysql": 0.038279166001302656
+      }
+    }
+  ]
+}

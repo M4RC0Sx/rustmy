@@ -8,24 +8,59 @@ description = "Fast DB-API 2.0 driver for MySQL/MariaDB written in Rust, no syst
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
-license-files = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"]
-keywords = ["mysql", "mariadb", "dbapi", "database", "driver", "sqlalchemy"]
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "THIRD-PARTY-LICENSES"]
+authors = [{ name = "M4RC0Sx", email = "contact@marcosalonso.dev" }]
+maintainers = [{ name = "M4RC0Sx", email = "contact@marcosalonso.dev" }]
+keywords = [
+    "mysql",
+    "mariadb",
+    "dbapi",
+    "pep249",
+    "database",
+    "driver",
+    "sqlalchemy",
+    "rust",
+    "free-threading",
+]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Programming Language :: Python :: Free Threading :: 2 - Beta",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
     "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
 # Version comes from [workspace.package] in Cargo.toml.
 dynamic = ["version"]
 
+[project.optional-dependencies]
+sqlalchemy = ["sqlalchemy>=2.0"]
+
 [project.urls]
+Homepage = "https://github.com/M4RC0Sx/rustmy"
+Documentation = "https://github.com/M4RC0Sx/rustmy#readme"
 Repository = "https://github.com/M4RC0Sx/rustmy"
+Issues = "https://github.com/M4RC0Sx/rustmy/issues"
+Changelog = "https://github.com/M4RC0Sx/rustmy/blob/master/CHANGELOG.md"
+Benchmarks = "https://github.com/M4RC0Sx/rustmy/blob/master/benches/README.md"
+
+[project.entry-points."sqlalchemy.dialects"]
+"mysql.rustmy" = "rustmy.dialect:RustmyMySQLDialect"
+"mariadb.rustmy" = "rustmy.dialect:RustmyMariaDBDialect"
 
 [dependency-groups]
 dev = [
@@ -35,6 +70,7 @@ dev = [
     "pymysql>=1.1",
     "pytest>=8.4",
     "pytest-asyncio>=1.2",
+    "pytest-codspeed>=5.0",
     "pytest-cov>=7.0",
     "pytest-mock>=3.15",
     "pytest-randomly>=4.0",
@@ -46,6 +82,7 @@ dev = [
 # mysqlclient needs libmysqlclient + pkg-config to build, so it stays out of
 # the default sync: `uv sync --group bench`.
 bench = [
+    "matplotlib>=3.10",
     "mysqlclient>=2.2",
     "pytest-benchmark>=5.1",
 ]
@@ -69,7 +106,9 @@ module-name = "rustmy._core"
 [tool.ruff]
 target-version = "py310"
 line-length = 88
-src = ["python", "tests"]
+src = ["python", "tests", "benches"]
+# The PEP 249 suite, kept byte for byte as published (tests/test_dbapi20.py).
+extend-exclude = ["tests/dbapi20.py"]
 
 [tool.ruff.lint]
 extend-select = [
@@ -122,7 +161,29 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = [
+    "S101",   # assert is how pytest checks
+    "S106",   # throwaway credentials of the docker test servers
+    "S608",   # SQL built from the tests' own constants, not user input
+    "DTZ001", # MySQL DATETIME values are naive by definition
+]
+"python/rustmy/constants/*.py" = [
+    "N999", # module names match the other MySQL drivers' (`from rustmy.constants import ER`)
+]
+"scripts/**" = [
+    "T201", # command-line reports go to stdout
+    "S106", # throwaway credentials of the docker test servers
+]
+"benches/**" = [
+    "T201", # command-line reports go to stdout
+    "S101", # sanity asserts on benchmark results
+    "S105", # throwaway credentials of the docker test servers
+    "S608", # SQL built from the script's own constants, not user input
+]
+
+[tool.ruff.lint.flake8-type-checking]
+# SQLAlchemy evaluates the annotations of mapped classes at runtime.
+runtime-evaluated-base-classes = ["sqlalchemy.orm.DeclarativeBase"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
@@ -140,7 +201,31 @@ namespace_packages = true
 show_error_codes = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 mypy_path = "python"
-files = ["python", "tests"]
+files = ["python", "tests", "benches", "scripts"]
+exclude = ['^tests/dbapi20\.py$']  # see the tests.dbapi20 override below
+
+[[tool.mypy.overrides]]
+# Benchmark-only dependencies (bench group, absent from the dev env); the
+# reference drivers ship no type information either.
+module = ["MySQLdb", "MySQLdb.*", "pymysql", "pymysql.*", "matplotlib", "matplotlib.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The PEP 249 suite, kept byte for byte as published (untyped, Python 2 era).
+# Skipping it makes the module `Any`, so subclassing it needs no casts.
+module = ["tests.dbapi20"]
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# SQLAlchemy's test suite (sqlalchemy.testing) ships no annotations, and
+# replacing a suite class by redefining its name is how the suite is meant to
+# be customised.
+module = ["tests.sqla_suite.*"]
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+disallow_subclassing_any = false
+warn_return_any = false
+disable_error_code = ["no-redef"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
