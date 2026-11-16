@@ -5,12 +5,12 @@ name: pr-title
 # and write the changelog: the title must be a Conventional Commit.
 # (Pull requests into master are merged as they are; their title is unused.)
 on:
-  pull_request_target:
+  pull_request:
     branches: [develop]
     types: [opened, edited, reopened, synchronize]
 
-# pull_request_target runs with the base branch's workflow and can see
-# secrets: this job only reads the title, it never checks out the PR's code.
+# Reading the title needs nothing more. (Not pull_request_target: GitHub runs
+# that from the default branch, master, which only gets workflows on release.)
 permissions:
   pull-requests: read
 
