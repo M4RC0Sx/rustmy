@@ -50,6 +50,7 @@ for section in spike cursors charsets conv orm; do
     $P benches/report.py --section current-$section \
         benches/results/current-$section-py315.json
 done
+$P benches/hero.py   # the summary chart at the top of the main README
 ```
 
 ### Main scenarios (`spike.py`)

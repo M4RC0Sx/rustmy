@@ -12,6 +12,11 @@ SQLAlchemy dialects included, and wheels with no system libraries to install.
 [![Downloads](https://static.pepy.tech/badge/rustmy/month)](https://pepy.tech/project/rustmy)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/hero-dark.svg">
+  <img alt="rustmy against mysqlclient and PyMySQL: time to read 100,000 rows, insert 10,000 rows and read 100,000 rows through SQLAlchemy (lower is better; the figures are in the Performance table)" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/hero-light.svg">
+</picture>
+
 ```python
 import rustmy
 
@@ -92,7 +97,9 @@ pip install "rustmy[sqlalchemy]"   # with SQLAlchemy 2.0+
 
 Or with uv: `uv add rustmy`. Wheels cover Linux (glibc and musl, x86_64 and
 aarch64), macOS (Intel and Apple Silicon) and Windows (x64 and arm64), for
-CPython 3.10 to 3.15 and the free-threaded 3.14t and 3.15t.
+CPython 3.10 to 3.15 and the free-threaded 3.14t and 3.15t (3.11 and later on
+Windows arm64, where there is no official CPython 3.10). Every wheel is
+installed and tested before release.
 
 ## Usage
 
@@ -323,6 +330,10 @@ pinned by a test:
   supported yet.
 - **Latency-bound workloads** (many tiny queries) gain little: the network
   dominates them with any driver.
+- **CPython 3.10 installed by uv on Alpine/musl** cannot load the `cp310`
+  musllinux wheel (nor any other project's): CPython 3.10 names musl extensions
+  `*-linux-gnu.so`, which uv's build of it does not accept. Alpine's own Python
+  3.10, and every later version from any source, work.
 
 ## How it is built and tested
 
