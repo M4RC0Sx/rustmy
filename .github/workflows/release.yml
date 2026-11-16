@@ -91,7 +91,7 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v8
         with:
-          pattern: "{wheels-*,sdist}"
+          pattern: wheels-*
           merge-multiple: true
           path: dist
       - name: Release
@@ -116,7 +116,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: "{wheels-*,sdist}"
+          pattern: wheels-*
           merge-multiple: true
           path: dist
       - uses: pypa/gh-action-pypi-publish@v1.14.3
