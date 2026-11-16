@@ -16,7 +16,6 @@ use pyo3::types::PyDate;
 use pyo3::types::PyDateTime;
 use pyo3::types::PyDelta;
 use pyo3::types::PyDict;
-use pyo3::types::PyList;
 use pyo3::types::PyString;
 use pyo3::types::PyTuple;
 use pyo3::types::PyType;
@@ -272,7 +271,7 @@ pub(crate) fn result_to_py(
     converter.convert(py, &result.rows, |row| rows.push(row))?;
     (
         description(py, &result.columns, codec)?,
-        PyList::new(py, rows)?,
+        PyTuple::new(py, rows)?,
         result.rows.len(),
         result.last_insert_id,
         result.warnings,

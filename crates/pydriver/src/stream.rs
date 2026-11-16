@@ -13,7 +13,7 @@ use std::sync::MutexGuard;
 use std::sync::TryLockError;
 
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::PyTuple;
 use rustmy_proto::ReadOutcome;
 use rustmy_proto::RowSet;
 use rustmy_proto::StreamId;
@@ -236,13 +236,13 @@ impl ResultStream {
     }
 
     /// Up to `size` rows.
-    fn fetchmany<'py>(&self, py: Python<'py>, size: usize) -> PyResult<Bound<'py, PyList>> {
-        PyList::new(py, self.take(py, size)?)
+    fn fetchmany<'py>(&self, py: Python<'py>, size: usize) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, self.take(py, size)?)
     }
 
     /// Every remaining row.
-    fn fetchall<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        PyList::new(py, self.take(py, usize::MAX)?)
+    fn fetchall<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, self.take(py, usize::MAX)?)
     }
 
     /// Moves `count` rows forward without converting the ones still on the

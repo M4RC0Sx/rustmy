@@ -93,7 +93,7 @@ def test_values_roundtrip_through_batches(cursor: rustmy.Cursor, table: str) -> 
         f"INSERT INTO {table} (n, s, b, d, ts) VALUES (%s, %s, %s, %s, %s)", rows
     )
     cursor.execute(f"SELECT n, s, b, d, ts FROM {table} ORDER BY n")
-    assert cursor.fetchall() == rows
+    assert cursor.fetchall() == tuple(rows)
 
 
 def test_named_parameters_and_generators(cursor: rustmy.Cursor, table: str) -> None:
@@ -106,7 +106,7 @@ def test_named_parameters_and_generators(cursor: rustmy.Cursor, table: str) -> N
         == 3
     )
     cursor.execute(f"SELECT s FROM {table} ORDER BY n")
-    assert cursor.fetchall() == [("v0",), ("v1",), ("v2",)]
+    assert cursor.fetchall() == (("v0",), ("v1",), ("v2",))
 
 
 def test_on_duplicate_key_update(cursor: rustmy.Cursor, table: str) -> None:
@@ -120,7 +120,7 @@ def test_on_duplicate_key_update(cursor: rustmy.Cursor, table: str) -> None:
     assert _insert_statements(cursor) - before == 1
     assert count == 2 + 2 + 1  # MySQL counts an updated row twice
     cursor.execute(f"SELECT n, s FROM {table} ORDER BY n")
-    assert cursor.fetchall() == [(0, "row 0"), (1, "row 1!"), (2, "row 2!"), (3, "new")]
+    assert cursor.fetchall() == ((0, "row 0"), (1, "row 1!"), (2, "row 2!"), (3, "new"))
 
 
 def test_row_alias_on_mysql(server: Server, cursor: rustmy.Cursor, table: str) -> None:
@@ -133,7 +133,7 @@ def test_row_alias_on_mysql(server: Server, cursor: rustmy.Cursor, table: str) -
         [(0, "a"), (1, "b")],
     )
     cursor.execute(f"SELECT s FROM {table} ORDER BY n")
-    assert cursor.fetchall() == [("a",), ("b",)]
+    assert cursor.fetchall() == (("a",), ("b",))
 
 
 def test_percent_signs_in_batched_inserts(cursor: rustmy.Cursor, table: str) -> None:
@@ -142,7 +142,7 @@ def test_percent_signs_in_batched_inserts(cursor: rustmy.Cursor, table: str) -> 
         [(1, "a"), (2, "b")],
     )
     cursor.execute(f"SELECT s FROM {table} ORDER BY n")
-    assert cursor.fetchall() == [("100%a",), ("100%b",)]
+    assert cursor.fetchall() == (("100%a",), ("100%b",))
 
 
 def test_other_statements_run_row_by_row(cursor: rustmy.Cursor, table: str) -> None:
@@ -152,7 +152,7 @@ def test_other_statements_run_row_by_row(cursor: rustmy.Cursor, table: str) -> N
     )
     assert count == 2
     cursor.execute(f"SELECT s FROM {table} WHERE n < 2 ORDER BY n")
-    assert cursor.fetchall() == [("a",), ("b",)]
+    assert cursor.fetchall() == (("a",), ("b",))
 
 
 def test_empty_sequence_runs_nothing(cursor: rustmy.Cursor, table: str) -> None:

@@ -21,17 +21,17 @@ def test_fetch_methods_walk_the_result(cursor: rustmy.Cursor) -> None:
     assert cursor.rowcount == 4
     assert cursor.rownumber == 0
     assert cursor.fetchone() == (1,)
-    assert cursor.fetchmany(2) == [(2,), (3,)]
+    assert cursor.fetchmany(2) == ((2,), (3,))
     assert cursor.rownumber == 3
-    assert cursor.fetchall() == [(4,)]
+    assert cursor.fetchall() == ((4,),)
     assert cursor.fetchone() is None
-    assert cursor.fetchall() == []
+    assert cursor.fetchall() == ()
 
 
 def test_fetchall_after_execute_returns_every_row(cursor: rustmy.Cursor) -> None:
     cursor.execute(SEQ)
-    assert cursor.fetchall() == [(1,), (2,), (3,), (4,)]
-    assert cursor.fetchmany() == []
+    assert cursor.fetchall() == ((1,), (2,), (3,), (4,))
+    assert cursor.fetchmany() == ()
 
 
 def test_iteration_and_arraysize(cursor: rustmy.Cursor) -> None:
@@ -74,7 +74,7 @@ def test_executemany(cursor: rustmy.Cursor) -> None:
     )
     assert total == 3
     cursor.execute("SELECT a, b FROM t ORDER BY a")
-    assert cursor.fetchall() == [(1, "a"), (2, "b"), (3, None)]
+    assert cursor.fetchall() == ((1, "a"), (2, "b"), (3, None))
 
 
 def test_named_parameters(cursor: rustmy.Cursor) -> None:
@@ -96,15 +96,15 @@ def test_multiple_result_sets(server: Server) -> None:
     with server.connect(client_flag=multi_statements) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT 1; SELECT 'two'; SELECT * FROM no_such_table")
-        assert cursor.fetchall() == [(1,)]
+        assert cursor.fetchall() == ((1,),)
         assert cursor.nextset() is True
-        assert cursor.fetchall() == [("two",)]
+        assert cursor.fetchall() == (("two",),)
         # The third statement fails: the error surfaces on nextset().
         with pytest.raises(rustmy.Error):
             cursor.nextset()
         assert cursor.nextset() is None
         cursor.execute("SELECT 3")
-        assert cursor.fetchall() == [(3,)]
+        assert cursor.fetchall() == ((3,),)
 
 
 def test_closed_cursor_rejects_use(cursor: rustmy.Cursor) -> None:
