@@ -163,7 +163,7 @@ jobs:
             sh -c 'pip install -q --root-user-action=ignore --no-index --find-links /work/dist rustmy && cd /tmp && python /work/scripts/smoke_test.py'
 
   # macOS and Windows runners have no Docker: the server is installed natively.
-  # Import-only where no server can run (`server: false`), listed here:
+  # Import-only where no server can run (`import-only: true`), listed here:
   # - windows-arm64: actions-setup-mysql has no MySQL build for Windows on Arm.
   smoke-native:
     name: smoke (${{ matrix.platform.name }})
@@ -176,10 +176,11 @@ jobs:
           - { name: macos-x86_64, runner: macos-15-intel }
           - { name: macos-arm64, runner: macos-15 }
           - { name: windows-x64, runner: windows-2025 }
-          - { name: windows-arm64, runner: windows-11-arm, pythons: "3.11 3.12 3.13 3.14 3.14t 3.15 3.15t", server: false }
+          - { name: windows-arm64, runner: windows-11-arm, pythons: "3.11 3.12 3.13 3.14 3.14t 3.15 3.15t", import-only: true }
     env:
-      # Empty for import-only platforms (an empty string is falsy in expressions).
-      RUSTMY_SMOKE_HOST: ${{ matrix.platform.server != false && '127.0.0.1' || '' }}
+      # Empty for import-only platforms. A missing key is null, and null == false
+      # in expressions (both become 0), hence the negation.
+      RUSTMY_SMOKE_HOST: ${{ !matrix.platform.import-only && '127.0.0.1' || '' }}
       RUSTMY_SMOKE_PASSWORD: rustmy
       RUSTMY_SMOKE_VERSION: ${{ inputs.version }}
       PLATFORM_PYTHONS: ${{ matrix.platform.pythons || '3.10 3.11 3.12 3.13 3.14 3.14t 3.15 3.15t' }}
@@ -193,7 +194,7 @@ jobs:
           name: wheels-${{ matrix.platform.name }}
           path: dist
       - uses: shogo82148/actions-setup-mysql@v1
-        if: matrix.platform.server != false
+        if: ${{ !matrix.platform.import-only }}
         with:
           mysql-version: "8.4"
           root-password: rustmy
