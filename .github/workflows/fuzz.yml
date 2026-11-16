@@ -30,7 +30,11 @@ jobs:
         with:
           ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: taiki-e/install-action@cargo-fuzz
+      # cargo-fuzz has no @<tool> shortcut tag in install-action (that ref is
+      # a stale branch that installs nothing): name it as a tool instead.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       # Keep the corpus between runs so each week builds on the last.
       - uses: actions/cache@v6
         with:
@@ -42,7 +46,10 @@ jobs:
           mkdir -p "fuzz/corpus/${{ matrix.target }}"
           seeds="fuzz/seeds/${{ matrix.target }}"
           [ -d "$seeds" ] || seeds=""
-          cargo +nightly fuzz run "${{ matrix.target }}" \
+          # The prebuilt cargo-fuzz is a musl binary and would default to its
+          # own target (static libc, which the sanitizer rejects): use rustc's.
+          host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+          cargo +nightly fuzz run --target "$host" "${{ matrix.target }}" \
             "fuzz/corpus/${{ matrix.target }}" $seeds -- \
             -max_total_time="$SECONDS_PER_TARGET" -timeout=10 -rss_limit_mb=2048
       - name: Upload failing inputs
