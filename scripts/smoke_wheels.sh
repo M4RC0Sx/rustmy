@@ -10,9 +10,15 @@
 # environment comes from RUSTMY_SMOKE_* variables (see smoke_test.py).
 set -euo pipefail
 
-dist=$1
+# Absolute paths: each test runs from a temporary directory. On Windows (Git
+# Bash) they are converted to native ones for uv.
+dist="$(cd "$1" && pwd)"
 pythons=$2
 script="$(cd "$(dirname "$0")" && pwd)/smoke_test.py"
+if command -v cygpath >/dev/null; then
+	dist="$(cygpath -m "$dist")"
+	script="$(cygpath -m "$script")"
+fi
 export UV_PYTHON_PREFERENCE=only-managed
 
 for python in $pythons; do
