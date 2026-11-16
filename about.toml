@@ -1,7 +1,7 @@
 # cargo-about: the licenses of every crate compiled into the wheels, written to
 # THIRD-PARTY-LICENSES (shipped in each wheel; CI checks that it is current):
 #
-#   cargo about generate --frozen -m crates/pydriver/Cargo.toml about.hbs -o THIRD-PARTY-LICENSES
+#   cargo about generate --locked -m crates/pydriver/Cargo.toml about.hbs -o THIRD-PARTY-LICENSES
 #
 # The accepted licenses mirror the allow-list in deny.toml.
 accepted = [

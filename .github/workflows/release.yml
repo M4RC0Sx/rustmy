@@ -43,9 +43,16 @@ jobs:
         id: next
         env:
           RELEASE_PLAN: "1"
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          npx semantic-release --dry-run --no-ci
+          # Plan on a local master at what is being built (the push, or the
+          # merge result of a pull request, where semantic-release would see
+          # refs/pull/N/merge and refuse): GitHub's CI variables hidden so it
+          # reads the branch from git, and the checkout itself as the remote
+          # (tags included), so planning needs no push permission. Only the
+          # release job writes.
+          git checkout -q -B master
+          env -u GITHUB_ACTIONS -u GITHUB_EVENT_NAME -u GITHUB_REF \
+            npx semantic-release --dry-run --no-ci --repository-url "file://$PWD"
           version="$(cat .release-version 2>/dev/null || true)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [ -n "$version" ]; then
