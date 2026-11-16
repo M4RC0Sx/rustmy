@@ -2,6 +2,7 @@
 name = "rustmy-pydriver"
 description = "PyO3 bindings exposing rustmy as the rustmy._core extension module"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

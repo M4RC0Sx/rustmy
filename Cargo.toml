@@ -10,6 +10,7 @@ exclude = ["fuzz"]
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.88"
+authors = ["M4RC0Sx <contact@marcosalonso.dev>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/M4RC0Sx/rustmy"
 publish = false

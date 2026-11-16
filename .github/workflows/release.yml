@@ -1,0 +1,124 @@
+name: release
+
+# Merging develop into master releases. One workflow, because a tag pushed from
+# a workflow does not trigger other workflows:
+#
+#   plan     semantic-release --dry-run: is there a release, and which version?
+#   build    every wheel and the sdist with that version, each smoke-tested
+#   release  semantic-release: commit (CHANGELOG.md, Cargo.toml, Cargo.lock;
+#            [skip ci]), tag and GitHub release with the wheels attached
+#   publish  PyPI, through trusted publishing (no stored token)
+#
+# Nothing is tagged or published unless every wheel built and passed. On pull
+# requests into master the same plan and build run as a rehearsal.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancel a release half-way.
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: Next version
+        id: next
+        env:
+          RELEASE_PLAN: "1"
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          npx semantic-release --dry-run --no-ci
+          version="$(cat .release-version 2>/dev/null || true)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ -n "$version" ]; then
+            echo "### Next release: $version" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### No release: nothing since the last one changes what users get" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.version != ''
+    uses: ./.github/workflows/wheels.yml
+    with:
+      version: ${{ needs.plan.outputs.version }}
+
+  release:
+    needs: [plan, build]
+    if: github.event_name == 'push' && needs.plan.outputs.version != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # release commit, tag and GitHub release
+      issues: write # comments on the issues a release fixes
+      pull-requests: write # and on the pull requests it ships
+    steps:
+      # A GitHub App can push the release commit to a protected master; without
+      # one (RELEASE_APP_CLIENT_ID unset) the workflow's own token is used.
+      - name: Release token
+        id: app-token
+        if: vars.RELEASE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || github.token }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+      - uses: astral-sh/setup-uv@v10
+      - run: npm ci
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: "{wheels-*,sdist}"
+          merge-multiple: true
+          path: dist
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          EXPECTED_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          npx semantic-release
+          # Same commits as the plan, so the same version as the wheels.
+          test "$(cat .release-version)" = "$EXPECTED_VERSION"
+
+  publish:
+    needs: release
+    runs-on: ubuntu-24.04
+    # Trusted publishing: PyPI accepts this workflow's OIDC token for this
+    # environment (configured once on PyPI); no reviewers, no stored secret.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/rustmy/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: "{wheels-*,sdist}"
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@v1.14.3
+        with:
+          packages-dir: dist

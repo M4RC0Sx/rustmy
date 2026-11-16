@@ -1,0 +1,58 @@
+name: codspeed
+
+# CPU benchmarks of rustmy's hot paths (benches/codspeed), measured by
+# CodSpeed's instrumentation: instruction counts rather than time, so small
+# regressions show on shared runners. Pull requests are compared with develop,
+# whose pushes keep the baseline current; CodSpeed comments the differences.
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmarks:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # OIDC authentication with CodSpeed, no stored token
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: rustmy
+          MYSQL_DATABASE: rustmy_test
+          MYSQL_USER: rustmy
+          MYSQL_PASSWORD: rustmy
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -prustmy"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.14"
+      - run: uv sync --locked
+      # Measure the optimised build, as users get it.
+      - run: uv run maturin develop --uv --release
+      - uses: CodSpeedHQ/action@v5
+        env:
+          RUSTMY_BENCH_HOST: 127.0.0.1
+          RUSTMY_BENCH_PORT: "3306"
+        with:
+          mode: simulation
+          run: uv run --no-sync pytest benches/codspeed --codspeed -p no:randomly

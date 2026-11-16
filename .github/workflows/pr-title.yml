@@ -1,0 +1,38 @@
+name: pr-title
+
+# A pull request into develop is squash-merged with its title as the commit
+# message, and semantic-release reads those messages to pick the next version
+# and write the changelog: the title must be a Conventional Commit.
+# (Pull requests into master are merged as they are; their title is unused.)
+on:
+  pull_request_target:
+    branches: [develop]
+    types: [opened, edited, reopened, synchronize]
+
+# pull_request_target runs with the base branch's workflow and can see
+# secrets: this job only reads the title, it never checks out the PR's code.
+permissions:
+  pull-requests: read
+
+jobs:
+  title:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          # The types release.config.mjs knows.
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            build
+            revert
+            docs
+            test
+            ci
+            chore
+            style
+          requireScope: false

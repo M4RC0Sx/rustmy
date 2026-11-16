@@ -19,7 +19,7 @@ jobs:
     name: Rust (fmt, clippy, tests)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -31,6 +31,11 @@ jobs:
       - run: cargo clippy -p rustmy-proto --all-targets --features fuzzing -- -D warnings
       # The PyO3 cdylib cannot link a native test binary; Python tests cover it.
       - run: cargo nextest run --workspace --exclude rustmy-pydriver
+      # THIRD-PARTY-LICENSES ships in every wheel: it must match the crates
+      # compiled in (regenerate with the command in about.toml).
+      - uses: taiki-e/install-action@cargo-about
+      - run: cargo about generate --frozen -m crates/pydriver/Cargo.toml about.hbs -o THIRD-PARTY-LICENSES
+      - run: git diff --exit-code THIRD-PARTY-LICENSES
 
   rust-integration:
     name: Integration (${{ matrix.server }} ${{ matrix.version }})
@@ -56,13 +61,13 @@ jobs:
       MARIADB_VERSION: ${{ matrix.version }}
       RUSTMY_TEST_SERVERS: ${{ matrix.server }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - run: docker compose up -d --wait ${{ matrix.server }}
       - run: cargo nextest run -p rustmy-proto --run-ignored only --no-capture
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10
       # Two passes on the same server: Python 3.10 resolves SQLAlchemy 2.0,
       # Python 3.15 the latest line (2.1 needs Python 3.11+).
       - run: uv sync --locked
@@ -80,7 +85,7 @@ jobs:
     name: cargo-deny (licenses, advisories)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   python:
@@ -92,10 +97,10 @@ jobs:
         # Every supported CPython plus the free-threaded builds ("t").
         python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked

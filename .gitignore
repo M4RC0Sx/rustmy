@@ -33,3 +33,7 @@ htmlcov/
 
 # OS
 .DS_Store
+
+# Release tooling (npm ci)
+node_modules/
+.release-version
