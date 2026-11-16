@@ -9,6 +9,7 @@ use std::io::Write as _;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::PyBool;
 use pyo3::types::PyByteArray;
 use pyo3::types::PyBytes;
@@ -28,12 +29,20 @@ use pyo3::types::PyString;
 use pyo3::types::PyTime;
 use pyo3::types::PyTimeAccess;
 use pyo3::types::PyTuple;
+use pyo3::types::PyType;
 use rustmy_proto::sql::escape_into;
 
 use crate::charset::Codec;
 use crate::convert::Custom;
 use crate::convert::decimal_type;
 use crate::errors::ProgrammingError;
+
+static UUID: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+/// `uuid.UUID`, imported once.
+fn uuid_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    UUID.import(py, "uuid", "UUID")
+}
 
 /// Writes statements and parameters for one connection's settings: in its
 /// character set, escaping text before it is encoded (never encoded bytes,
@@ -228,6 +237,13 @@ impl Encoder {
             write_timedelta(out, delta);
         } else if value.is_instance(decimal_type(value.py())?)? {
             write_decimal(out, value)?;
+        } else if value.is_instance(uuid_type(value.py())?)? {
+            // Its canonical text, as other drivers send it (hex and dashes:
+            // nothing to escape). SQLAlchemy 2.1 passes `uuid.UUID` through
+            // for MariaDB's native UUID type.
+            out.push(b'\'');
+            out.extend_from_slice(value.str()?.to_str()?.as_bytes());
+            out.push(b'\'');
         } else if value.is_instance_of::<PyTuple>()
             || value.is_instance_of::<PyList>()
             || value.is_instance_of::<PySet>()

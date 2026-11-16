@@ -1,0 +1,68 @@
+{
+  "date": "2026-11-16T00:53:51+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.15.2",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 5,
+  "scenarios": [
+    {
+      "name": "fetchall 100k decimal, no conv",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.017438416994991712,
+        "mysqlclient": 0.021120249999512453,
+        "pymysql": 0.07974600000306964
+      }
+    },
+    {
+      "name": "fetchall 100k decimal, conv NEWDECIMAL: float",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.01071024999691872,
+        "mysqlclient": 0.0168474999954924,
+        "pymysql": 0.0719828330038581
+      }
+    },
+    {
+      "name": "fetchall 100k int/varchar, no conv",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.024221084000600968,
+        "mysqlclient": 0.03856137500406476,
+        "pymysql": 0.15335624999715947
+      }
+    },
+    {
+      "name": "fetchall 100k int/varchar, conv TIME changed (Django)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.024426875002973247,
+        "mysqlclient": 0.03905362500518095,
+        "pymysql": 0.15166054199653445
+      }
+    },
+    {
+      "name": "fetchall 100k int/varchar, conv LONG: Python function",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.02864337500068359,
+        "mysqlclient": 0.04288195900153369,
+        "pymysql": 0.1560557089978829
+      }
+    },
+    {
+      "name": "executemany 10k rows, conv encoder for an enum",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.01559441599965794,
+        "mysqlclient": 0.02218779199756682,
+        "pymysql": 0.021424916994874366
+      }
+    }
+  ]
+}

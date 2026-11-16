@@ -21,7 +21,172 @@ Fairness rules the script enforces: all drivers use `autocommit=True`, plain
 TCP (rustmy and mysqlclient would otherwise negotiate TLS) and the same
 queries against the same tables.
 
-## Phase 0 results (2026-11-13)
+Which Python: each phase or block section below is a record of that block,
+measured before and after its change on Python 3.10, the support floor and
+the development environment's version, so they compare with each other
+(Phase 0 also ran 3.14, to compare abi3 with per-version builds).
+"Current results" measures today's code on the latest Python, what a new
+project installs, and is regenerated when a phase closes.
+
+## Current results (Python 3.15)
+
+The latest code on CPython 3.15 (and SQLAlchemy 2.1 for the ORM), against
+MySQL 8.4. Regenerated when a phase closes; the sections after this one keep
+each block's own numbers. The environment needs the `bench` group and a
+release build for 3.15:
+
+```sh
+export UV_PROJECT_ENVIRONMENT=.venv-3.15
+PKG_CONFIG_PATH=/opt/homebrew/opt/mysql-client/lib/pkgconfig \
+    uv sync --python 3.15 --group bench
+uv run --no-sync --python 3.15 maturin develop --uv --release
+P="uv run --no-sync --python 3.15 python"
+$P benches/spike.py --repeat 7 --json benches/results/current-spike-py315.json
+$P benches/cursors.py --memory --json benches/results/current-cursors-py315.json
+$P benches/charsets.py --json benches/results/current-charsets-py315.json
+$P benches/conv.py --json benches/results/current-conv-py315.json
+$P benches/orm.py --repeat 10 --memory --json benches/results/current-orm-py315.json
+for section in spike cursors charsets conv orm; do
+    $P benches/report.py --section current-$section \
+        benches/results/current-$section-py315.json
+done
+```
+
+### Main scenarios (`spike.py`)
+
+<!-- results:current-spike:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/current-spike-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/current-spike-light.svg">
+</picture>
+
+**CPython 3.15.2** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 7 · 2026-11-16T00:51:58+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| fetchall 100k int/varchar | **24.5 ms** | 38.2 ms | 152.6 ms | 1.56x | 6.22x |
+| fetchall 100k mixed (double/datetime/date/decimal) | **44.7 ms** | 124.6 ms | 278.0 ms | 2.78x | 6.21x |
+| fetchall 100k datetime + date | **14.1 ms** | 74.5 ms | 185.6 ms | 5.30x | 13.18x |
+| fetchall 100k decimal | **17.1 ms** | 21.1 ms | 82.2 ms | 1.24x | 4.82x |
+| 10k x SELECT 1 | **632.6 ms** | 650.2 ms | 758.7 ms | 1.03x | 1.20x |
+| 10k x INSERT with params | **1171.3 ms** | 1188.4 ms | 1273.5 ms | 1.01x | 1.09x |
+| executemany 10k rows | **17.9 ms** | 29.4 ms | 28.1 ms | 1.65x | 1.57x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+<!-- results:current-spike:end -->
+
+### Cursors (`cursors.py`)
+
+<!-- results:current-cursors:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/current-cursors-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/current-cursors-light.svg">
+</picture>
+
+**CPython 3.15.2** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-16T00:52:15+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| Cursor fetchall 100k int/varchar | **24.2 ms** | 37.9 ms | 152.3 ms | 1.56x | 6.29x |
+| DictCursor fetchall 100k int/varchar | **30.4 ms** | 44.0 ms | 180.9 ms | 1.45x | 5.95x |
+| DictCursor fetchall 100k mixed | **47.5 ms** | 133.1 ms | 318.8 ms | 2.80x | 6.71x |
+| SSCursor iterate 100k int/varchar | **21.5 ms** | 33.4 ms | 165.9 ms | 1.55x | 7.72x |
+| SSCursor iterate 100k mixed | **39.2 ms** | 107.8 ms | 284.3 ms | 2.75x | 7.25x |
+| SSCursor fetchmany(1000) 100k int/varchar | 21.1 ms | **21.1 ms** | 160.2 ms | 1.00x | 7.58x |
+| SSCursor fetchone 100k int/varchar | **24.2 ms** | 29.7 ms | 163.2 ms | 1.23x | 6.75x |
+| SSCursor fetchall 100k int/varchar | **28.3 ms** | 28.8 ms | 166.7 ms | 1.02x | 5.90x |
+| SSDictCursor iterate 100k int/varchar | **21.8 ms** | 42.3 ms | 187.0 ms | 1.94x | 8.58x |
+| SSCursor iterate 1M int/varchar | **128.8 ms** | 258.0 ms | 1213.1 ms | 2.00x | 9.42x |
+| SSCursor first row of 1M | 0.3 ms | **0.3 ms** | 0.4 ms | 0.89x | 1.36x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+
+Peak memory growth while reading the result set, each in a fresh process (buffered: the whole result at once, as `fetchall()` holds it; streaming: iterating):
+
+| Cursor | Rows | rustmy | mysqlclient | PyMySQL |
+|---|--:|--:|--:|--:|
+| Cursor | 100,000 | 21.5 MiB | 29.1 MiB | 21.5 MiB |
+| SSCursor | 100,000 | 0.1 MiB | 0.0 MiB | 0.0 MiB |
+| Cursor | 1,000,000 | 214.3 MiB | 303.6 MiB | 221.4 MiB |
+| SSCursor | 1,000,000 | 0.1 MiB | 0.0 MiB | 0.1 MiB |
+<!-- results:current-cursors:end -->
+
+### Character sets (`charsets.py`)
+
+<!-- results:current-charsets:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/current-charsets-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/current-charsets-light.svg">
+</picture>
+
+**CPython 3.15.2** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-16T00:53:30+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| fetchall 100k utf8mb4 (es + ru + zh) | **45.3 ms** | 63.1 ms | 128.5 ms | 1.39x | 2.84x |
+| fetchall 100k latin1 (Spanish) | **28.0 ms** | 56.4 ms | 99.5 ms | 2.02x | 3.55x |
+| fetchall 100k cp1251 (Russian) | **30.9 ms** | 59.0 ms | 101.7 ms | 1.91x | 3.30x |
+| fetchall 100k gbk (Chinese) | **35.6 ms** | 55.2 ms | 96.8 ms | 1.55x | 2.72x |
+| fetchall 100k latin1 (ASCII int/varchar) | **26.3 ms** | 74.0 ms | 197.0 ms | 2.82x | 7.50x |
+| executemany 10k latin1 (Spanish) | **22.1 ms** | 33.4 ms | 35.3 ms | 1.51x | 1.60x |
+| executemany 10k cp1251 (Russian) | **23.1 ms** | 32.3 ms | 48.3 ms | 1.40x | 2.09x |
+| executemany 10k gbk (Chinese) | **27.5 ms** | 29.3 ms | 37.3 ms | 1.06x | 1.35x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+<!-- results:current-charsets:end -->
+
+### `conv=` (`conv.py`)
+
+<!-- results:current-conv:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/current-conv-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/current-conv-light.svg">
+</picture>
+
+**CPython 3.15.2** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-16T00:53:51+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| fetchall 100k decimal, no conv | **17.4 ms** | 21.1 ms | 79.7 ms | 1.21x | 4.57x |
+| fetchall 100k decimal, conv NEWDECIMAL: float | **10.7 ms** | 16.8 ms | 72.0 ms | 1.57x | 6.72x |
+| fetchall 100k int/varchar, no conv | **24.2 ms** | 38.6 ms | 153.4 ms | 1.59x | 6.33x |
+| fetchall 100k int/varchar, conv TIME changed (Django) | **24.4 ms** | 39.1 ms | 151.7 ms | 1.60x | 6.21x |
+| fetchall 100k int/varchar, conv LONG: Python function | **28.6 ms** | 42.9 ms | 156.1 ms | 1.50x | 5.45x |
+| executemany 10k rows, conv encoder for an enum | **15.6 ms** | 22.2 ms | 21.4 ms | 1.42x | 1.37x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+<!-- results:current-conv:end -->
+
+### SQLAlchemy Core and ORM (`orm.py`)
+
+<!-- results:current-orm:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/current-orm-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/current-orm-light.svg">
+</picture>
+
+**CPython 3.15.2** · SQLAlchemy 2.1.8 · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 10 · 2026-11-16T00:54:35+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| Core fetchall 100k int/varchar | **32.9 ms** | 48.1 ms | 162.0 ms | 1.46x | 4.93x |
+| Core fetchall 100k mixed | **63.3 ms** | 142.4 ms | 294.5 ms | 2.25x | 4.65x |
+| ORM load 10k objects (mixed) | **27.4 ms** | 33.3 ms | 43.7 ms | 1.22x | 1.60x |
+| ORM 1,000 x session.get | **125.9 ms** | 132.4 ms | 159.4 ms | 1.05x | 1.27x |
+| ORM add_all + commit 10k | **122.5 ms** | 161.8 ms | 147.9 ms | 1.32x | 1.21x |
+| Core insert 10k (executemany) | **22.9 ms** | 35.5 ms | 34.9 ms | 1.55x | 1.53x |
+| ORM yield_per 100k objects | 186.0 ms | **185.6 ms** | 323.7 ms | 1.00x | 1.74x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+
+Peak memory growth while reading the result set, each in a fresh process (buffered: the whole result at once, as `fetchall()` holds it; streaming: iterating):
+
+| Cursor | Rows | rustmy | mysqlclient | PyMySQL |
+|---|--:|--:|--:|--:|
+| ORM yield_per | 1,000,000 | 4.6 MiB | 6.5 MiB | 4.1 MiB |
+<!-- results:current-orm:end -->
+
+## Phase 0 results (2026-11-13, Python 3.10 and 3.14)
 
 Go/no-go criteria from the plan: not slower than mysqlclient on int/varchar,
 and at least 1.3x faster on the mixed workload.
@@ -98,7 +263,7 @@ objects through Python calls and lose most of rustmy's advantage. **Wheels
 are built per Python version** (cp310–cp315 plus free-threaded cp314t and
 cp315t).
 
-## Phase 2, block 1: interpolation in Rust and batched `executemany` (2026-11-14)
+## Phase 2, block 1: interpolation in Rust and batched `executemany` (2026-11-14, Python 3.10)
 
 `executemany` now batches single-row `INSERT`/`REPLACE … VALUES (…)` statements
 into multi-row INSERTs. `benches/executemany.py` sweeps the batch size of rustmy
@@ -172,7 +337,7 @@ Small queries and single INSERTs are unchanged by moving interpolation to Rust:
 they are bound by the network round trip. Fetch scenarios are unchanged within
 noise.
 
-## Phase 2, block 2: `DictCursor` and streaming cursors (2026-11-15)
+## Phase 2, block 2: `DictCursor` and streaming cursors (2026-11-15, Python 3.10)
 
 `benches/cursors.py` compares the cursors of the three drivers. `DictCursor`
 builds each row's dict in Rust, with the keys created once per result set.
@@ -265,7 +430,7 @@ as quick as mysqlclient to return the first row. Reading one row per batch
 costs only ~10% more on narrow rows (about 20 ns per batch for releasing the
 GIL and taking the lock), so small batches carry no hidden cost.
 
-## Phase 2, block 2b: buffered cursors read in batches (2026-11-15)
+## Phase 2, block 2b: buffered cursors read in batches (2026-11-15, Python 3.10)
 
 Block 2 showed that iterating an `SSCursor` was faster than a buffered
 `Cursor.fetchall()`, and an `SSCursor` reading its whole result in one batch
@@ -389,7 +554,7 @@ Times per configuration; the fastest is in bold.
 shared with the streaming cursors): every size from 4 to 256 KiB is within
 noise, 1 MiB is slower.
 
-## Phase 2, block 3a: connection character sets (2026-11-15)
+## Phase 2, block 3a: connection character sets (2026-11-15, Python 3.10)
 
 Any MySQL character set with a Python codec can now be the connection's.
 Single-byte ones (latin1, cp1251…) are decoded and encoded in Rust through a
@@ -462,7 +627,7 @@ uv run --no-sync python benches/report.py --section phase2-block3a \
 Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
 <!-- results:phase2-block3a:end -->
 
-## Phase 2, block 3b: `conv=` and the rest of `connect()` (2026-11-15)
+## Phase 2, block 3b: `conv=` and the rest of `connect()` (2026-11-15, Python 3.10)
 
 `conv=` takes MySQLdb's format (column types to decoders, Python types to
 encoders). Entries equal to `rustmy.converters.conversions` stay on the
@@ -532,7 +697,7 @@ uv run --no-sync python benches/report.py --section phase2-block3b \
 Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
 <!-- results:phase2-block3b:end -->
 
-## Phase 2, block 4: character sets follow the server (2026-11-15)
+## Phase 2, block 4: character sets follow the server (2026-11-15, Python 3.10)
 
 Block 4's tests found that Python's codecs and the server disagree on a few
 characters. In sjis and ujis, Python encodes `¥` as 0x5C, which the server
@@ -572,3 +737,62 @@ uv run --no-sync python benches/report.py --section phase2-block4-charsets \
 
 Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
 <!-- results:phase2-block4-charsets:end -->
+
+## Phase 3: SQLAlchemy Core and ORM (2026-11-16, Python 3.10)
+
+The same work through SQLAlchemy, with each driver's dialect
+(`mysql+rustmy`, `mysql+mysqldb`, `mysql+pymysql`). SQLAlchemy's own work
+(compiling statements, building rows and ORM objects, the unit of work) is
+the same for every driver and is included in each time, so these ratios are
+what an application sees rather than the driver alone, and they are smaller
+than in the sections above. Python 3.10, like the other blocks, so it runs
+SQLAlchemy 2.0 (2.1 needs Python 3.11+; "Current results" has 3.15 with
+SQLAlchemy 2.1):
+
+```sh
+uv run --no-sync python benches/orm.py --repeat 10 --memory \
+    --json benches/results/phase3-orm-py310.json
+uv run --no-sync python benches/report.py --section phase3-orm \
+    benches/results/phase3-orm-py310.json
+```
+
+<!-- results:phase3-orm:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase3-orm-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase3-orm-light.svg">
+</picture>
+
+**CPython 3.10.19** · SQLAlchemy 2.0.57 · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 10 · 2026-11-16T00:50:49+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| Core fetchall 100k int/varchar | **39.8 ms** | 50.7 ms | 258.3 ms | 1.27x | 6.49x |
+| Core fetchall 100k mixed | **77.2 ms** | 179.5 ms | 480.2 ms | 2.33x | 6.22x |
+| ORM load 10k objects (mixed) | **31.3 ms** | 45.3 ms | 71.9 ms | 1.45x | 2.30x |
+| ORM 1,000 x session.get | **164.1 ms** | 170.0 ms | 207.0 ms | 1.04x | 1.26x |
+| ORM add_all + commit 10k | **156.7 ms** | 179.2 ms | 187.1 ms | 1.14x | 1.19x |
+| Core insert 10k (executemany) | **23.9 ms** | 37.4 ms | 39.4 ms | 1.57x | 1.65x |
+| ORM yield_per 100k objects | **266.7 ms** | 268.9 ms | 538.1 ms | 1.01x | 2.02x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+
+Peak memory growth while reading the result set, each in a fresh process (buffered: the whole result at once, as `fetchall()` holds it; streaming: iterating):
+
+| Cursor | Rows | rustmy | mysqlclient | PyMySQL |
+|---|--:|--:|--:|--:|
+| ORM yield_per | 1,000,000 | 4.8 MiB | 4.8 MiB | 7.1 MiB |
+<!-- results:phase3-orm:end -->
+
+What the numbers say: rustmy's lead survives where the driver's share of the
+work is large (Core reads, bulk inserts); where SQLAlchemy builds an object
+per row or runs one small query at a time, the drivers converge. Two caveats:
+
+- "ORM load 10k objects" is noisy. On Python 3.15, three runs of the whole
+  script gave 0.95x (best of 5), 1.63x and 1.22x (best of 10), and repeating
+  the scenario alone gave rustmy 23.7–27.5 ms against mysqlclient's
+  27.9–28.4 ms: creating thousands of ORM objects triggers the garbage
+  collector at varying points. Read it as "on par or ahead".
+- `yield_per` streams through each driver's server-side cursor and fetches
+  in chunks with `fetchmany()`, where rustmy and mysqlclient are on par
+  (block 2: mysqlclient runs that loop in C). The memory stays flat for all
+  three drivers.

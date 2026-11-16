@@ -275,8 +275,10 @@ def table(run: dict[str, Any]) -> str:
             f"| {vs_mysqlclient:.2f}x | {vs_pymysql:.2f}x |"
         )
     drivers = run["drivers"]
+    # orm.py runs through SQLAlchemy and records its version.
+    sqlalchemy = f"SQLAlchemy {run['sqlalchemy']} · " if "sqlalchemy" in run else ""
     setup = (
-        f"**{run['python']}** · {run['server']} · {run['machine']} · "
+        f"**{run['python']}** · {sqlalchemy}{run['server']} · {run['machine']} · "
         f"rustmy {drivers['rustmy']}, mysqlclient {drivers['mysqlclient']}, "
         f"PyMySQL {drivers['pymysql']} · best of {run['repeat']} · {run['date']}"
     )

@@ -1,0 +1,89 @@
+{
+  "date": "2026-11-16T00:54:35+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.15.2",
+  "sqlalchemy": "2.1.8",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 10,
+  "scenarios": [
+    {
+      "name": "Core fetchall 100k int/varchar",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.03289662499446422,
+        "mysqlclient": 0.048086167000292335,
+        "pymysql": 0.16203537500405218
+      }
+    },
+    {
+      "name": "Core fetchall 100k mixed",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.06326995800191071,
+        "mysqlclient": 0.1423615410021739,
+        "pymysql": 0.2944531250032014
+      }
+    },
+    {
+      "name": "ORM load 10k objects (mixed)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.027358542000001762,
+        "mysqlclient": 0.033315291002509184,
+        "pymysql": 0.043695291999028996
+      }
+    },
+    {
+      "name": "ORM 1,000 x session.get",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.12585495900566457,
+        "mysqlclient": 0.13241725000261795,
+        "pymysql": 0.15936100000544684
+      }
+    },
+    {
+      "name": "ORM add_all + commit 10k",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.12249770799826365,
+        "mysqlclient": 0.16176075000112178,
+        "pymysql": 0.14791495799727272
+      }
+    },
+    {
+      "name": "Core insert 10k (executemany)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.022872040994116105,
+        "mysqlclient": 0.03554695799539331,
+        "pymysql": 0.03492454100342002
+      }
+    },
+    {
+      "name": "ORM yield_per 100k objects",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.1860140409989981,
+        "mysqlclient": 0.18560854200040922,
+        "pymysql": 0.32371716600027867
+      }
+    }
+  ],
+  "memory": [
+    {
+      "rows": 1000000,
+      "cursor": "ORM yield_per",
+      "peak_mib": {
+        "rustmy": 4.6,
+        "mysqlclient": 6.5,
+        "pymysql": 4.1
+      }
+    }
+  ]
+}

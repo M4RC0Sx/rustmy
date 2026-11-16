@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -134,3 +135,19 @@ def test_server_marks_text_columns_as_unicode(
 ) -> None:
     cursor.execute("SELECT CONVERT('x' USING utf8mb4), CAST('x' AS BINARY)")
     assert cursor.fetchone() == ("x", b"x"), server.name
+
+
+def test_uuid_parameters_go_as_their_text(
+    cursor: rustmy.Cursor, server: Server
+) -> None:
+    # As PyMySQL and mysqlclient send them; SQLAlchemy 2.1 passes uuid.UUID
+    # through for MariaDB's native UUID type.
+    value = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    assert cursor.mogrify("SELECT %s", (value,)) == f"SELECT '{value}'"
+    cursor.execute("SELECT %s", (value,))
+    assert cursor.fetchone() == (str(value),)
+    if server.name == "mariadb":
+        cursor.execute("CREATE TEMPORARY TABLE u (id UUID)")
+        cursor.execute("INSERT INTO u VALUES (%s)", (value,))
+        cursor.execute("SELECT id FROM u WHERE id = %s", (value,))
+        assert cursor.fetchone() == (str(value),)
