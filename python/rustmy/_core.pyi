@@ -58,6 +58,22 @@ class Connection:
     def executemany(
         self, query: str, seq_of_args: Iterable[object], max_stmt_length: int
     ) -> tuple[int, int | None, bytes | None] | None: ...
+    def executemany_pipelined(
+        self,
+        query: str,
+        seq_of_args: Iterable[object],
+        max_pipeline: int,
+        as_dict: bool = False,
+        batch_bytes: int = 4096,
+    ) -> tuple[QueryResult, int, bytes] | None: ...
+    def executemany_pipelined_streamed(
+        self,
+        query: str,
+        seq_of_args: Iterable[object],
+        max_pipeline: int,
+        as_dict: bool = False,
+        batch_bytes: int = 4096,
+    ) -> tuple[StreamedResult, int, bytes] | None: ...
     def next_result(
         self, as_dict: bool = False, batch_bytes: int = 4096
     ) -> QueryResult | None: ...

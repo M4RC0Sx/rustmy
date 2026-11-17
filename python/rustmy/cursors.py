@@ -50,6 +50,11 @@ class Cursor:
     #: Largest statement :meth:`executemany` builds when batching inserts.
     max_stmt_length: int = 256 * 1024
 
+    #: Statements :meth:`executemany` sends before reading their replies,
+    #: when it cannot batch them into one (anything but ``INSERT … VALUES``).
+    #: ``1`` sends each one after the previous reply.
+    max_pipeline: int = 256
+
     #: Rows come back as dicts keyed by column name instead of tuples.
     _as_dict: ClassVar[bool] = False
 
@@ -148,8 +153,18 @@ class Cursor:
         """Run ``query`` once per item of ``seq_of_args``.
 
         A single-row ``INSERT``/``REPLACE … VALUES (…)`` is sent as multi-row
-        statements of at most :attr:`max_stmt_length` bytes; anything else
-        runs row by row. Returns the total number of affected rows.
+        statements of at most :attr:`max_stmt_length` bytes. Anything else
+        (``UPDATE``, ``DELETE``…) runs once per item, pipelined: up to
+        :attr:`max_pipeline` statements (and 16 KiB) go to the server before
+        their replies are read, so a batch costs one round trip per window
+        instead of one per statement. The server runs every statement it
+        receives: if one fails, the rest of its window has already run when
+        the error is raised (no further window is sent). Inside a
+        transaction, ``rollback()`` undoes them all; with autocommit on, set
+        :attr:`max_pipeline` to 1 to stop right at the failing statement.
+
+        The cursor is left with the last statement's result. Returns the
+        total number of affected rows.
         """
         connection = self._get_connection()
         self._clear()
@@ -167,11 +182,26 @@ class Cursor:
             if last_statement is not None:
                 self._last = last_statement
             return rowcount
-        total = 0
-        for args in seq_of_args:
-            total += self.execute(query, args)
-        self.rowcount = total
-        return total
+        return self._executemany_pipelined(connection, query, seq_of_args)
+
+    def _executemany_pipelined(
+        self, connection: Connection, query: str, seq_of_args: Iterable[Params]
+    ) -> int:
+        pipelined = connection._executemany_pipelined(  # noqa: SLF001
+            query,
+            seq_of_args,
+            self.max_pipeline,
+            as_dict=self._as_dict,
+            batch_bytes=self._batch_bytes,
+        )
+        if pipelined is None:
+            self.rowcount = 0
+            return 0
+        result, before, last_statement = pipelined
+        self._set_result(result)
+        self._last = last_statement
+        self.rowcount += before
+        return self.rowcount
 
     def callproc(self, procname: str, args: Sequence[Any] = ()) -> Sequence[Any]:
         """Call the stored procedure ``procname`` with ``args``.
@@ -332,6 +362,27 @@ class SSCursor(Cursor):
                 query, args, as_dict=self._as_dict, batch_bytes=self._batch_bytes
             )
         )
+        return self.rowcount
+
+    def _executemany_pipelined(
+        self, connection: Connection, query: str, seq_of_args: Iterable[Params]
+    ) -> int:
+        pipelined = connection._executemany_pipelined_streamed(  # noqa: SLF001
+            query,
+            seq_of_args,
+            self.max_pipeline,
+            as_dict=self._as_dict,
+            batch_bytes=self._batch_bytes,
+        )
+        if pipelined is None:
+            self.rowcount = 0
+            return 0
+        result, before, last_statement = pipelined
+        self._set_stream(result)
+        self._last = last_statement
+        # A result set's size is unknown until the end, as for execute().
+        if self.rowcount != -1:
+            self.rowcount += before
         return self.rowcount
 
     def nextset(self) -> bool | None:

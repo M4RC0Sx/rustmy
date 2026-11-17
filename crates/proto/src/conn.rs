@@ -294,6 +294,20 @@ pub enum ReadOutcome {
     Done { warnings: u16 },
 }
 
+/// What a pipelined batch did ([`Conn::pipeline`]).
+#[derive(Debug, Default)]
+pub struct PipelineTotals {
+    /// What `execute` would report as the rowcount of each statement, added
+    /// up: its affected rows, or the size of its result set (the first one,
+    /// for a statement with several).
+    pub rowcount: u64,
+    /// `LAST_INSERT_ID()` reported by the last OK reply.
+    pub last_insert_id: u64,
+    /// The first statement the server refused: its index in the batch and
+    /// the error.
+    pub error: Option<(usize, Error)>,
+}
+
 /// The result set whose rows are still unread on the wire.
 #[derive(Debug, Clone, Copy)]
 struct Pending {
@@ -552,6 +566,131 @@ impl Conn {
         self.drain_results()?;
         self.stream.write_command(command::QUERY, sql)?;
         self.read_head()
+    }
+
+    /// How many bytes of statements [`Conn::pipeline`] may send in one
+    /// batch (a single statement larger than this goes alone).
+    ///
+    /// While a batch is being written the server is already replying, and a
+    /// large reply (rows) that fills the socket's buffers stops it reading
+    /// until we read, which we only do once the write ends: the batch must
+    /// fit in our send buffer, whatever the server does. 16 KiB is Linux's
+    /// default for TCP (other systems start higher); Unix sockets on macOS
+    /// default to 8 KiB.
+    #[must_use]
+    pub fn pipeline_budget(&self) -> usize {
+        match self.stream.get_ref() {
+            #[cfg(unix)]
+            Stream::Unix(_) => 8 * 1024,
+            _ => 16 * 1024,
+        }
+    }
+
+    /// Runs `statements` with the text protocol, sending them all before
+    /// reading any reply (pipelining): one round trip for the batch instead
+    /// of one per statement. Keep the batch within
+    /// [`Conn::pipeline_budget`].
+    ///
+    /// The server runs every statement it receives, so one that fails does
+    /// not stop those after it: every reply is read (keeping the connection
+    /// in sync) and the first server error is returned with its index in
+    /// [`PipelineTotals::error`]. Rows of result sets are read and dropped.
+    ///
+    /// # Errors
+    ///
+    /// I/O failures and protocol violations (server errors go in the
+    /// totals).
+    pub fn pipeline<'a>(
+        &mut self,
+        statements: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<PipelineTotals> {
+        let reply_seqs = self.send_pipeline(statements)?;
+        let mut totals = PipelineTotals::default();
+        self.read_replies(&reply_seqs, &mut totals)?;
+        Ok(totals)
+    }
+
+    /// Like [`Conn::pipeline`] with `last` sent after `statements`, whose
+    /// reply is left as [`Conn::query_streamed`] leaves it: its first
+    /// result (rows still on the wire), with the rest queued.
+    ///
+    /// # Errors
+    ///
+    /// I/O failures, protocol violations, or the first server error of the
+    /// batch (once every reply has been read).
+    pub fn pipeline_streamed<'a>(
+        &mut self,
+        statements: impl IntoIterator<Item = &'a [u8]>,
+        last: &'a [u8],
+    ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
+        let reply_seqs = self.send_pipeline(statements.into_iter().chain([last]))?;
+        let (&last_seq, others) = reply_seqs
+            .split_last()
+            .ok_or_else(|| Error::protocol("empty pipeline"))?;
+        let mut totals = PipelineTotals::default();
+        self.read_replies(others, &mut totals)?;
+        self.stream.expect_seq(last_seq);
+        if let Some((_, err)) = totals.error.take() {
+            // The last statement ran too: read its reply before reporting.
+            match self.read_reply(&mut totals) {
+                Ok(()) | Err(Error::Server { .. }) => return Err(err),
+                Err(other) => return Err(other),
+            }
+        }
+        let (head, stream) = self.read_head()?;
+        Ok((totals, head, stream))
+    }
+
+    /// Sends one `COM_QUERY` per statement in a single write; returns the
+    /// sequence id each reply starts at.
+    fn send_pipeline<'a>(
+        &mut self,
+        statements: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<Vec<u8>> {
+        self.drain_results()?;
+        let mut reply_seqs = Vec::new();
+        self.stream
+            .write_commands(command::QUERY, statements, &mut reply_seqs)?;
+        Ok(reply_seqs)
+    }
+
+    /// Reads the replies starting at `reply_seqs`, adding them to `totals`.
+    fn read_replies(&mut self, reply_seqs: &[u8], totals: &mut PipelineTotals) -> Result<()> {
+        for (index, &seq) in reply_seqs.iter().enumerate() {
+            self.stream.expect_seq(seq);
+            match self.read_reply(totals) {
+                Ok(()) => {}
+                Err(err @ Error::Server { .. }) => {
+                    if totals.error.is_none() {
+                        totals.error = Some((index, err));
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads one statement's whole reply (every result, rows dropped),
+    /// adding its first result's rowcount to `totals`.
+    fn read_reply(&mut self, totals: &mut PipelineTotals) -> Result<()> {
+        let mut first = true;
+        loop {
+            let (result, stream) = self.read_head()?;
+            let count = if let Some(id) = stream {
+                u64::try_from(self.skip_rows(id, usize::MAX)?.0).unwrap_or(u64::MAX)
+            } else {
+                totals.last_insert_id = result.last_insert_id;
+                result.affected_rows
+            };
+            if first {
+                totals.rowcount += count;
+                first = false;
+            }
+            if !self.has_more_results() {
+                return Ok(());
+            }
+        }
     }
 
     /// Reads rows of the streamed result set `id` into `rows`, stopping

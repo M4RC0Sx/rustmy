@@ -104,35 +104,77 @@ impl<S: Read + Write> PacketStream<S> {
         self.write_parts(&[], payload)
     }
 
+    /// Sends one command per item of `args` in a single write, without
+    /// waiting for any reply, and records in `reply_seqs` the sequence id
+    /// each reply starts at. Before reading reply `i`, call
+    /// [`PacketStream::expect_seq`] with `reply_seqs[i]`.
+    pub(crate) fn write_commands<'a>(
+        &mut self,
+        cmd: u8,
+        args: impl IntoIterator<Item = &'a [u8]>,
+        reply_seqs: &mut Vec<u8>,
+    ) -> Result<()> {
+        let mut buf = std::mem::take(&mut self.write_buf);
+        buf.clear();
+        let mut encoded = Ok(());
+        for arg in args {
+            self.reset_seq();
+            encoded = self.encode_parts(&mut buf, &[cmd], arg);
+            if encoded.is_err() {
+                break;
+            }
+            reply_seqs.push(self.seq);
+        }
+        let result = encoded.and_then(|()| self.send(&buf));
+        self.write_buf = buf;
+        result
+    }
+
+    /// Sets the sequence id the next packet read must carry (the start of a
+    /// pipelined reply, from [`PacketStream::write_commands`]).
+    pub(crate) const fn expect_seq(&mut self, seq: u8) {
+        self.seq = seq;
+    }
+
     /// Sends `head ++ body` as one logical payload without concatenating
     /// them first in the common single-packet case.
     fn write_parts(&mut self, head: &[u8], body: &[u8]) -> Result<()> {
-        let total = head.len() + body.len();
         let mut buf = std::mem::take(&mut self.write_buf);
         buf.clear();
+        let result = self
+            .encode_parts(&mut buf, head, body)
+            .and_then(|()| self.send(&buf));
+        self.write_buf = buf;
+        result
+    }
+
+    /// Appends `head ++ body` to `buf` as packets of the current sequence.
+    fn encode_parts(&mut self, buf: &mut Vec<u8>, head: &[u8], body: &[u8]) -> Result<()> {
+        let total = head.len() + body.len();
         if total < MAX_PACKET_PAYLOAD {
-            self.push_header(&mut buf, total)?;
+            self.push_header(buf, total)?;
             buf.extend_from_slice(head);
             buf.extend_from_slice(body);
-        } else {
-            let payload = [head, body].concat();
-            buf.reserve(total + HEADER_LEN * (total / MAX_PACKET_PAYLOAD + 1));
-            let mut chunks = payload.chunks(MAX_PACKET_PAYLOAD);
-            loop {
-                let chunk = chunks.next().unwrap_or_default();
-                self.push_header(&mut buf, chunk.len())?;
-                buf.extend_from_slice(chunk);
-                // A full chunk must be followed by another packet, possibly
-                // empty, so the server knows the payload continues.
-                if chunk.len() < MAX_PACKET_PAYLOAD {
-                    break;
-                }
+            return Ok(());
+        }
+        let payload = [head, body].concat();
+        buf.reserve(total + HEADER_LEN * (total / MAX_PACKET_PAYLOAD + 1));
+        let mut chunks = payload.chunks(MAX_PACKET_PAYLOAD);
+        loop {
+            let chunk = chunks.next().unwrap_or_default();
+            self.push_header(buf, chunk.len())?;
+            buf.extend_from_slice(chunk);
+            // A full chunk must be followed by another packet, possibly
+            // empty, so the server knows the payload continues.
+            if chunk.len() < MAX_PACKET_PAYLOAD {
+                return Ok(());
             }
         }
+    }
+
+    fn send(&mut self, buf: &[u8]) -> Result<()> {
         let stream = self.inner.get_mut();
-        let result = stream.write_all(&buf).and_then(|()| stream.flush());
-        self.write_buf = buf;
-        Ok(result?)
+        Ok(stream.write_all(buf).and_then(|()| stream.flush())?)
     }
 
     fn push_header(&mut self, buf: &mut Vec<u8>, len: usize) -> Result<()> {
@@ -243,5 +285,31 @@ mod tests {
         let out = ps.inner.into_inner().output;
         assert_eq!(out[5..9], [9, 0, 0, 0]);
         assert_eq!(&out[9..], b"\x03SELECT 1");
+    }
+
+    #[test]
+    fn pipelined_commands_each_start_a_sequence() {
+        let mut ps = reader(Vec::new());
+        let big = vec![b'x'; MAX_PACKET_PAYLOAD];
+        let mut reply_seqs = Vec::new();
+        ps.write_commands(0x03, [&b"A"[..], &big, b"B"], &mut reply_seqs)
+            .unwrap();
+        // The second command takes two packets, so its reply starts at 2.
+        assert_eq!(reply_seqs, [1, 2, 1]);
+        let out = ps.inner.into_inner().output;
+        assert_eq!(out[..6], [2, 0, 0, 0, 0x03, b'A']);
+        let second = 6 + 4 + MAX_PACKET_PAYLOAD;
+        assert_eq!(out[6..10], [0xFF, 0xFF, 0xFF, 0]);
+        assert_eq!(out[second..second + 4], [1, 0, 0, 1]);
+        assert_eq!(out[second + 5..], [2, 0, 0, 0, 0x03, b'B']);
+    }
+
+    #[test]
+    fn expect_seq_sets_the_next_read() {
+        let mut ps = reader(vec![1, 0, 0, 4, b'a']);
+        ps.expect_seq(4);
+        let mut out = Vec::new();
+        ps.read_into(&mut out).unwrap();
+        assert_eq!(out, b"a");
     }
 }

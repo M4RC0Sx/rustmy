@@ -73,3 +73,14 @@ services:
       interval: 2s
       timeout: 5s
       retries: 90
+
+  # Benchmarks only (`docker compose --profile bench up -d --wait`): TCP
+  # proxies in front of both servers, on 23306 (MySQL) and 23307 (MariaDB),
+  # whose latency the benchmarks set through the API on 8474.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    profiles: [bench]
+    command: ["-host=0.0.0.0", "-config=/toxiproxy.json"]
+    ports: ["8474:8474", "23306:23306", "23307:23307"]
+    volumes:
+      - ./tests/docker/toxiproxy.json:/toxiproxy.json:ro

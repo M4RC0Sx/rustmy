@@ -791,3 +791,51 @@ fn server_error_mid_stream_ends_the_result_set() {
         assert_eq!(table(&conn.query(b"SELECT 2").unwrap()), [["2"]]);
     }
 }
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn pipelined_statements_run_in_order_past_an_error() {
+    for server in servers() {
+        let mut conn = connect(server);
+        conn.query(b"CREATE TEMPORARY TABLE p (id INT PRIMARY KEY, v INT)")
+            .unwrap();
+        conn.query(b"INSERT INTO p VALUES (1, 0), (2, 0), (3, 0)")
+            .unwrap();
+        let statements: [&[u8]; 6] = [
+            b"UPDATE p SET v = 1 WHERE id = 1",
+            b"UPDATE p SET v = WHERE",
+            b"SELECT id FROM p ORDER BY id",
+            b"UPDATE p SET v = v + 1",
+            b"SELECT * FROM missing_table",
+            b"DELETE FROM p WHERE id = 3",
+        ];
+        let totals = conn.pipeline(statements).unwrap();
+        let (index, error) = totals.error.unwrap();
+        assert_eq!(index, 1, "{server:?}");
+        assert!(
+            matches!(error, Error::Server { code: 1064, .. }),
+            "{error:?}"
+        );
+        // 1 + 3 rows of the SELECT + 3 + 1.
+        assert_eq!(totals.rowcount, 8, "{server:?}");
+        let rows = conn.query(b"SELECT id, v FROM p ORDER BY id").unwrap();
+        assert_eq!(table(&rows), [["1", "2"], ["2", "1"]]);
+
+        // The last reply is left as query_streamed leaves it.
+        let (totals, head, id) = conn
+            .pipeline_streamed([&b"UPDATE p SET v = 0"[..]], b"SELECT id FROM p")
+            .unwrap();
+        assert_eq!(totals.rowcount, 2);
+        let mut rows = head.rows;
+        conn.read_rows(id.unwrap(), &mut rows, usize::MAX).unwrap();
+        assert_eq!(first_cells(&rows), ["1", "2"]);
+
+        // An error before the last statement is reported once every reply
+        // has been read.
+        let err = conn
+            .pipeline_streamed([&b"SELECT * FROM missing_table"[..]], b"SELECT 1")
+            .unwrap_err();
+        assert!(matches!(err, Error::Server { code: 1146, .. }), "{err:?}");
+        assert_eq!(table(&conn.query(b"SELECT 2").unwrap()), [["2"]]);
+    }
+}

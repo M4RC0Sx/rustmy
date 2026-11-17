@@ -256,3 +256,76 @@ def test_insert_many_values_with_returning(engine: sa.Engine) -> None:
         assert (
             conn.execute(sa.select(sa.func.count()).select_from(table)).scalar() == 10
         )
+
+
+def _items(count: int) -> list[Item]:
+    return [
+        Item(
+            key=uuid.uuid4(),
+            name=f"item {i}",
+            price=Decimal(1),
+            created=dt.datetime(2026, 1, 1),
+            data={},
+        )
+        for i in range(count)
+    ]
+
+
+@pytest.mark.usefixtures("tables")
+def test_orm_flush_deletes_through_executemany(engine: sa.Engine) -> None:
+    """A flush runs versioned DELETEs as one executemany (pipelined) and
+    checks that the matched rowcount adds up. (Versioned UPDATEs go one by
+    one: SQLAlchemy needs each row's new version.)"""
+    many: list[str] = []
+
+    def record(*args: Any) -> None:
+        # (conn, cursor, statement, parameters, context, executemany)
+        statement, executemany = args[2], args[5]
+        if executemany:
+            many.append(statement.split()[0])
+
+    sa.event.listen(engine, "before_cursor_execute", record)
+    with orm.Session(engine) as session:
+        items = _items(300)
+        session.add_all(items)
+        session.commit()
+        for item in items[:200]:
+            session.delete(item)
+        session.commit()
+        assert session.scalar(sa.select(sa.func.count()).select_from(Item)) == 100
+    assert "DELETE" in many
+
+
+@pytest.mark.usefixtures("tables")
+def test_orm_flush_detects_a_stale_row_among_deletes(engine: sa.Engine) -> None:
+    with orm.Session(engine, expire_on_commit=False) as session:
+        items = _items(20)
+        session.add_all(items)
+        session.commit()
+        # The session believes one row has another version, as if someone had
+        # changed it since it was loaded. (A real concurrent change inside
+        # the session's transaction fails earlier on MariaDB 11.8+, whose
+        # innodb_snapshot_isolation raises error 1020 instead.)
+        orm.attributes.set_committed_value(items[10], "version", 99)
+        for item in items:
+            session.delete(item)
+        with pytest.raises(orm.exc.StaleDataError):
+            session.commit()
+
+
+@pytest.mark.usefixtures("tables")
+def test_core_executemany_update_rowcount(engine: sa.Engine) -> None:
+    table = Base.metadata.tables[Item.__tablename__]
+    with orm.Session(engine) as session:
+        session.add_all(_items(50))
+        session.commit()
+    update = (
+        sa.update(table)
+        .where(table.c.name == sa.bindparam("old"))
+        .values(price=sa.bindparam("new_price"))
+    )
+    rows = [{"old": f"item {i}", "new_price": Decimal(5)} for i in range(60)]
+    with engine.begin() as conn:
+        assert conn.execute(update, rows).rowcount == 50
+        total = conn.execute(sa.select(sa.func.sum(table.c.price))).scalar()
+        assert total == Decimal(250)
