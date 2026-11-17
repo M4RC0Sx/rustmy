@@ -1,0 +1,71 @@
+name: Django
+
+# Django's test suite through rustmy.install_as_MySQLdb(), compared with
+# mysqlclient on the same server (scripts/django_suite.py fails on a test
+# that fails with rustmy only). Pull requests run a subset against the latest
+# Django; the full suite runs weekly (and on demand) for every supported
+# Django line. Scheduled workflows only run from the default branch (master),
+# so the weekly run checks out develop.
+on:
+  pull_request:
+  schedule:
+    - cron: "0 4 * * 1" # Mondays 04:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  django:
+    name: Django ${{ matrix.release.django }} (${{ matrix.server }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        server: [mysql, mariadb]
+        # The LTS and the latest release, each with the newest Python it
+        # supports; pull requests only the latest.
+        release: >-
+          ${{ fromJSON(github.event_name == 'pull_request'
+          && '[{"django": "6.1.3", "python": "3.15"}]'
+          || '[{"django": "5.2.19", "python": "3.14"}, {"django": "6.1.3", "python": "3.15"}]') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v10.3.3
+      # mysqlclient, the baseline, builds against the MySQL client library.
+      - run: sudo apt-get update && sudo apt-get install -y libmysqlclient-dev pkg-config
+      - run: docker compose up -d --wait ${{ matrix.server }}
+      - name: Run
+        env:
+          # A pull request runs the modules closest to the driver: queries,
+          # types, migrations, bulk inserts, transactions, serialization
+          # (~2,700 tests, under a minute per driver locally).
+          LABELS: >-
+            ${{ github.event_name == 'pull_request'
+            && 'backends basic bulk_create migrations model_fields queries serializers transactions'
+            || '' }}
+        # The script needs only the standard library; it builds rustmy into
+        # Django's own virtualenv.
+        run: |
+          uv run --no-project python scripts/django_suite.py --django "${{ matrix.release.django }}" \
+            --python "${{ matrix.release.python }}" --server "${{ matrix.server }}" $LABELS
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: django-${{ matrix.release.django }}-${{ matrix.server }}
+          path: |
+            .cache/django/${{ matrix.release.django }}/*.log
+            .cache/django/${{ matrix.release.django }}/*.json

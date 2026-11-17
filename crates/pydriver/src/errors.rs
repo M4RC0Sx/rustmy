@@ -6,6 +6,10 @@
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
+use pyo3::types::PyDict;
+use pyo3::types::PyTuple;
+use pyo3::types::PyType;
 use rustmy_proto::Error as ProtoError;
 
 create_exception!(
@@ -69,6 +73,43 @@ create_exception!(
     "A feature not supported by the server or the driver."
 );
 
+/// Server error `ER_DATA_OUT_OF_RANGE`: a numeric result out of its type's
+/// range, such as an unsigned column going below zero.
+const DATA_OUT_OF_RANGE: u16 = 1690;
+
+static OUT_OF_RANGE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+/// `OutOfRangeError`, raised for `DATA_OUT_OF_RANGE`: a `DataError`, as
+/// its SQLSTATE (22003) says, and also an `OperationalError`, which is how
+/// mysqlclient raises it. Django turns that `OperationalError` into an
+/// `IntegrityError` (an unsigned field going negative); code that catches
+/// `DataError` keeps working.
+fn out_of_range_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    OUT_OF_RANGE
+        .get_or_try_init(py, || {
+            let bases = PyTuple::new(
+                py,
+                [
+                    py.get_type::<DataError>(),
+                    py.get_type::<OperationalError>(),
+                ],
+            )?;
+            let namespace = PyDict::new(py);
+            namespace.set_item("__module__", "rustmy")?;
+            namespace.set_item(
+                "__doc__",
+                "A numeric value out of range (server error 1690): a DataError, \
+                 and an OperationalError as mysqlclient raises it.",
+            )?;
+            let class = py
+                .get_type::<PyType>()
+                .call1(("OutOfRangeError", bases, namespace))?
+                .cast_into::<PyType>()?;
+            Ok(class.unbind())
+        })
+        .map(|class| class.bind(py))
+}
+
 /// Client-side error codes, numbered like the official client's so that
 /// tools that inspect `args[0]` keep working.
 pub(crate) mod client_code {
@@ -91,6 +132,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("InternalError", py.get_type::<InternalError>())?;
     m.add("ProgrammingError", py.get_type::<ProgrammingError>())?;
     m.add("NotSupportedError", py.get_type::<NotSupportedError>())?;
+    m.add("OutOfRangeError", out_of_range_type(py)?)?;
     Ok(())
 }
 
@@ -142,8 +184,16 @@ pub(crate) fn from_proto(
 
 /// Picks the exception class from the SQLSTATE class (its first two
 /// characters), the portable classification defined by the SQL standard.
+///
+/// Exception: `DATA_OUT_OF_RANGE`, see [`out_of_range_type`].
 fn server_error(code: u16, sql_state: &str, message: String) -> PyErr {
     let args = (code, message);
+    if code == DATA_OUT_OF_RANGE {
+        return Python::attach(|py| match out_of_range_type(py) {
+            Ok(class) => PyErr::from_type(class.clone(), args),
+            Err(err) => err,
+        });
+    }
     match sql_state.get(..2) {
         Some("23") => IntegrityError::new_err(args),
         Some("42") => ProgrammingError::new_err(args),

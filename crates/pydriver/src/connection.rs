@@ -86,6 +86,8 @@ pub(crate) struct Connection {
     codec: Mutex<Arc<Codec>>,
     /// `conv=` decoders and encoders that differ from the defaults.
     custom: Mutex<Option<Arc<Custom>>>,
+    /// Whether `bytes` parameters carry the `_binary` introducer.
+    binary_prefix: bool,
 }
 
 /// `(affected_rows, last_insert_id, last_statement)` of a batched
@@ -454,6 +456,7 @@ impl Connection {
             self.peek(|conn| conn.status_flags() & status::NO_BACKSLASH_ESCAPES != 0)?;
         Ok(Encoder {
             no_backslash_escapes,
+            binary_prefix: self.binary_prefix,
             codec: self.codec(),
             custom: self.custom(),
         })
@@ -868,6 +871,7 @@ impl Connection {
     ssl_cert = None,
     ssl_key = None,
     server_public_key = None,
+    binary_prefix = true,
 ))]
 #[expect(
     clippy::too_many_arguments,
@@ -891,6 +895,7 @@ pub(crate) fn connect(
     ssl_cert: Option<PathBuf>,
     ssl_key: Option<PathBuf>,
     server_public_key: Option<PathBuf>,
+    binary_prefix: bool,
 ) -> PyResult<Connection> {
     let mode = SslMode::parse(ssl_mode).ok_or_else(|| {
         PyValueError::new_err(format!(
@@ -938,6 +943,7 @@ pub(crate) fn connect(
         open_stream: AtomicU64::new(0),
         codec: Mutex::new(codec),
         custom: Mutex::new(None),
+        binary_prefix,
     })
 }
 
@@ -988,6 +994,7 @@ fn timeout(seconds: Option<f64>, name: &str) -> PyResult<Option<Duration>> {
 fn utf8_encoder(no_backslash_escapes: bool) -> Encoder {
     Encoder {
         no_backslash_escapes,
+        binary_prefix: true,
         codec: Arc::clone(&UTF8),
         custom: None,
     }
