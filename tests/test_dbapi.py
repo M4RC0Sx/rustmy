@@ -3,6 +3,7 @@
 import pytest
 
 import rustmy
+import rustmy.err
 
 
 @pytest.mark.parametrize(
@@ -18,6 +19,8 @@ import rustmy
         (rustmy.InternalError, rustmy.DatabaseError),
         (rustmy.ProgrammingError, rustmy.DatabaseError),
         (rustmy.NotSupportedError, rustmy.DatabaseError),
+        (rustmy.err.OutOfRangeError, rustmy.DataError),
+        (rustmy.err.OutOfRangeError, rustmy.OperationalError),
     ],
 )
 def test_exception_hierarchy(exc: type[Exception], parent: type[Exception]) -> None:

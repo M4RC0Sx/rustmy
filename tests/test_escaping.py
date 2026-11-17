@@ -130,6 +130,27 @@ def test_bytes_round_trip(session: rustmy.Cursor, value: bytes) -> None:
     assert session.fetchall() == ((value, _hex(value), "end"),)
 
 
+@pytest.fixture(scope="module", params=list(MODES))
+def unprefixed(
+    server: Server, request: pytest.FixtureRequest
+) -> Iterator[rustmy.Cursor]:
+    """A session with ``binary_prefix=False``, as the MySQLdb alias opens."""
+    with _connect(server, MODES[request.param], binary_prefix=False) as conn:
+        yield conn.cursor()
+
+
+@given(value=st.binary())
+def test_bytes_round_trip_without_binary_prefix(
+    unprefixed: rustmy.Cursor, value: bytes
+) -> None:
+    # Django's MySQL backend writes the introducer itself.
+    unprefixed.execute(
+        "SELECT _binary %s, HEX(_binary %s), %s = _binary %s, 'end'",
+        (value, value, value, value),
+    )
+    assert unprefixed.fetchall() == ((value, _hex(value), 1, "end"),)
+
+
 @given(value=payloads)
 def test_injection_attempts_stay_values(session: rustmy.Cursor, value: str) -> None:
     _check_text(session, value)
@@ -231,6 +252,18 @@ def test_multibyte_injection_attempts_stay_values(
             cursor.execute("SELECT %s, 'end'", (value,))
         return
     _check_text(cursor, value, encoding)
+
+
+@pytest.mark.parametrize("charset", list(DANGEROUS_CHARSETS))
+def test_multibyte_bytes_without_binary_prefix(server: Server, charset: str) -> None:
+    # X'…' whatever binary_prefix says: an escaped byte string is unsafe in
+    # these character sets, and a hex literal is valid after `_binary`.
+    value = bytes(range(256)) + b"\x81\\'\x95\\\\'"
+    with server.connect(charset=charset, binary_prefix=False) as conn:
+        assert conn.literal(value) == f"X'{value.hex()}'"
+        cursor = conn.cursor()
+        cursor.execute("SELECT _binary %s, %s, 'end'", (value, value))
+        assert cursor.fetchall() == ((value, value, "end"),)
 
 
 @given(value=st.binary())
