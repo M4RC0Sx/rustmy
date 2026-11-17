@@ -2,6 +2,13 @@
 
 All notable changes to rustmy are documented in this file. Versions follow [Semantic Versioning](https://semver.org) and entries come from [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.1.0](https://github.com/M4RC0Sx/rustmy/compare/v1.0.1...v1.1.0) (2026-11-17)
+
+### Features
+
+* Django support through install_as_MySQLdb(), option files and binary_prefix ([#28](https://github.com/M4RC0Sx/rustmy/issues/28)) ([7074eef](https://github.com/M4RC0Sx/rustmy/commit/7074eefe0d851d7b25589073cedd1eebe566d607))
+* pipelined executemany for statements other than INSERT … VALUES ([#29](https://github.com/M4RC0Sx/rustmy/issues/29)) ([ad79f6b](https://github.com/M4RC0Sx/rustmy/commit/ad79f6b5b1cace7e940edcaae48d4f2072f65d68))
+
 ## [1.0.1](https://github.com/M4RC0Sx/rustmy/compare/v1.0.0...v1.0.1) (2026-11-16)
 
 ### Bug Fixes
