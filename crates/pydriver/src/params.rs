@@ -52,6 +52,8 @@ fn uuid_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
 #[derive(Debug, Clone)]
 pub(crate) struct Encoder {
     pub(crate) no_backslash_escapes: bool,
+    /// Whether `bytes` go as `_binary'…'` rather than a plain `'…'`.
+    pub(crate) binary_prefix: bool,
     pub(crate) codec: Arc<Codec>,
     /// `conv=` encoders, tried first for the types they cover.
     pub(crate) custom: Option<Arc<Custom>>,
@@ -303,10 +305,12 @@ impl Encoder {
         Ok(())
     }
 
-    /// `_binary'…'` with escaping where that is safe (UTF-8, single-byte
-    /// character sets); `X'…'`, twice the size, with multi-byte legacy ones
-    /// (gbk, big5, sjis…), where an escaped byte string could let a quote
-    /// slip through (CVE-2006-2753).
+    /// `_binary'…'` (`'…'` without `binary_prefix`) with escaping where
+    /// that is safe (UTF-8, single-byte character sets); `X'…'`, twice the
+    /// size, with multi-byte legacy ones (gbk, big5, sjis…), where an escaped
+    /// byte string could let a quote slip through (CVE-2006-2753). A hex
+    /// literal is binary already, and valid after a `_binary` the query
+    /// itself writes.
     fn write_binary(&self, out: &mut Vec<u8>, bytes: &[u8]) {
         if self.codec.needs_hex_binary() {
             out.reserve(bytes.len() * 2 + 3);
@@ -317,7 +321,11 @@ impl Encoder {
             }
             out.push(b'\'');
         } else {
-            out.extend_from_slice(b"_binary'");
+            out.extend_from_slice(if self.binary_prefix {
+                b"_binary'"
+            } else {
+                b"'"
+            });
             escape_into(out, bytes, self.no_backslash_escapes);
             out.push(b'\'');
         }

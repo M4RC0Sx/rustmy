@@ -2,7 +2,8 @@
 
 **A fast MySQL and MariaDB driver for Python, written in Rust.**
 DB-API 2.0, a drop-in feel for code written for mysqlclient or PyMySQL,
-SQLAlchemy dialects included, and wheels with no system libraries to install.
+SQLAlchemy dialects included, Django through mysqlclient's module name, and
+wheels with no system libraries to install.
 
 [![PyPI](https://img.shields.io/pypi/v/rustmy)](https://pypi.org/project/rustmy/)
 [![Python versions](https://img.shields.io/pypi/pyversions/rustmy)](https://pypi.org/project/rustmy/)
@@ -34,7 +35,9 @@ with rustmy.connect(
 - **Fast where it counts.** Reading rows is up to **5.3x faster than
   mysqlclient** and **13x faster than PyMySQL**; bulk inserts are 1.6x faster
   than both. Rows are read in small batches with the GIL released and
-  converted in Rust while the server sends the next batch.
+  converted in Rust while the server sends the next batch. `executemany` of
+  `UPDATE`/`DELETE` pipelines its statements: one network round trip per
+  256 of them instead of one each.
 - **Nothing to install but the wheel.** No libmysqlclient, no compiler, no
   `pkg-config`: TLS is [rustls](https://github.com/rustls/rustls), and the
   supported authentication methods are implemented in Rust.
@@ -46,6 +49,10 @@ with rustmy.connect(
   whole test suite (~25,000 tests) as well as PyMySQL does: the only extra
   failures are tests SQLAlchemy runs for unknown drivers and skips by name for
   the drivers it knows.
+- **Runs Django.** `rustmy.install_as_MySQLdb()` puts rustmy behind Django's
+  MySQL backend: Django's whole test suite (~19,700 tests) passes as it does
+  with mysqlclient, on MySQL and MariaDB, but for one test that pins the
+  types mysqlclient's `escape()` returns.
 - **Built for free-threaded Python.** Wheels for 3.14t and 3.15t; all network
   I/O runs without the GIL.
 - **Correct with every character set.** The driver follows the server's
@@ -126,6 +133,17 @@ conn.close()
 `autocommit` is off by default, as PEP 249 asks: call `conn.commit()` to keep
 your changes, or pass `autocommit=True`.
 
+Settings can also come from a MySQL option file, as with the `mysql` client:
+
+```python
+conn = rustmy.connect(read_default_file="~/.my.cnf", read_default_group="shop")
+```
+
+The `[client]` group and the one you name are read (with `!include` and
+`!includedir`), and arguments passed to `connect()` win over the file.
+`read_default_group` alone reads the default files (`/etc/my.cnf`,
+`~/.my.cnf`…). Login paths (`.mylogin.cnf`) are not read.
+
 ### Queries and parameters
 
 Parameters are escaped and interpolated in Rust, never by hand:
@@ -143,7 +161,7 @@ Python types map to MySQL ones both ways: `int`, `float`, `Decimal`, `str`,
 `bytes`, `bool`, `None`, `date`, `datetime`, `time`, `timedelta`, `uuid.UUID`
 (as text) and JSON (as `str`).
 
-### Inserting many rows
+### Many rows at once
 
 `executemany` turns an `INSERT … VALUES` into multi-row statements, so 10,000
 rows take a few round trips instead of 10,000:
@@ -155,6 +173,29 @@ with conn.cursor() as cursor:
     print(cursor.rowcount, cursor.lastrowid)
 conn.commit()
 ```
+
+Any other statement (`UPDATE`, `DELETE`…) still runs once per item, but
+pipelined: rustmy sends up to `cursor.max_pipeline` statements (256 by
+default, 16 KiB at most) before reading their replies, so a batch pays one
+network round trip per window instead of one per statement. With a 3 ms
+round trip, 1,000 `UPDATE`s take under 0.1 s instead of 3.4 s:
+
+```python
+with conn.cursor() as cursor:
+    cursor.executemany(
+        "UPDATE products SET price = %(price)s WHERE name = %(name)s",
+        [{"name": "tea", "price": 3.9}, {"name": "cocoa", "price": 5.5}],
+    )
+    print(cursor.rowcount)  # rows affected by all of them
+conn.commit()
+```
+
+The server runs every statement it receives, so when one fails, the rest of
+its window has already run by the time the error is raised (no further
+window is sent). Inside a transaction (the default: autocommit is off),
+`conn.rollback()` undoes them all. With autocommit on, set
+`cursor.max_pipeline = 1` to stop right at the failing statement, as a loop
+of `execute()` calls would.
 
 ### Rows as dictionaries
 
@@ -284,6 +325,37 @@ URL query arguments use rustmy's names (`charset`, `collation`, `ssl_mode`,
 new connection (the handshake already sets the character set), and
 `stream_results=True` / `yield_per` use the streaming cursor.
 
+### Django
+
+Django's MySQL backend imports mysqlclient's module, `MySQLdb`. Make it load
+rustmy at the top of `settings.py` (or anywhere that runs before Django
+connects), and configure the database as usual:
+
+```python
+import rustmy
+
+rustmy.install_as_MySQLdb()
+
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.mysql",
+        "NAME": "shop",
+        "USER": "app",
+        "PASSWORD": "secret",
+        "HOST": "localhost",
+        "OPTIONS": {"charset": "utf8mb4"},
+    }
+}
+```
+
+`OPTIONS` are passed to `rustmy.connect()`, so `ssl_mode`, `ssl_ca`,
+`read_default_file` and the rest work there. The alias reports itself as
+mysqlclient 2.2.1, the oldest version Django 6.x accepts, and its
+`connect()` leaves `bytes` without the `_binary` prefix, as mysqlclient does,
+since Django writes `_binary %s` for binary fields itself. CI runs Django's
+test suite with rustmy and with mysqlclient on the same servers and fails on
+any test that fails with rustmy only.
+
 ### Threads
 
 A connection belongs to one thread at a time (`threadsafety = 1`): give each
@@ -300,6 +372,7 @@ their own connections.
 | MySQL | 8.0, 8.4 LTS, 9.7, 26.x |
 | MariaDB | 10.11, 11.4, 11.8, 12.3, 13.x |
 | SQLAlchemy | 2.0 and 2.1 (CI tests the latest release each Python gets) |
+| Django | 5.2 LTS and 6.1 (Django's test suite, weekly in CI) |
 | Platforms | Linux x86_64 and aarch64 (glibc, musl), macOS x86_64 and arm64, Windows x64 and arm64 |
 
 ### Coming from mysqlclient or PyMySQL
@@ -316,20 +389,31 @@ pinned by a test:
   before anything is sent, instead of `UnicodeEncodeError` or a corrupted
   value.
 - Server errors are classed by SQLSTATE, so for example "unknown column"
-  (1054) is a `ProgrammingError`, as the SQL standard defines it.
+  (1054) is a `ProgrammingError`, as the SQL standard defines it. One
+  exception keeps code written for mysqlclient working: a numeric value out
+  of range (1690) raises `rustmy.err.OutOfRangeError`, both a `DataError`
+  (its SQLSTATE) and an `OperationalError` (as mysqlclient raises it).
+- `bytes` parameters go as `_binary'…'`, so the server reads them as binary
+  whatever the connection's character set; `binary_prefix=False` writes the
+  plain `'…'` of mysqlclient and PyMySQL.
 - `multi_statements` is off unless you ask for it, which keeps an injection
   from adding statements of its own.
+- `executemany` of anything but `INSERT … VALUES` sends its statements in
+  windows of up to 256 before reading the replies, so after an error the rest
+  of the failing statement's window has already run (see
+  [Many rows at once](#many-rows-at-once); `cursor.max_pipeline = 1` sends
+  them one by one, as both drivers do).
 
 ## Limitations
 
 - **New.** rustmy is tested extensively but has no long production history
   yet. Please report anything that behaves differently from what you expect.
 - **Synchronous only.** No asyncio API yet.
-- **Text protocol.** Server-side prepared statements, compression,
-  `LOAD DATA LOCAL INFILE` and option files (`read_default_file`) are not
-  supported yet.
-- **Latency-bound workloads** (many tiny queries) gain little: the network
-  dominates them with any driver.
+- **Text protocol.** Server-side prepared statements, compression and
+  `LOAD DATA LOCAL INFILE` are not supported yet.
+- **Latency-bound workloads** (many tiny queries, one after another) gain
+  little: the network dominates them with any driver. `executemany` is the
+  exception: it pipelines its statements.
 - **CPython 3.10 installed by uv on Alpine/musl** cannot load the `cp310`
   musllinux wheel (nor any other project's): CPython 3.10 names musl extensions
   `*-linux-gnu.so`, which uv's build of it does not accept. Alpine's own Python
@@ -342,7 +426,9 @@ packets, handshake, authentication, TLS, row decoding; no `unsafe`) and thin
 [PyO3](https://pyo3.rs) bindings that build Python objects straight from the
 wire. Every pull request runs:
 
-- the PEP 249 compliance suite (`dbapi20.py`) and SQLAlchemy's dialect suite;
+- the PEP 249 compliance suite (`dbapi20.py`), SQLAlchemy's dialect suite and
+  part of Django's test suite (all of it weekly), the latter compared test by
+  test with mysqlclient;
 - property-based tests with [hypothesis](https://hypothesis.readthedocs.io)
   against real servers: arbitrary text and bytes must round-trip byte for
   byte, and generated injection attempts must stay values, with and without

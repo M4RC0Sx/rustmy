@@ -86,11 +86,49 @@ pub(crate) struct Connection {
     codec: Mutex<Arc<Codec>>,
     /// `conv=` decoders and encoders that differ from the defaults.
     custom: Mutex<Option<Arc<Custom>>>,
+    /// Whether `bytes` parameters carry the `_binary` introducer.
+    binary_prefix: bool,
 }
 
 /// `(affected_rows, last_insert_id, last_statement)` of a batched
 /// `executemany`.
 type BatchTotals<'py> = (u64, Option<u64>, Option<Bound<'py, PyBytes>>);
+
+/// `(result, rowcount, last_statement)` of a pipelined `executemany`: the
+/// last statement's result as `execute` (or `execute_streamed`) returns it,
+/// the rowcounts of the statements before it added up, and the last
+/// statement as sent.
+type PipelinedMany<'py> = (Py<PyAny>, u64, Bound<'py, PyBytes>);
+
+/// Statements of one pipelined `executemany` window, back to back.
+#[derive(Debug, Default)]
+struct Window {
+    bytes: Vec<u8>,
+    ends: Vec<usize>,
+}
+
+impl Window {
+    const fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    fn push(&mut self, statement: &[u8]) {
+        self.bytes.extend_from_slice(statement);
+        self.ends.push(self.bytes.len());
+    }
+
+    fn clear(&mut self) {
+        self.bytes.clear();
+        self.ends.clear();
+    }
+
+    fn statements(&self) -> impl Iterator<Item = &[u8]> + Send {
+        let starts = std::iter::once(0).chain(self.ends.iter().copied());
+        starts
+            .zip(self.ends.iter().copied())
+            .map(|(start, end)| self.bytes.get(start..end).unwrap_or_default())
+    }
+}
 
 const ABANDONED_STREAM_WARNING: &std::ffi::CStr =
     c"previous unbuffered result was left incomplete; its remaining rows were discarded";
@@ -449,11 +487,91 @@ impl Connection {
     }
 
     /// Statement writer for this connection's SQL mode and character set.
+    /// Sends a pipelined `executemany` window and reads every reply; the
+    /// first server error is raised once all of them are read.
+    fn run_window(&self, py: Python<'_>, window: &Window) -> PyResult<u64> {
+        let totals = self.with_conn(py, |conn| conn.pipeline(window.statements()))?;
+        match totals.error {
+            Some((_, err)) => Err(self.failure_to_pyerr(Failure::Proto(err))),
+            None => Ok(totals.rowcount),
+        }
+    }
+
+    /// `executemany` of a statement that is not a batchable `INSERT`:
+    /// windows of up to `max_pipeline` statements (and at most
+    /// `Conn::pipeline_budget` bytes) are sent before their replies are
+    /// read, each window read whole before the next one is built, so a
+    /// server error stops the batch at the end of its window and the
+    /// parameters (a generator, say) may use the connection in between, as
+    /// with a loop of `execute()` calls. Signals are checked between
+    /// windows. The last statement's reply is read as `execute` (or
+    /// `execute_streamed`) reads one. `None` when `seq_of_args` is empty.
+    fn pipelined_many<'py>(
+        slf: &Bound<'py, Self>,
+        query: &Bound<'py, PyString>,
+        seq_of_args: &Bound<'py, PyAny>,
+        max_pipeline: usize,
+        streamed: bool,
+        as_dict: bool,
+        batch_bytes: usize,
+    ) -> PyResult<Option<PipelinedMany<'py>>> {
+        let py = slf.py();
+        let this = slf.get();
+        let template = query.to_str()?;
+        let encoder = this.encoder()?;
+        let budget = this.peek(Conn::pipeline_budget)?;
+        let max_pipeline = max_pipeline.max(1);
+        let mut window = Window::default();
+        let mut statement = Vec::new();
+        let mut rowcount = 0;
+        for item in seq_of_args.try_iter()? {
+            statement.clear();
+            let built = item.and_then(|args| {
+                encoder.interpolate(py, &mut statement, template, &Args::from_py(&args))
+            });
+            if let Err(err) = built {
+                // The statements before it run, as in a loop of execute()
+                // calls.
+                if window.len() > 0 {
+                    this.run_window(py, &window)?;
+                }
+                return Err(err);
+            }
+            if window.len() > 0
+                && (window.len() >= max_pipeline || window.bytes.len() + statement.len() > budget)
+            {
+                rowcount += this.run_window(py, &window)?;
+                window.clear();
+                py.check_signals()?;
+            }
+            window.push(&statement);
+        }
+        let Some(last) = window.statements().last() else {
+            return Ok(None);
+        };
+        let others = window.statements().take(window.len() - 1);
+        let mut before = 0;
+        let start = |conn: &mut Conn| {
+            let (totals, head, id) = conn.pipeline_streamed(others, last)?;
+            before = totals.rowcount;
+            Ok(Some((head, id)))
+        };
+        let result = if streamed {
+            let (head, started) = this.start_stream(py, start)?;
+            Self::stream_head(slf, head, started, as_dict, batch_bytes)?
+        } else {
+            this.buffered(py, as_dict, batch_bytes, start)?
+                .unwrap_or_else(|| py.None())
+        };
+        Ok(Some((result, rowcount + before, PyBytes::new(py, last))))
+    }
+
     fn encoder(&self) -> PyResult<Encoder> {
         let no_backslash_escapes =
             self.peek(|conn| conn.status_flags() & status::NO_BACKSLASH_ESCAPES != 0)?;
         Ok(Encoder {
             no_backslash_escapes,
+            binary_prefix: self.binary_prefix,
             codec: self.codec(),
             custom: self.custom(),
         })
@@ -657,6 +775,50 @@ impl Connection {
             self.flush_batch(py, &mut sql, &suffix, prefix.len(), &mut totals)?;
         }
         Ok(Some((totals.0, totals.1, last)))
+    }
+
+    /// `executemany` of a statement that is not a batchable `INSERT`, with
+    /// the statements pipelined; see `pipelined_many`.
+    #[pyo3(signature = (query, seq_of_args, max_pipeline, as_dict = false, batch_bytes = 4096))]
+    fn executemany_pipelined<'py>(
+        slf: &Bound<'py, Self>,
+        query: &Bound<'py, PyString>,
+        seq_of_args: &Bound<'py, PyAny>,
+        max_pipeline: usize,
+        as_dict: bool,
+        batch_bytes: usize,
+    ) -> PyResult<Option<PipelinedMany<'py>>> {
+        Self::pipelined_many(
+            slf,
+            query,
+            seq_of_args,
+            max_pipeline,
+            false,
+            as_dict,
+            batch_bytes,
+        )
+    }
+
+    /// Like `executemany_pipelined`, streaming the last statement's rows as
+    /// `execute_streamed` does.
+    #[pyo3(signature = (query, seq_of_args, max_pipeline, as_dict = false, batch_bytes = 4096))]
+    fn executemany_pipelined_streamed<'py>(
+        slf: &Bound<'py, Self>,
+        query: &Bound<'py, PyString>,
+        seq_of_args: &Bound<'py, PyAny>,
+        max_pipeline: usize,
+        as_dict: bool,
+        batch_bytes: usize,
+    ) -> PyResult<Option<PipelinedMany<'py>>> {
+        Self::pipelined_many(
+            slf,
+            query,
+            seq_of_args,
+            max_pipeline,
+            true,
+            as_dict,
+            batch_bytes,
+        )
     }
 
     /// Next result of a multi-result query, or `None` when there is none.
@@ -868,6 +1030,7 @@ impl Connection {
     ssl_cert = None,
     ssl_key = None,
     server_public_key = None,
+    binary_prefix = true,
 ))]
 #[expect(
     clippy::too_many_arguments,
@@ -891,6 +1054,7 @@ pub(crate) fn connect(
     ssl_cert: Option<PathBuf>,
     ssl_key: Option<PathBuf>,
     server_public_key: Option<PathBuf>,
+    binary_prefix: bool,
 ) -> PyResult<Connection> {
     let mode = SslMode::parse(ssl_mode).ok_or_else(|| {
         PyValueError::new_err(format!(
@@ -938,6 +1102,7 @@ pub(crate) fn connect(
         open_stream: AtomicU64::new(0),
         codec: Mutex::new(codec),
         custom: Mutex::new(None),
+        binary_prefix,
     })
 }
 
@@ -988,6 +1153,7 @@ fn timeout(seconds: Option<f64>, name: &str) -> PyResult<Option<Duration>> {
 fn utf8_encoder(no_backslash_escapes: bool) -> Encoder {
     Encoder {
         no_backslash_escapes,
+        binary_prefix: true,
         codec: Arc::clone(&UTF8),
         custom: None,
     }

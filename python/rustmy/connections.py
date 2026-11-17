@@ -11,11 +11,14 @@ from typing import TypeVar
 from typing import overload
 
 from rustmy import _core
+from rustmy import _option_files
 from rustmy import _tls
 from rustmy import err
 from rustmy.constants import CLIENT
+from rustmy.converters import encoders as default_encoders
 from rustmy.converters import escape_string
 from rustmy.converters import split_conv
+from rustmy.converters import to_literal
 from rustmy.cursors import Cursor
 
 
@@ -29,6 +32,7 @@ if TYPE_CHECKING:
 
     from rustmy._core import QueryResult
     from rustmy._core import StreamedResult
+    from rustmy.converters import Encoder
     from rustmy.converters import Params
 
 
@@ -39,6 +43,28 @@ _STATUS_NO_BACKSLASH_ESCAPES = 1 << 9
 PathArg: TypeAlias = "str | PathLike[str]"
 
 _CursorT = TypeVar("_CursorT", bound=Cursor)
+
+
+def _with_option_file(
+    path: PathArg | None, group: str | None, given: dict[str, Any]
+) -> dict[str, Any]:
+    """``given`` (the ``connect()`` arguments) with the ones left as ``None``
+    taken from the option file; flags in the file add to the arguments.
+    """
+    try:
+        from_file = _option_files.connect_args(_option_files.read(path, group))
+    except ValueError as exc:
+        raise err.ProgrammingError(0, str(exc)) from None
+    merged = dict(given)
+    for name, value in from_file.items():
+        if name == "multi_statements":
+            merged[name] = bool(given[name]) or bool(value)
+        elif name == "found_rows":
+            if value:
+                merged["client_flag"] = given["client_flag"] | CLIENT.FOUND_ROWS
+        elif name in given and given[name] is None:
+            merged[name] = value
+    return merged
 
 
 class Connection:
@@ -65,16 +91,16 @@ class Connection:
     # unix_socket); existing code relies on it.
     def __init__(  # noqa: PLR0917
         self,
-        host: str = "localhost",
-        user: str = "",
-        password: str = "",
+        host: str | None = None,
+        user: str | None = None,
+        password: str | None = None,
         database: str | None = None,
-        port: int = 3306,
+        port: int | None = None,
         unix_socket: PathArg | None = None,
         *,
         passwd: str | None = None,
         db: str | None = None,
-        charset: str = "utf8mb4",
+        charset: str | None = None,
         collation: str | None = None,
         connect_timeout: float | None = None,
         read_timeout: float | None = None,
@@ -92,12 +118,27 @@ class Connection:
         ssl_key: PathArg | None = None,
         ssl: Mapping[str, object] | bool | None = None,
         server_public_key: PathArg | None = None,
+        binary_prefix: bool = True,
+        read_default_file: PathArg | None = None,
+        read_default_group: str | None = None,
     ) -> None:
         """Open a connection.
 
-        ``passwd`` and ``db`` are accepted as aliases of ``password`` and
-        ``database`` for compatibility with other MySQL drivers.
-        ``autocommit=None`` keeps the server's default.
+        ``host`` defaults to ``localhost``, ``port`` to 3306 and ``user`` and
+        ``password`` to empty. ``passwd`` and ``db`` are accepted as aliases
+        of ``password`` and ``database`` for compatibility with other MySQL
+        drivers. ``autocommit=None`` keeps the server's default.
+
+        ``read_default_file`` reads connection options from a MySQL option
+        file (``my.cnf``): its ``[client]`` group and, if given,
+        ``read_default_group``. With only ``read_default_group``, the
+        default option files are read (``/etc/my.cnf``, ``~/.my.cnf``…).
+        Arguments passed here win over the file. Used: ``host``, ``port``,
+        ``user``, ``password``, ``database``, ``socket``,
+        ``default-character-set``, ``init-command``, ``connect-timeout``,
+        ``ssl-mode``, ``ssl-ca``, ``ssl-cert``, ``ssl-key``,
+        ``server-public-key-path``, ``multi-statements`` and
+        ``return-found-rows``; other options are ignored.
 
         ``charset`` is the session's character set (default ``utf8mb4``;
         ``utf8`` means ``utf8mb4``): queries are encoded and text results
@@ -123,6 +164,14 @@ class Connection:
         An encoder is called as ``encoder(value, conv)`` and returns the SQL
         literal.
 
+        ``bytes`` parameters go as ``_binary'…'``, so the server reads them
+        as binary data whatever the session's character set;
+        ``binary_prefix=False`` writes a plain ``'…'`` instead, for SQL that
+        writes ``_binary %s`` itself (Django's MySQL backend; the
+        ``install_as_MySQLdb()`` alias defaults to it, as mysqlclient does).
+        Multi-byte legacy character sets (gbk, big5, sjis…) always get a
+        hexadecimal ``X'…'``, which is binary on its own.
+
         TLS: ``ssl_mode`` is one of ``disabled``, ``preferred`` (default),
         ``required`` (encrypted, server not verified), ``verify_ca`` and
         ``verify_identity``. Passing ``ssl_ca`` alone means
@@ -138,6 +187,51 @@ class Connection:
         PyMySQL does. ``server_public_key`` (a PEM file) pins the key
         instead, so a man in the middle cannot substitute its own.
         """
+        if passwd is not None:
+            password = passwd
+        if db is not None:
+            database = db
+        if read_default_file is not None or read_default_group is not None:
+            args = _with_option_file(
+                read_default_file,
+                read_default_group,
+                {
+                    "host": host,
+                    "user": user,
+                    "password": password,
+                    "database": database,
+                    "port": port,
+                    "unix_socket": unix_socket,
+                    "charset": charset,
+                    "connect_timeout": connect_timeout,
+                    "init_command": init_command,
+                    "server_public_key": server_public_key,
+                    "multi_statements": multi_statements,
+                    "client_flag": client_flag,
+                    # An ``ssl`` dict says all there is to say about TLS.
+                    **(
+                        {}
+                        if ssl is not None
+                        else {
+                            "ssl_mode": ssl_mode,
+                            "ssl_ca": ssl_ca,
+                            "ssl_cert": ssl_cert,
+                            "ssl_key": ssl_key,
+                        }
+                    ),
+                },
+            )
+            host, user, password = args["host"], args["user"], args["password"]
+            database, port = args["database"], args["port"]
+            unix_socket, charset = args["unix_socket"], args["charset"]
+            connect_timeout = args["connect_timeout"]
+            init_command = args["init_command"]
+            server_public_key = args["server_public_key"]
+            multi_statements = args["multi_statements"]
+            client_flag = args["client_flag"]
+            if ssl is None:
+                ssl_mode, ssl_ca = args["ssl_mode"], args["ssl_ca"]
+                ssl_cert, ssl_key = args["ssl_cert"], args["ssl_key"]
         tls = _tls.resolve(
             ssl_mode=ssl_mode,
             ssl_ca=ssl_ca,
@@ -148,18 +242,18 @@ class Connection:
         # Set by close(), unlike `_conn.closed`, which a broken connection sets too.
         self._closed = False
         self._conn = _core.connect(
-            host=host,
-            port=port,
-            user=user,
-            password=password if passwd is None else passwd,
-            database=database if db is None else db,
+            host="localhost" if host is None else host,
+            port=3306 if port is None else port,
+            user="" if user is None else user,
+            password="" if password is None else password,
+            database=database,
             unix_socket=unix_socket,
             connect_timeout=connect_timeout,
             read_timeout=read_timeout,
             write_timeout=write_timeout,
             client_flag=client_flag
             | (CLIENT.MULTI_STATEMENTS if multi_statements else 0),
-            charset=charset,
+            charset="utf8mb4" if charset is None else charset,
             ssl_mode=tls.mode,
             ssl_ca=tls.ca,
             ssl_cert=tls.cert,
@@ -167,11 +261,18 @@ class Connection:
             server_public_key=(
                 None if server_public_key is None else os.fspath(server_public_key)
             ),
+            binary_prefix=binary_prefix,
         )
         self.cursorclass = cursorclass
+        #: Python types to SQL literal encoders (MySQLdb's attribute), from
+        #: ``conv``; :meth:`escape` takes it as its mapping.
+        self.encoders: dict[type, Encoder] = dict(default_encoders)
         if conv is not None:
-            decoders, encoders = split_conv(conv)
-            self._conn.set_converters(decoders, encoders, conv)
+            decoders, custom_encoders = split_conv(conv)
+            self._conn.set_converters(decoders, custom_encoders, conv)
+            self.encoders.update(
+                (key, value) for key, value in conv.items() if isinstance(key, type)
+            )
         # The handshake asks for the character set (with the server's
         # default collation for it). SET NAMES follows for an explicit
         # collation, after set_character_set(), and for any character set
@@ -232,6 +333,32 @@ class Connection:
         self, query: str, seq_of_args: Iterable[Params], max_stmt_length: int
     ) -> tuple[int, int | None, bytes | None] | None:
         return self._conn.executemany(query, seq_of_args, max_stmt_length)
+
+    def _executemany_pipelined(
+        self,
+        query: str,
+        seq_of_args: Iterable[Params],
+        max_pipeline: int,
+        *,
+        as_dict: bool,
+        batch_bytes: int,
+    ) -> tuple[QueryResult, int, bytes] | None:
+        return self._conn.executemany_pipelined(
+            query, seq_of_args, max_pipeline, as_dict, batch_bytes
+        )
+
+    def _executemany_pipelined_streamed(
+        self,
+        query: str,
+        seq_of_args: Iterable[Params],
+        max_pipeline: int,
+        *,
+        as_dict: bool,
+        batch_bytes: int,
+    ) -> tuple[StreamedResult, int, bytes] | None:
+        return self._conn.executemany_pipelined_streamed(
+            query, seq_of_args, max_pipeline, as_dict, batch_bytes
+        )
 
     def _next_result(
         self, *, as_dict: bool = False, batch_bytes: int = 4096
@@ -294,6 +421,23 @@ class Connection:
     def literal(self, value: object) -> str:
         """``value`` as an SQL literal for this connection."""
         return self._conn.literal(value)
+
+    def escape(self, value: object, mapping: Mapping[Any, Any] | None = None) -> str:
+        """``value`` as an SQL literal (MySQLdb's ``escape``, which Django's
+        migrations call with :attr:`encoders`).
+
+        ``mapping`` is a ``conv``-style ``{type: encoder}`` dict: its encoder
+        for the value's type is used when it is not the default one;
+        otherwise the result is :meth:`literal`'s.
+        """
+        if mapping is not None and mapping is not self.encoders:
+            encoder = mapping.get(type(value))
+            if encoder is not None and encoder is not to_literal:
+                quoted = encoder(value, mapping)
+                if isinstance(quoted, bytes):
+                    return quoted.decode(self.encoding)
+                return str(quoted)
+        return self.literal(value)
 
     def ping(self) -> None:
         """Check that the server is reachable; raises if it is not."""

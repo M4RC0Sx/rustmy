@@ -1,0 +1,44 @@
+{
+  "date": "2026-11-17T17:17:01+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 3,
+  "title": "+1 ms per reply (3.0 ms round trip)",
+  "latency_ms": 1,
+  "round_trip_ms": 2.983,
+  "scenarios": [
+    {
+      "name": "UPDATE by primary key (1,000 rows)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 3.2184588749951217,
+        "mysqlclient": 3.194975499995053,
+        "pymysql": 3.2636851249990286
+      }
+    },
+    {
+      "name": "UPDATE matching no row (1,000 rows)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 3.0450952910032356,
+        "mysqlclient": 3.006465250000474,
+        "pymysql": 3.0313166249979986
+      }
+    },
+    {
+      "name": "DELETE by primary key (1,000 rows)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 3.227185625000857,
+        "mysqlclient": 3.1249209590023383,
+        "pymysql": 3.1792186249949737
+      }
+    }
+  ]
+}

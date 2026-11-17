@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import rustmy
+import rustmy.err
 
 
 if TYPE_CHECKING:
@@ -52,6 +53,19 @@ def test_duplicate_key_is_integrity_error(cursor: rustmy.Cursor) -> None:
     with pytest.raises(rustmy.IntegrityError) as info:
         cursor.execute("INSERT INTO t VALUES (1)")
     assert info.value.args[0] == 1062
+
+
+def test_out_of_range_is_data_and_operational_error(cursor: rustmy.Cursor) -> None:
+    cursor.execute("CREATE TEMPORARY TABLE t (n INT UNSIGNED NOT NULL)")
+    cursor.execute("INSERT INTO t VALUES (0)")
+    with pytest.raises(rustmy.err.OutOfRangeError) as info:
+        cursor.execute("UPDATE t SET n = n - 1")
+    assert info.value.args[0] == 1690
+    # DataError by its SQLSTATE (22003); OperationalError as mysqlclient
+    # raises it, which Django's MySQL backend turns into IntegrityError.
+    assert isinstance(info.value, rustmy.DataError)
+    assert isinstance(info.value, rustmy.OperationalError)
+    assert type(info.value).__module__ == "rustmy"
 
 
 def test_wrong_password_is_operational_error(server: Server) -> None:

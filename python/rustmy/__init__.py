@@ -38,6 +38,16 @@ paramstyle = "format"
 #: Open a connection; see :class:`Connection` for the arguments.
 connect = Connection
 
+
+def install_as_MySQLdb() -> None:  # noqa: N802  # the name other drivers use
+    """Make ``import MySQLdb`` load rustmy (for Django and other code written
+    against mysqlclient); see :mod:`rustmy._mysqldb`.
+    """
+    from rustmy._mysqldb import install_as_MySQLdb as install  # noqa: PLC0415
+
+    install()
+
+
 __all__ = [
     "BINARY",
     "DATETIME",
@@ -67,6 +77,7 @@ __all__ = [
     "__version__",
     "apilevel",
     "connect",
+    "install_as_MySQLdb",
     "paramstyle",
     "threadsafety",
 ]

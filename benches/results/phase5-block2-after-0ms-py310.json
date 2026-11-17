@@ -1,0 +1,133 @@
+{
+  "date": "2026-11-17T17:50:48+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 5,
+  "title": "+0 ms per reply (0.3 ms round trip)",
+  "latency_ms": 0,
+  "round_trip_ms": 0.27,
+  "scenarios": [
+    {
+      "name": "UPDATE by primary key (1,000 rows)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.08082783299323637,
+        "mysqlclient": 0.15325204200053122,
+        "pymysql": 0.1676647080021212
+      }
+    },
+    {
+      "name": "UPDATE matching no row (1,000 rows)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.010858292007469572,
+        "mysqlclient": 0.09836279100272804,
+        "pymysql": 0.10579691700695548
+      }
+    },
+    {
+      "name": "DELETE by primary key (1,000 rows)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.07565441699989606,
+        "mysqlclient": 0.1419610000011744,
+        "pymysql": 0.15661804200499319
+      }
+    },
+    {
+      "name": "UPDATE by primary key (10,000 rows)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.8198082909948425,
+        "mysqlclient": 1.5925420419953298,
+        "pymysql": 1.705126917004236
+      }
+    },
+    {
+      "name": "UPDATE matching no row (10,000 rows)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.11211508300038986,
+        "mysqlclient": 0.9652229579951381,
+        "pymysql": 1.0661736250040121
+      }
+    },
+    {
+      "name": "DELETE by primary key (10,000 rows)",
+      "informative": false,
+      "seconds": {
+        "rustmy": 0.7627008340059547,
+        "mysqlclient": 1.4810713329934515,
+        "pymysql": 1.615761624998413
+      }
+    }
+  ],
+  "windows": [
+    {
+      "name": "UPDATE by primary key (1,000 rows)",
+      "seconds": {
+        "rustmy w1": 0.14217154200014193,
+        "rustmy w16": 0.0826324170047883,
+        "rustmy w64": 0.08183720799570438,
+        "rustmy w256": 0.08455754200986121,
+        "rustmy w1024": 0.07917979199555703
+      }
+    },
+    {
+      "name": "UPDATE matching no row (1,000 rows)",
+      "seconds": {
+        "rustmy w1": 0.08877624999149702,
+        "rustmy w16": 0.013796459010336548,
+        "rustmy w64": 0.011062999998102896,
+        "rustmy w256": 0.008097750003798865,
+        "rustmy w1024": 0.010160042002098635
+      }
+    },
+    {
+      "name": "DELETE by primary key (1,000 rows)",
+      "seconds": {
+        "rustmy w1": 0.13763712500804104,
+        "rustmy w16": 0.07231079200573731,
+        "rustmy w64": 0.06696679200103972,
+        "rustmy w256": 0.07119620799494442,
+        "rustmy w1024": 0.07346320900251158
+      }
+    },
+    {
+      "name": "UPDATE by primary key (10,000 rows)",
+      "seconds": {
+        "rustmy w1": 1.5514128340000752,
+        "rustmy w16": 0.9033536670031026,
+        "rustmy w64": 0.8570126249978784,
+        "rustmy w256": 0.836132209005882,
+        "rustmy w1024": 0.8511484589980682
+      }
+    },
+    {
+      "name": "UPDATE matching no row (10,000 rows)",
+      "seconds": {
+        "rustmy w1": 0.8815525420068298,
+        "rustmy w16": 0.1741113750031218,
+        "rustmy w64": 0.12809445799211971,
+        "rustmy w256": 0.10771691700210795,
+        "rustmy w1024": 0.12230258299678098
+      }
+    },
+    {
+      "name": "DELETE by primary key (10,000 rows)",
+      "seconds": {
+        "rustmy w1": 1.4468486249970738,
+        "rustmy w16": 0.7997923329967307,
+        "rustmy w64": 0.7803730000014184,
+        "rustmy w256": 0.7507115000043996,
+        "rustmy w1024": 0.760848874997464
+      }
+    }
+  ]
+}

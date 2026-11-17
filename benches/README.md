@@ -797,3 +797,80 @@ per row or runs one small query at a time, the drivers converge. Two caveats:
   in chunks with `fetchmany()`, where rustmy and mysqlclient are on par
   (block 2: mysqlclient runs that loop in C). The memory stays flat for all
   three drivers.
+
+## Phase 5, block 2: pipelined `executemany` for `UPDATE`/`DELETE` (2026-11-17, Python 3.10)
+
+`executemany` of anything but `INSERT … VALUES` ran one statement per item in
+every driver, each waiting for its reply: one network round trip per row.
+rustmy now sends up to `Cursor.max_pipeline` statements (256, at most 16 KiB)
+before reading their replies. `pipeline.py` measures it through
+[toxiproxy](https://github.com/Shopify/toxiproxy) (the compose service of
+the `bench` profile), which can delay every reply from the server: the
+first panel adds nothing (the proxy's own hop, about 0.3 ms per round
+trip), the second adds 1 ms per reply, about 3 ms per round trip through
+Docker Desktop. Before this block all three drivers were on par in every
+scenario (0.97–1.04x against mysqlclient, `phase5-block2-before-*.json`).
+
+```sh
+docker compose --profile bench up -d --wait mysql toxiproxy
+uv run --no-sync python benches/pipeline.py --latency 0 --rows 1000 10000 \
+    --repeat 5 --sweep --json benches/results/phase5-block2-after-0ms-py310.json
+uv run --no-sync python benches/pipeline.py --latency 1 --rows 1000 10000 \
+    --repeat 3 --sweep --json benches/results/phase5-block2-after-1ms-py310.json
+uv run --no-sync python benches/report.py --section phase5-block2 \
+    benches/results/phase5-block2-after-0ms-py310.json \
+    benches/results/phase5-block2-after-1ms-py310.json
+```
+
+<!-- results:phase5-block2:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase5-block2-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase5-block2-light.svg">
+</picture>
+
+**CPython 3.10.19** · +0 ms per reply (0.3 ms round trip) · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-17T17:50:48+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| UPDATE by primary key (1,000 rows) | **80.8 ms** | 153.3 ms | 167.7 ms | 1.90x | 2.07x |
+| UPDATE matching no row (1,000 rows) | **10.9 ms** | 98.4 ms | 105.8 ms | 9.06x | 9.74x |
+| DELETE by primary key (1,000 rows) | **75.7 ms** | 142.0 ms | 156.6 ms | 1.88x | 2.07x |
+| UPDATE by primary key (10,000 rows) | **819.8 ms** | 1592.5 ms | 1705.1 ms | 1.94x | 2.08x |
+| UPDATE matching no row (10,000 rows) | **112.1 ms** | 965.2 ms | 1066.2 ms | 8.61x | 9.51x |
+| DELETE by primary key (10,000 rows) | **762.7 ms** | 1481.1 ms | 1615.8 ms | 1.94x | 2.12x |
+
+**CPython 3.10.19** · +1 ms per reply (3.0 ms round trip) · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 3 · 2026-11-17T17:45:03+00:00
+
+| Scenario | rustmy | mysqlclient | PyMySQL | rustmy vs mysqlclient | rustmy vs PyMySQL |
+|---|--:|--:|--:|--:|--:|
+| UPDATE by primary key (1,000 rows) | **91.0 ms** | 3156.3 ms | 3119.3 ms | 34.67x | 34.27x |
+| UPDATE matching no row (1,000 rows) | **22.5 ms** | 2969.5 ms | 2960.6 ms | 131.94x | 131.54x |
+| DELETE by primary key (1,000 rows) | **89.6 ms** | 3146.2 ms | 3075.0 ms | 35.11x | 34.31x |
+| UPDATE by primary key (10,000 rows) | **949.4 ms** | 31809.0 ms | 31733.9 ms | 33.50x | 33.42x |
+| UPDATE matching no row (10,000 rows) | **243.9 ms** | 31137.5 ms | 30931.4 ms | 127.65x | 126.81x |
+| DELETE by primary key (10,000 rows) | **823.5 ms** | 32516.7 ms | 33038.5 ms | 39.49x | 40.12x |
+
+Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
+
+`max_pipeline` sweep, +0 ms per reply (0.3 ms round trip):
+
+| Scenario | 1 | 16 | 64 | 256 | 1024 |
+|---|--:|--:|--:|--:|--:|
+| UPDATE by primary key (1,000 rows) | 142.2 ms | 82.6 ms | 81.8 ms | 84.6 ms | **79.2 ms** |
+| UPDATE matching no row (1,000 rows) | 88.8 ms | 13.8 ms | 11.1 ms | **8.1 ms** | 10.2 ms |
+| DELETE by primary key (1,000 rows) | 137.6 ms | 72.3 ms | **67.0 ms** | 71.2 ms | 73.5 ms |
+| UPDATE by primary key (10,000 rows) | 1551.4 ms | 903.4 ms | 857.0 ms | **836.1 ms** | 851.1 ms |
+| UPDATE matching no row (10,000 rows) | 881.6 ms | 174.1 ms | 128.1 ms | **107.7 ms** | 122.3 ms |
+| DELETE by primary key (10,000 rows) | 1446.8 ms | 799.8 ms | 780.4 ms | **750.7 ms** | 760.8 ms |
+
+`max_pipeline` sweep, +1 ms per reply (3.0 ms round trip):
+
+| Scenario | 1 | 16 | 64 | 256 | 1024 |
+|---|--:|--:|--:|--:|--:|
+| UPDATE by primary key (1,000 rows) | 3206.5 ms | 307.8 ms | 136.9 ms | 87.4 ms | **85.4 ms** |
+| UPDATE matching no row (1,000 rows) | 2964.8 ms | 247.5 ms | 93.7 ms | 31.1 ms | **22.2 ms** |
+| DELETE by primary key (1,000 rows) | 3119.8 ms | 388.0 ms | 124.3 ms | 87.1 ms | **78.2 ms** |
+| UPDATE by primary key (10,000 rows) | 35032.8 ms | 3947.8 ms | 1264.6 ms | 895.6 ms | **890.8 ms** |
+| UPDATE matching no row (10,000 rows) | 30429.2 ms | 2498.4 ms | 792.3 ms | 252.4 ms | **185.9 ms** |
+| DELETE by primary key (10,000 rows) | 33444.8 ms | 3930.1 ms | 1174.7 ms | 815.5 ms | **788.3 ms** |
+<!-- results:phase5-block2:end -->
