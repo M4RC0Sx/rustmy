@@ -105,7 +105,7 @@ pub fn text_values(data: &[u8]) {
 /// The whole client against a server that answers with `data`: handshake,
 /// authentication (every plugin, RSA, auth switches), queries, streamed
 /// result sets (batches, skips, rows left for the next command to discard),
-/// multiple results and the other commands.
+/// multiple results, pipelined batches and the other commands.
 pub fn session(data: &[u8]) {
     let opts = Opts {
         user: b"fuzz".to_vec(),
@@ -134,6 +134,13 @@ pub fn session(data: &[u8]) {
     // Discards whatever the stream left, then streams the next result.
     if let Ok(Some((mut head, Some(id)))) = conn.next_result_streamed() {
         let _ = conn.read_rows(id, &mut head.rows, usize::MAX);
+    }
+    // Pipelined batches: every reply read, then one left streaming.
+    let _ = conn.pipeline([&b"DO 1"[..], b"DO 2", b"DO 3"]);
+    if let Ok((_, mut head, Some(id))) =
+        conn.pipeline_streamed([&b"DO 4"[..], b"DO 5"], b"SELECT 6")
+    {
+        let _ = conn.read_rows(id, &mut head.rows, 1);
     }
     let _ = conn.ping();
     let _ = conn.select_db(b"db");

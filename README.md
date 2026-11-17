@@ -35,7 +35,9 @@ with rustmy.connect(
 - **Fast where it counts.** Reading rows is up to **5.3x faster than
   mysqlclient** and **13x faster than PyMySQL**; bulk inserts are 1.6x faster
   than both. Rows are read in small batches with the GIL released and
-  converted in Rust while the server sends the next batch.
+  converted in Rust while the server sends the next batch. `executemany` of
+  `UPDATE`/`DELETE` pipelines its statements: one network round trip per
+  256 of them instead of one each.
 - **Nothing to install but the wheel.** No libmysqlclient, no compiler, no
   `pkg-config`: TLS is [rustls](https://github.com/rustls/rustls), and the
   supported authentication methods are implemented in Rust.
@@ -159,7 +161,7 @@ Python types map to MySQL ones both ways: `int`, `float`, `Decimal`, `str`,
 `bytes`, `bool`, `None`, `date`, `datetime`, `time`, `timedelta`, `uuid.UUID`
 (as text) and JSON (as `str`).
 
-### Inserting many rows
+### Many rows at once
 
 `executemany` turns an `INSERT … VALUES` into multi-row statements, so 10,000
 rows take a few round trips instead of 10,000:
@@ -171,6 +173,29 @@ with conn.cursor() as cursor:
     print(cursor.rowcount, cursor.lastrowid)
 conn.commit()
 ```
+
+Any other statement (`UPDATE`, `DELETE`…) still runs once per item, but
+pipelined: rustmy sends up to `cursor.max_pipeline` statements (256 by
+default, 16 KiB at most) before reading their replies, so a batch pays one
+network round trip per window instead of one per statement. With a 3 ms
+round trip, 1,000 `UPDATE`s take under 0.1 s instead of 3.4 s:
+
+```python
+with conn.cursor() as cursor:
+    cursor.executemany(
+        "UPDATE products SET price = %(price)s WHERE name = %(name)s",
+        [{"name": "tea", "price": 3.9}, {"name": "cocoa", "price": 5.5}],
+    )
+    print(cursor.rowcount)  # rows affected by all of them
+conn.commit()
+```
+
+The server runs every statement it receives, so when one fails, the rest of
+its window has already run by the time the error is raised (no further
+window is sent). Inside a transaction (the default: autocommit is off),
+`conn.rollback()` undoes them all. With autocommit on, set
+`cursor.max_pipeline = 1` to stop right at the failing statement, as a loop
+of `execute()` calls would.
 
 ### Rows as dictionaries
 
@@ -373,6 +398,11 @@ pinned by a test:
   plain `'…'` of mysqlclient and PyMySQL.
 - `multi_statements` is off unless you ask for it, which keeps an injection
   from adding statements of its own.
+- `executemany` of anything but `INSERT … VALUES` sends its statements in
+  windows of up to 256 before reading the replies, so after an error the rest
+  of the failing statement's window has already run (see
+  [Many rows at once](#many-rows-at-once); `cursor.max_pipeline = 1` sends
+  them one by one, as both drivers do).
 
 ## Limitations
 
@@ -381,8 +411,9 @@ pinned by a test:
 - **Synchronous only.** No asyncio API yet.
 - **Text protocol.** Server-side prepared statements, compression and
   `LOAD DATA LOCAL INFILE` are not supported yet.
-- **Latency-bound workloads** (many tiny queries) gain little: the network
-  dominates them with any driver.
+- **Latency-bound workloads** (many tiny queries, one after another) gain
+  little: the network dominates them with any driver. `executemany` is the
+  exception: it pipelines its statements.
 - **CPython 3.10 installed by uv on Alpine/musl** cannot load the `cp310`
   musllinux wheel (nor any other project's): CPython 3.10 names musl extensions
   `*-linux-gnu.so`, which uv's build of it does not accept. Alpine's own Python

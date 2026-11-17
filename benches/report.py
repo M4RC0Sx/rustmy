@@ -87,6 +87,10 @@ def speedups(run: dict[str, Any]) -> list[tuple[str, dict[str, float]]]:
 def plot(runs: list[dict[str, Any]], theme: Theme, path: Path) -> None:
     panels = [speedups(run) for run in runs]
     longest = max(value for rows in panels for _, v in rows for value in v.values())
+    # Panels of different network conditions (pipeline.py) differ by orders
+    # of magnitude: each gets its own scale. Otherwise one scale compares
+    # them.
+    own_scale = all("title" in run for run in runs)
     bar = 0.26
     height = 1.0 + 0.55 * len(panels[0])
     fig, axes = plt.subplots(
@@ -99,6 +103,8 @@ def plot(runs: list[dict[str, Any]], theme: Theme, path: Path) -> None:
     fig.patch.set_facecolor(theme.surface)
 
     for ax, run, rows in zip(axes[0], runs, panels, strict=True):
+        if own_scale:
+            longest = max(value for _, v in rows for value in v.values())
         ax.set_facecolor(theme.surface)
         for i, (_, values) in enumerate(rows):
             for j, driver in enumerate(DRIVERS):
@@ -115,7 +121,7 @@ def plot(runs: list[dict[str, Any]], theme: Theme, path: Path) -> None:
                 )
                 if driver != "mysqlclient":
                     bar_label(ax, theme, value, y, longest)
-        style_axis(ax, theme, run["python"], longest)
+        style_axis(ax, theme, run.get("title", run["python"]), longest)
 
     # Wrap the parenthesised detail onto its own line to keep labels narrow.
     names = [name.replace(" (", "\n(") for name, _ in panels[0]]
@@ -277,8 +283,11 @@ def table(run: dict[str, Any]) -> str:
     drivers = run["drivers"]
     # orm.py runs through SQLAlchemy and records its version.
     sqlalchemy = f"SQLAlchemy {run['sqlalchemy']} · " if "sqlalchemy" in run else ""
+    # pipeline.py names each run's network conditions.
+    title = f"{run['title']} · " if "title" in run else ""
     setup = (
-        f"**{run['python']}** · {sqlalchemy}{run['server']} · {run['machine']} · "
+        f"**{run['python']}** · {title}{sqlalchemy}{run['server']} · "
+        f"{run['machine']} · "
         f"rustmy {drivers['rustmy']}, mysqlclient {drivers['mysqlclient']}, "
         f"PyMySQL {drivers['pymysql']} · best of {run['repeat']} · {run['date']}"
     )
@@ -319,6 +328,32 @@ def sweep_table(run: dict[str, Any]) -> str:
     return f"{setup}\n\n{header}" + "\n".join(lines) + "\n"
 
 
+def windows_table(run: dict[str, Any]) -> str:
+    """rustmy at each ``max_pipeline`` (``pipeline.py --sweep``)."""
+    scenarios = run["windows"]
+    configs = list(scenarios[0]["seconds"])
+    header = (
+        f"\n`max_pipeline` sweep, {run.get('title', run['python'])}:\n\n"
+        "| Scenario | "
+        + " | ".join(c.removeprefix("rustmy w") for c in configs)
+        + " |\n|---|"
+        + "--:|" * len(configs)
+        + "\n"
+    )
+    lines = []
+    for scenario in scenarios:
+        seconds = scenario["seconds"]
+        fastest = min(seconds.values())
+        cells = [
+            f"**{seconds[c] * 1000:.1f} ms**"
+            if seconds[c] == fastest
+            else f"{seconds[c] * 1000:.1f} ms"
+            for c in configs
+        ]
+        lines.append(f"| {scenario['name']} | {' | '.join(cells)} |")
+    return header + "\n".join(lines) + "\n"
+
+
 def memory_table(run: dict[str, Any]) -> str:
     """Peak memory growth while reading a result set (``cursors.py --memory``)."""
     header = (
@@ -354,6 +389,7 @@ def readme_block(runs: list[dict[str, Any]], output: Path) -> str:
         "is faster.\n"
     )
     note += "".join(memory_table(run) for run in runs if "memory" in run)
+    note += "".join(windows_table(run) for run in runs if "windows" in run)
     if any(s["informative"] for run in runs for s in run["scenarios"]):
         note += (
             "¹ Not comparable yet: rustmy runs one INSERT per row, mysqlclient "

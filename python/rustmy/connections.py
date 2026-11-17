@@ -334,6 +334,32 @@ class Connection:
     ) -> tuple[int, int | None, bytes | None] | None:
         return self._conn.executemany(query, seq_of_args, max_stmt_length)
 
+    def _executemany_pipelined(
+        self,
+        query: str,
+        seq_of_args: Iterable[Params],
+        max_pipeline: int,
+        *,
+        as_dict: bool,
+        batch_bytes: int,
+    ) -> tuple[QueryResult, int, bytes] | None:
+        return self._conn.executemany_pipelined(
+            query, seq_of_args, max_pipeline, as_dict, batch_bytes
+        )
+
+    def _executemany_pipelined_streamed(
+        self,
+        query: str,
+        seq_of_args: Iterable[Params],
+        max_pipeline: int,
+        *,
+        as_dict: bool,
+        batch_bytes: int,
+    ) -> tuple[StreamedResult, int, bytes] | None:
+        return self._conn.executemany_pipelined_streamed(
+            query, seq_of_args, max_pipeline, as_dict, batch_bytes
+        )
+
     def _next_result(
         self, *, as_dict: bool = False, batch_bytes: int = 4096
     ) -> QueryResult | None:
