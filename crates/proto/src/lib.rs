@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod auth;
+pub mod binary;
 mod buf;
 pub mod charset;
 mod column;
@@ -24,11 +25,14 @@ pub mod sql;
 pub mod text;
 mod tls;
 
+pub use binary::Execute;
 pub use column::Column;
 pub use conn::Conn;
+pub use conn::DEFAULT_STATEMENT_CACHE;
 pub use conn::Opts;
 pub use conn::PipelineTotals;
 pub use conn::ReadOutcome;
+pub use conn::Statement;
 pub use conn::StreamId;
 pub use error::Error;
 pub use error::Result;

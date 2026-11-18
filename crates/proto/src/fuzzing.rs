@@ -13,6 +13,7 @@ use crate::Conn;
 use crate::Opts;
 use crate::column::Column;
 use crate::conn::Stream;
+use crate::constants::ColumnType;
 use crate::constants::capability;
 use crate::handshake::ServerHandshake;
 use crate::packet::PacketStream;
@@ -57,13 +58,37 @@ pub fn packets(data: &[u8]) {
     while stream.read_into(&mut out).is_ok() {}
 }
 
-/// Column definitions, rows and terminators. The first byte picks the
-/// column count, the rest is split into payloads on 0xFF 0xFF separators.
+/// Column definitions, rows and terminators, text and binary. The first
+/// byte picks the column count (and, for binary rows, as many next bytes
+/// their types); the rest is split into payloads on 0xFF separators.
 pub fn result_set(data: &[u8]) {
     let Some((&columns, rest)) = data.split_first() else {
         return;
     };
-    let mut rows = RowSet::new_for_fuzzing(usize::from(columns % 16));
+    let columns = usize::from(columns % 16);
+    if let Some(types) = rest.get(..columns) {
+        let types: Vec<ColumnType> = types.iter().map(|&t| ColumnType(t)).collect();
+        let mut binary = RowSet::new_binary_for_fuzzing(&types);
+        for payload in rest
+            .get(columns..)
+            .unwrap_or_default()
+            .split(|&b| b == 0xFF)
+        {
+            let start = binary.data_mut().len();
+            binary.data_mut().extend_from_slice(payload);
+            let end = binary.data_mut().len();
+            let _ = accept_row_packet(&mut binary, start..end, true);
+        }
+        for row in binary.rows() {
+            for (cell, &column_type) in row.cells().zip(&types) {
+                if let Some(bytes) = cell {
+                    let _ = crate::binary::to_text(column_type, false, 31, bytes);
+                    let _ = crate::binary::to_text(column_type, true, 3, bytes);
+                }
+            }
+        }
+    }
+    let mut rows = RowSet::new_for_fuzzing(columns);
     for payload in rest.split(|&b| b == 0xFF).filter(|p| !p.is_empty()) {
         let _ = Column::parse(payload);
         let _ = parse_ok(payload);
@@ -92,8 +117,17 @@ pub fn sql(data: &[u8]) {
     crate::sql::escape_into(&mut out, data, true);
 }
 
-/// Text-protocol value parsers.
+/// Text-protocol value parsers, and the binary protocol's value decoders
+/// (the first byte picks a number of decimals).
 pub fn text_values(data: &[u8]) {
+    if let Some((&decimals, value)) = data.split_first() {
+        let _ = crate::binary::signed(value);
+        let _ = crate::binary::unsigned(value);
+        let _ = crate::binary::float(value, decimals);
+        let _ = crate::binary::date(value);
+        let _ = crate::binary::datetime(value);
+        let _ = crate::binary::time(value);
+    }
     let _ = text::parse_i64(data);
     let _ = text::parse_u64(data);
     let _ = text::parse_f64(data);
@@ -135,6 +169,20 @@ pub fn session(data: &[u8]) {
     if let Ok(Some((mut head, Some(id)))) = conn.next_result_streamed() {
         let _ = conn.read_rows(id, &mut head.rows, usize::MAX);
     }
+    // Prepared statements: prepare, execute (cached, pipelined), binary rows.
+    if let Ok(statement) = conn.prepare(b"SELECT ?") {
+        let mut params = crate::Execute::default();
+        params.int(1);
+        params.text(b"x");
+        if let Ok((mut head, Some(id))) = conn.execute_streamed(&params.finish(statement.id)) {
+            let _ = conn.read_rows(id, &mut head.rows, 64);
+        }
+        let _ = conn.close_statement(statement.id);
+    }
+    let mut one = crate::Execute::default();
+    one.null();
+    let _ = conn.execute_cached(b"SELECT ?", &one);
+    let _ = conn.execute_many_cached(b"DO ?", &[one]);
     // Pipelined batches: every reply read, then one left streaming.
     let _ = conn.pipeline([&b"DO 1"[..], b"DO 2", b"DO 3"]);
     if let Ok((_, mut head, Some(id))) =

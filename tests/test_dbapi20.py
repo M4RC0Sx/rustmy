@@ -45,6 +45,9 @@ def test_suite_is_the_published_file() -> None:
 class _Compliance(dbapi20.DatabaseAPI20Test):  # type: ignore[misc]
     __test__ = False  # only the per-server subclasses run
     server_name: ClassVar[str]
+    #: Every cursor the suite creates is of this class (``connect()``'s
+    #: ``cursorclass``): the suite runs again with prepared statements.
+    cursorclass: ClassVar[type[rustmy.Cursor]] = rustmy.Cursor
     driver = rustmy
     connect_kw_args: ClassVar[dict[str, Any]] = {}
     # `test_callproc` calls a procedure that lowercases its argument; LOWER
@@ -60,6 +63,7 @@ class _Compliance(dbapi20.DatabaseAPI20Test):  # type: ignore[misc]
             "user": "rustmy",
             "password": "rustmy",
             "database": "rustmy_test",
+            "cursorclass": cls.cursorclass,
         }
         with rustmy.connect(**cls.connect_kw_args) as conn:
             cursor = conn.cursor()
@@ -132,3 +136,17 @@ class TestMySQL(_Compliance):
 class TestMariaDB(_Compliance):
     __test__ = True
     server_name = "mariadb"
+
+
+@pytest.mark.integration
+class TestMySQLPrepared(_Compliance):
+    __test__ = True
+    server_name = "mysql"
+    cursorclass = rustmy.cursors.PreparedCursor
+
+
+@pytest.mark.integration
+class TestMariaDBPrepared(_Compliance):
+    __test__ = True
+    server_name = "mariadb"
+    cursorclass = rustmy.cursors.PreparedCursor

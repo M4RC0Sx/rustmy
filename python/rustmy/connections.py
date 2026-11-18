@@ -20,6 +20,7 @@ from rustmy.converters import escape_string
 from rustmy.converters import split_conv
 from rustmy.converters import to_literal
 from rustmy.cursors import Cursor
+from rustmy.cursors import prepared_variant
 
 
 if TYPE_CHECKING:
@@ -119,6 +120,7 @@ class Connection:
         ssl: Mapping[str, object] | bool | None = None,
         server_public_key: PathArg | None = None,
         binary_prefix: bool = True,
+        statement_cache_size: int = 32,
         read_default_file: PathArg | None = None,
         read_default_group: str | None = None,
     ) -> None:
@@ -171,6 +173,11 @@ class Connection:
         ``install_as_MySQLdb()`` alias defaults to it, as mysqlclient does).
         Multi-byte legacy character sets (gbk, big5, sjis…) always get a
         hexadecimal ``X'…'``, which is binary on its own.
+
+        Prepared statements (:class:`~rustmy.cursors.PreparedCursor`) are
+        prepared once per connection: the last ``statement_cache_size`` stay
+        prepared on the server, which allows 16,382 across all its
+        connections by default (``max_prepared_stmt_count``).
 
         TLS: ``ssl_mode`` is one of ``disabled``, ``preferred`` (default),
         ``required`` (encrypted, server not verified), ``verify_ca`` and
@@ -262,6 +269,7 @@ class Connection:
                 None if server_public_key is None else os.fspath(server_public_key)
             ),
             binary_prefix=binary_prefix,
+            statement_cache_size=statement_cache_size,
         )
         self.cursorclass = cursorclass
         #: Python types to SQL literal encoders (MySQLdb's attribute), from
@@ -360,6 +368,31 @@ class Connection:
             query, seq_of_args, max_pipeline, as_dict, batch_bytes
         )
 
+    def _execute_prepared(
+        self, query: str, args: Params, *, as_dict: bool, batch_bytes: int
+    ) -> QueryResult:
+        return self._conn.execute_prepared(query, args, as_dict, batch_bytes)
+
+    def _executemany_prepared_insert(
+        self, query: str, seq_of_args: Iterable[Params], max_stmt_length: int
+    ) -> tuple[int, int | None, bytes | None] | None:
+        return self._conn.executemany_prepared_insert(
+            query, seq_of_args, max_stmt_length
+        )
+
+    def _executemany_prepared(
+        self,
+        query: str,
+        seq_of_args: Iterable[Params],
+        max_pipeline: int,
+        *,
+        as_dict: bool,
+        batch_bytes: int,
+    ) -> tuple[QueryResult, int, bytes] | None:
+        return self._conn.executemany_prepared(
+            query, seq_of_args, max_pipeline, as_dict, batch_bytes
+        )
+
     def _next_result(
         self, *, as_dict: bool = False, batch_bytes: int = 4096
     ) -> QueryResult | None:
@@ -371,30 +404,47 @@ class Connection:
         return self._conn.next_result_streamed(as_dict, batch_bytes)
 
     @overload
-    def cursor(self, cursorclass: None = None, *, cursor: None = None) -> Cursor: ...
+    def cursor(
+        self, cursorclass: None = None, *, cursor: None = None, prepared: bool = False
+    ) -> Cursor: ...
     @overload
     def cursor(
-        self, cursorclass: type[_CursorT], *, cursor: None = None
+        self,
+        cursorclass: type[_CursorT],
+        *,
+        cursor: None = None,
+        prepared: bool = False,
     ) -> _CursorT: ...
     @overload
     def cursor(
-        self, cursorclass: None = None, *, cursor: type[_CursorT]
+        self,
+        cursorclass: None = None,
+        *,
+        cursor: type[_CursorT],
+        prepared: bool = False,
     ) -> _CursorT: ...
     def cursor(
         self,
         cursorclass: type[Cursor] | None = None,
         *,
         cursor: type[Cursor] | None = None,
+        prepared: bool = False,
     ) -> Cursor:
         """Create a cursor of ``cursorclass``, by default the one given to
         ``connect()``. ``cursor=`` is accepted as an alias (PyMySQL's name).
+        ``prepared=True`` gives that class's prepared-statement version
+        (:class:`~rustmy.cursors.PreparedCursor` for ``Cursor``,
+        :class:`~rustmy.cursors.PreparedDictCursor` for ``DictCursor``).
         """
         if cursor is not None:
             if cursorclass is not None:
                 msg = "pass cursorclass or cursor, not both"
                 raise TypeError(msg)
             cursorclass = cursor
-        return (cursorclass or self.cursorclass)(self)
+        chosen = cursorclass or self.cursorclass
+        if prepared:
+            chosen = prepared_variant(chosen)
+        return chosen(self)
 
     def commit(self) -> None:
         self._query("COMMIT")

@@ -1,0 +1,56 @@
+{
+  "date": "2026-11-17T21:31:07+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 5,
+  "title": "Prepared statements: throughput relative to mysqlclient",
+  "default": "rustmy Cursor",
+  "labels": {
+    "mysqlclient": "mysqlclient",
+    "pymysql": "PyMySQL"
+  },
+  "sweep": [
+    {
+      "label": "fetchall 100k mixed rows",
+      "seconds": {
+        "mysqlclient": 0.16255708297831006,
+        "pymysql": 0.4738882920064498,
+        "rustmy Cursor": 0.04510687501169741,
+        "rustmy PreparedCursor": 0.024972000013804063
+      }
+    },
+    {
+      "label": "10k SELECT by primary key",
+      "seconds": {
+        "mysqlclient": 0.9402119169826619,
+        "pymysql": 1.2618582090071868,
+        "rustmy Cursor": 0.8076025420159567,
+        "rustmy PreparedCursor": 0.739072208001744
+      }
+    },
+    {
+      "label": "executemany INSERT 10k rows",
+      "seconds": {
+        "mysqlclient": 0.07108312501804903,
+        "pymysql": 0.0737482909753453,
+        "rustmy Cursor": 0.03658279200317338,
+        "rustmy PreparedCursor": 0.053055500000482425
+      }
+    },
+    {
+      "label": "executemany UPDATE 10k rows",
+      "seconds": {
+        "mysqlclient": 1.2376021669770125,
+        "pymysql": 1.1828591249941383,
+        "rustmy Cursor": 0.6845674159994815,
+        "rustmy PreparedCursor": 0.6900471250119153
+      }
+    }
+  ]
+}

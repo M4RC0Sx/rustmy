@@ -1,5 +1,6 @@
 //! A blocking connection: transport, handshake, authentication and commands.
 
+use std::collections::HashMap;
 use std::io;
 use std::io::Read;
 use std::io::Write;
@@ -17,6 +18,7 @@ use crate::auth::encrypt_password;
 use crate::auth::parse_public_key;
 use crate::auth::parsec_response;
 use crate::auth::trim_nonce;
+use crate::binary::Execute;
 use crate::buf::Reader;
 use crate::buf::put_nul_bytes;
 use crate::charset::handshake_collation;
@@ -66,6 +68,15 @@ const CACHING_SHA2_REQUEST_PUBLIC_KEY: u8 = 0x02;
 /// `sha256_password`: client asks for the server's RSA public key.
 const SHA256_REQUEST_PUBLIC_KEY: u8 = 0x01;
 
+/// The server could not re-prepare a statement after a schema change.
+const ER_NEED_REPREPARE: u16 = 1615;
+
+/// Default size of the prepared-statement cache: the server allows 16,382
+/// prepared statements across all its connections by default
+/// (`max_prepared_stmt_count`), so a few hundred pooled connections must
+/// fit.
+pub const DEFAULT_STATEMENT_CACHE: usize = 32;
+
 /// Connection parameters.
 #[derive(Debug, Clone)]
 pub struct Opts {
@@ -94,6 +105,8 @@ pub struct Opts {
     /// PEM file with the server's RSA public key, used to encrypt the
     /// password over plain TCP instead of asking the server for its key.
     pub server_public_key: Option<PathBuf>,
+    /// Prepared statements kept per connection ([`Conn::execute_cached`]).
+    pub statement_cache: usize,
 }
 
 impl Default for Opts {
@@ -112,6 +125,7 @@ impl Default for Opts {
             charset: "utf8mb4".to_owned(),
             tls: TlsOpts::default(),
             server_public_key: None,
+            statement_cache: DEFAULT_STATEMENT_CACHE,
         }
     }
 }
@@ -294,6 +308,75 @@ pub enum ReadOutcome {
     Done { warnings: u16 },
 }
 
+/// A statement prepared on the server ([`Conn::prepare`]).
+#[derive(Debug, Clone)]
+pub struct Statement {
+    /// The server's id for it, valid on this connection only.
+    pub id: u32,
+    /// Number of `?` placeholders.
+    pub params: u16,
+    /// Columns of its result set (empty when it returns none).
+    pub columns: Vec<Column>,
+}
+
+/// Statements prepared by [`Conn::execute_cached`], keyed by their SQL; the
+/// least recently used is closed when a new one needs the room.
+#[derive(Debug, Default)]
+struct StatementCache {
+    capacity: usize,
+    entries: HashMap<Vec<u8>, (Statement, u64)>,
+    clock: u64,
+}
+
+impl StatementCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            // The statement being run is always kept.
+            capacity: capacity.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn get(&mut self, sql: &[u8]) -> Option<&Statement> {
+        self.clock += 1;
+        let clock = self.clock;
+        self.entries.get_mut(sql).map(|(statement, used)| {
+            *used = clock;
+            &*statement
+        })
+    }
+
+    /// The statement to close to make room for one more, if the cache is
+    /// full.
+    fn evict(&mut self) -> Option<u32> {
+        if self.entries.len() < self.capacity {
+            return None;
+        }
+        let oldest = self
+            .entries
+            .iter()
+            .min_by_key(|(_, (_, used))| *used)
+            .map(|(sql, _)| sql.clone())?;
+        self.entries
+            .remove(&oldest)
+            .map(|(statement, _)| statement.id)
+    }
+
+    fn insert(&mut self, sql: Vec<u8>, statement: Statement) {
+        self.clock += 1;
+        self.entries.insert(sql, (statement, self.clock));
+    }
+
+    /// Forgets every statement: the server has closed them.
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn remove(&mut self, sql: &[u8]) -> Option<u32> {
+        self.entries.remove(sql).map(|(statement, _)| statement.id)
+    }
+}
+
 /// What a pipelined batch did ([`Conn::pipeline`]).
 #[derive(Debug, Default)]
 pub struct PipelineTotals {
@@ -338,6 +421,11 @@ pub struct Conn {
     pending: Option<Pending>,
     /// Last [`StreamId`] handed out.
     last_stream_id: u64,
+    /// Whether the reply being read comes from `COM_STMT_EXECUTE` (its
+    /// result sets, queued ones included, have binary rows).
+    binary_reply: bool,
+    /// Statements prepared by [`Conn::execute_cached`], by SQL.
+    statements: StatementCache,
 }
 
 impl Conn {
@@ -405,6 +493,8 @@ impl Conn {
             buf,
             pending: None,
             last_stream_id: 0,
+            binary_reply: false,
+            statements: StatementCache::new(opts.statement_cache),
         };
         conn.authenticate(opts)?;
         Ok(conn)
@@ -565,7 +655,156 @@ impl Conn {
     pub fn query_streamed(&mut self, sql: &[u8]) -> Result<(QueryResult, Option<StreamId>)> {
         self.drain_results()?;
         self.stream.write_command(command::QUERY, sql)?;
+        self.binary_reply = false;
         self.read_head()
+    }
+
+    /// Prepares `sql` (with `?` placeholders) on the server
+    /// (`COM_STMT_PREPARE`).
+    ///
+    /// # Errors
+    ///
+    /// I/O failures, protocol violations, or the server's error (a syntax
+    /// error, too many prepared statements...).
+    pub fn prepare(&mut self, sql: &[u8]) -> Result<Statement> {
+        self.drain_results()?;
+        self.stream.write_command(command::STMT_PREPARE, sql)?;
+        self.read_packet()?;
+        match self.buf.first() {
+            Some(0x00) => {}
+            Some(0xFF) => return Err(parse_err(&self.buf)),
+            _ => return Err(Error::protocol("unexpected reply to COM_STMT_PREPARE")),
+        }
+        let mut r = Reader::new(&self.buf);
+        r.skip(1)?;
+        let id = r.u32()?;
+        let columns = usize::from(r.u16()?);
+        let params = r.u16()?;
+        let deprecate_eof = self.capabilities & capability::DEPRECATE_EOF != 0;
+        // Parameter definitions say nothing useful (every type is "string"
+        // before the first execution).
+        for _ in 0..params {
+            self.read_packet()?;
+        }
+        if params > 0 && !deprecate_eof {
+            self.read_packet()?;
+        }
+        let mut definitions = Vec::with_capacity(columns.min(4096));
+        for _ in 0..columns {
+            self.read_packet()?;
+            definitions.push(Column::parse(&self.buf)?);
+        }
+        if columns > 0 && !deprecate_eof {
+            self.read_packet()?;
+        }
+        Ok(Statement {
+            id,
+            params,
+            columns: definitions,
+        })
+    }
+
+    /// Runs a prepared statement (`COM_STMT_EXECUTE`, `payload` from
+    /// [`crate::Execute::finish`]) and returns its first result, leaving
+    /// rows on the wire as [`Conn::query_streamed`] does. Rows are binary
+    /// ([`RowSet::is_binary`]).
+    ///
+    /// # Errors
+    ///
+    /// I/O failures, protocol violations or an ERR packet from the server.
+    pub fn execute_streamed(&mut self, payload: &[u8]) -> Result<(QueryResult, Option<StreamId>)> {
+        self.drain_results()?;
+        self.stream.write_command(command::STMT_EXECUTE, payload)?;
+        self.binary_reply = true;
+        self.read_head()
+    }
+
+    /// Like [`Conn::execute_streamed`], reading every row.
+    ///
+    /// # Errors
+    ///
+    /// As [`Conn::execute_streamed`].
+    pub fn execute(&mut self, payload: &[u8]) -> Result<QueryResult> {
+        let (result, stream) = self.execute_streamed(payload)?;
+        self.read_all(result, stream)
+    }
+
+    /// Frees a prepared statement on the server (`COM_STMT_CLOSE`, which
+    /// has no reply).
+    ///
+    /// # Errors
+    ///
+    /// I/O failures.
+    pub fn close_statement(&mut self, id: u32) -> Result<()> {
+        self.drain_results()?;
+        self.stream
+            .write_command(command::STMT_CLOSE, &id.to_le_bytes())
+    }
+
+    /// Runs `sql` as a prepared statement with `params`, preparing it first
+    /// unless this connection already has (the last
+    /// [`Opts::statement_cache`] statements are kept); returns its first
+    /// result as [`Conn::execute_streamed`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Parameters`] when `params` does not match the statement's
+    /// placeholders, and as [`Conn::prepare`] and [`Conn::execute_streamed`].
+    pub fn execute_cached_streamed(
+        &mut self,
+        sql: &[u8],
+        params: &Execute,
+    ) -> Result<(QueryResult, Option<StreamId>)> {
+        let id = self.cached_statement(sql, params)?;
+        match self.execute_streamed(&params.finish(id)) {
+            // The server could not re-prepare it after a schema change:
+            // prepare it again, once.
+            Err(Error::Server {
+                code: ER_NEED_REPREPARE,
+                ..
+            }) => {
+                if let Some(id) = self.statements.remove(sql) {
+                    self.close_statement(id)?;
+                }
+                let id = self.cached_statement(sql, params)?;
+                self.execute_streamed(&params.finish(id))
+            }
+            other => other,
+        }
+    }
+
+    /// Like [`Conn::execute_cached_streamed`], reading every row.
+    ///
+    /// # Errors
+    ///
+    /// As [`Conn::execute_cached_streamed`].
+    pub fn execute_cached(&mut self, sql: &[u8], params: &Execute) -> Result<QueryResult> {
+        let (result, stream) = self.execute_cached_streamed(sql, params)?;
+        self.read_all(result, stream)
+    }
+
+    /// The id of `sql` prepared on this connection, preparing it (and
+    /// closing the least recently used statement) if needed.
+    fn cached_statement(&mut self, sql: &[u8], params: &Execute) -> Result<u32> {
+        let expected = if let Some(statement) = self.statements.get(sql) {
+            (statement.id, statement.params)
+        } else {
+            if let Some(oldest) = self.statements.evict() {
+                self.close_statement(oldest)?;
+            }
+            let statement = self.prepare(sql)?;
+            let found = (statement.id, statement.params);
+            self.statements.insert(sql.to_vec(), statement);
+            found
+        };
+        let (id, placeholders) = expected;
+        if usize::from(placeholders) != params.len() {
+            return Err(Error::Parameters {
+                expected: placeholders,
+                given: params.len(),
+            });
+        }
+        Ok(id)
     }
 
     /// How many bytes of statements [`Conn::pipeline`] may send in one
@@ -604,7 +843,7 @@ impl Conn {
         &mut self,
         statements: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<PipelineTotals> {
-        let reply_seqs = self.send_pipeline(statements)?;
+        let reply_seqs = self.send_pipeline(command::QUERY, statements)?;
         let mut totals = PipelineTotals::default();
         self.read_replies(&reply_seqs, &mut totals)?;
         Ok(totals)
@@ -623,7 +862,71 @@ impl Conn {
         statements: impl IntoIterator<Item = &'a [u8]>,
         last: &'a [u8],
     ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
-        let reply_seqs = self.send_pipeline(statements.into_iter().chain([last]))?;
+        let reply_seqs =
+            self.send_pipeline(command::QUERY, statements.into_iter().chain([last]))?;
+        self.finish_pipeline_streamed(&reply_seqs)
+    }
+
+    /// Runs `sql` as a prepared statement once per item of `params`,
+    /// pipelined as [`Conn::pipeline`] runs text statements (preparing it
+    /// first unless this connection already has, as
+    /// [`Conn::execute_cached`] does).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Parameters`] when an item does not match the statement's
+    /// placeholders (nothing is sent), as [`Conn::prepare`], I/O failures
+    /// and protocol violations (server errors go in the totals).
+    pub fn execute_many_cached(
+        &mut self,
+        sql: &[u8],
+        params: &[Execute],
+    ) -> Result<PipelineTotals> {
+        let payloads = self.execute_payloads(sql, params)?;
+        let reply_seqs =
+            self.send_pipeline(command::STMT_EXECUTE, payloads.iter().map(Vec::as_slice))?;
+        let mut totals = PipelineTotals::default();
+        self.read_replies(&reply_seqs, &mut totals)?;
+        Ok(totals)
+    }
+
+    /// Like [`Conn::execute_many_cached`] with `last` run after `params`,
+    /// whose reply is left as [`Conn::execute_cached_streamed`] leaves it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Conn::execute_many_cached`], and the first server error of the
+    /// batch (once every reply has been read).
+    pub fn execute_many_cached_streamed(
+        &mut self,
+        sql: &[u8],
+        params: &[Execute],
+        last: &Execute,
+    ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
+        let mut payloads = self.execute_payloads(sql, params)?;
+        payloads.extend(self.execute_payloads(sql, std::slice::from_ref(last))?);
+        let reply_seqs =
+            self.send_pipeline(command::STMT_EXECUTE, payloads.iter().map(Vec::as_slice))?;
+        self.finish_pipeline_streamed(&reply_seqs)
+    }
+
+    /// `COM_STMT_EXECUTE` payloads of `sql` (prepared if needed) for each
+    /// item of `params`.
+    fn execute_payloads(&mut self, sql: &[u8], params: &[Execute]) -> Result<Vec<Vec<u8>>> {
+        let mut payloads = Vec::with_capacity(params.len());
+        for item in params {
+            let id = self.cached_statement(sql, item)?;
+            payloads.push(item.finish(id));
+        }
+        Ok(payloads)
+    }
+
+    /// Reads every reply of a pipelined batch but the last one's head, as
+    /// [`Conn::pipeline_streamed`] leaves it.
+    fn finish_pipeline_streamed(
+        &mut self,
+        reply_seqs: &[u8],
+    ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
         let (&last_seq, others) = reply_seqs
             .split_last()
             .ok_or_else(|| Error::protocol("empty pipeline"))?;
@@ -641,16 +944,17 @@ impl Conn {
         Ok((totals, head, stream))
     }
 
-    /// Sends one `COM_QUERY` per statement in a single write; returns the
-    /// sequence id each reply starts at.
+    /// Sends one `cmd` (`COM_QUERY` or `COM_STMT_EXECUTE`) per payload in a
+    /// single write; returns the sequence id each reply starts at.
     fn send_pipeline<'a>(
         &mut self,
-        statements: impl IntoIterator<Item = &'a [u8]>,
+        cmd: u8,
+        payloads: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<Vec<u8>> {
         self.drain_results()?;
         let mut reply_seqs = Vec::new();
-        self.stream
-            .write_commands(command::QUERY, statements, &mut reply_seqs)?;
+        self.stream.write_commands(cmd, payloads, &mut reply_seqs)?;
+        self.binary_reply = cmd == command::STMT_EXECUTE;
         Ok(reply_seqs)
     }
 
@@ -850,13 +1154,17 @@ impl Conn {
             }
             Some(_) => {
                 let count = Reader::new(&self.buf).lenenc_len()?;
-                self.read_columns(count)
+                self.read_columns(count, self.binary_reply)
             }
             None => Err(Error::protocol("empty response packet")),
         }
     }
 
-    fn read_columns(&mut self, count: usize) -> Result<(QueryResult, Option<StreamId>)> {
+    fn read_columns(
+        &mut self,
+        count: usize,
+        binary: bool,
+    ) -> Result<(QueryResult, Option<StreamId>)> {
         let deprecate_eof = self.capabilities & capability::DEPRECATE_EOF != 0;
         // Cap the preallocation: `count` comes from the server.
         let mut columns = Vec::with_capacity(count.min(4096));
@@ -874,7 +1182,7 @@ impl Conn {
         self.last_stream_id += 1;
         let id = StreamId(self.last_stream_id);
         self.pending = Some(Pending { id, deprecate_eof });
-        Ok((QueryResult::rowset(columns), Some(id)))
+        Ok((QueryResult::rowset(columns, binary), Some(id)))
     }
 
     /// Switches the default database (`COM_INIT_DB`). `database` is in the
@@ -900,6 +1208,8 @@ impl Conn {
     /// I/O failures or an ERR packet.
     pub fn reset_connection(&mut self) -> Result<()> {
         self.drain_results()?;
+        // The reset closes every prepared statement.
+        self.statements.clear();
         self.stream.write_command(command::RESET_CONNECTION, &[])?;
         self.expect_ok()
     }
@@ -921,6 +1231,8 @@ impl Conn {
         database: Option<&[u8]>,
     ) -> Result<()> {
         self.drain_results()?;
+        // The new session has none of the old one's prepared statements.
+        self.statements.clear();
         let plugin = self.default_plugin;
         let nonce = self.greeting_nonce.clone();
         let auth_response = self.first_response(plugin, password.as_bytes(), &nonce)?;

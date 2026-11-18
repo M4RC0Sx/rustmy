@@ -45,6 +45,11 @@ pub enum Error {
     /// A valid server request that this client does not implement yet.
     #[error("unsupported: {0}")]
     Unsupported(String),
+
+    /// A prepared statement executed with another number of parameters
+    /// than its placeholders.
+    #[error("the statement has {expected} placeholders but {given} parameters were given")]
+    Parameters { expected: u16, given: usize },
 }
 
 impl Error {
