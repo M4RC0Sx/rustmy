@@ -43,6 +43,9 @@ TCP proxy while rustmy ran the same command sequence as the `session` target,
 one per authentication path: MySQL `caching_sha2_password` with RSA, MySQL
 auth switch to `mysql_native_password`, MariaDB native, `client_ed25519` and
 `parsec`. `seeds/handshake/*.bin` are the greeting packets taken from them.
-`seeds/compressed/*.bin` are hand-built: an OK packet and a one-column result
+`seeds/session/local-infile.bin` is hand-built: a greeting, an OK for every
+reply the session reads before its `LOAD DATA LOCAL INFILE`, then a request
+for `/etc/passwd` (refused: not the statement's file) and one in the middle
+of a pipelined batch (the connection closes). `seeds/compressed/*.bin` are hand-built: an OK packet and a one-column result
 set wrapped in zlib, zstd and stored (uncompressed) compressed packets, one
 of them split across two compressed packets.

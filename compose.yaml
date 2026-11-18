@@ -15,8 +15,10 @@ services:
   mysql:
     image: mysql:${MYSQL_VERSION:-8.4}
     # `loose-` makes the option a no-op on 9.x, where the plugin was removed.
+    # LOAD DATA LOCAL INFILE is off by default on MySQL 8.0+ (on in MariaDB).
     command:
       - --loose-mysql-native-password=ON
+      - --local-infile=ON
       - --ssl-ca=/certs/ca.pem
       - --ssl-cert=/certs/server.pem
       - --ssl-key=/certs/server-key.pem
@@ -52,6 +54,7 @@ services:
     image: mariadb:${MARIADB_VERSION:-11.4}
     command:
       - --max-allowed-packet=64M
+      - --local-infile=ON
       - --ssl-ca=/certs/ca.pem
       - --ssl-cert=/certs/server.pem
       - --ssl-key=/certs/server-key.pem

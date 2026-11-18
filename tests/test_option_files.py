@@ -267,6 +267,35 @@ def test_compression_from_the_file(server: Server, tmp_path: Path) -> None:
         assert conn.compression == "zlib"
 
 
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        ({"local-infile": ""}, {"local_infile": True}),
+        ({"local-infile": "0"}, {"local_infile": False}),
+        ({"load-data-local-dir": "/srv/in"}, {"local_infile_dir": "/srv/in"}),
+    ],
+)
+def test_local_infile_options(
+    options: dict[str, str], expected: dict[str, object]
+) -> None:
+    assert _option_files.connect_args(options) == expected
+
+
+def test_local_infile_from_the_file(server: Server, tmp_path: Path) -> None:
+    allowed = tmp_path.resolve()
+    (allowed / "one.csv").write_text("1\n")
+    load = f"LOAD DATA LOCAL INFILE '{allowed / 'one.csv'}' INTO TABLE loaded"
+    cnf = server_file(server, tmp_path / "my.cnf", f"load-data-local-dir = {allowed}\n")
+    with rustmy.connect(read_default_file=cnf) as conn:
+        cursor = conn.cursor()
+        cursor.execute("CREATE TEMPORARY TABLE loaded (id INT)")
+        assert cursor.execute(load) == 1
+    # `local-infile` alone is not enough: rustmy needs the directory.
+    cnf = server_file(server, tmp_path / "other.cnf", "local-infile\n")
+    with pytest.raises(ValueError, match="needs local_infile_dir"):
+        rustmy.connect(read_default_file=cnf)
+
+
 def test_bad_option_value(server: Server, tmp_path: Path) -> None:
     cnf = server_file(server, tmp_path / "my.cnf", "connect-timeout = soon\n")
     with pytest.raises(rustmy.ProgrammingError, match="connect-timeout"):

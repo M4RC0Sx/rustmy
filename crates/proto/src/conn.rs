@@ -1,6 +1,8 @@
 //! A blocking connection: transport, handshake, authentication and commands.
 
 use std::collections::HashMap;
+use std::fs;
+use std::fs::File;
 use std::io;
 use std::io::Read;
 use std::io::Write;
@@ -9,6 +11,7 @@ use std::net::TcpStream;
 use std::net::ToSocketAddrs;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -42,6 +45,7 @@ use crate::result::parse_eof;
 use crate::result::parse_err;
 use crate::result::parse_ok;
 use crate::result::row_terminator;
+use crate::sql::local_infile_names;
 use crate::tls::SslMode;
 use crate::tls::TlsOpts;
 use crate::tls::client_config;
@@ -72,6 +76,11 @@ const SHA256_REQUEST_PUBLIC_KEY: u8 = 0x01;
 
 /// The server could not re-prepare a statement after a schema change.
 const ER_NEED_REPREPARE: u16 = 1615;
+
+/// Bytes of a local file sent per packet (`LOAD DATA LOCAL INFILE`). Measured
+/// from 4 to 64 KiB (benches/README.md): flat on a local link, while over a
+/// slow compressed one 16 KiB was 5% faster with zstd than 64 KiB.
+const LOCAL_INFILE_CHUNK: usize = 16 * 1024;
 
 /// Default size of the prepared-statement cache: the server allows 16,382
 /// prepared statements across all its connections by default
@@ -112,6 +121,12 @@ pub struct Opts {
     /// Compressed protocol, if the server offers it: zstd falls back to
     /// zlib, and no compression at all if the server offers neither.
     pub compress: Option<Compression>,
+    /// Allows `LOAD DATA LOCAL INFILE` of the files inside this directory
+    /// (resolved when connecting, symbolic links included). A request is
+    /// answered only if the statement being run names that file and the
+    /// file, resolved too, is inside the directory; any other is refused
+    /// with [`Error::LocalInfile`] before touching the disk.
+    pub local_infile_dir: Option<PathBuf>,
 }
 
 impl Default for Opts {
@@ -132,6 +147,7 @@ impl Default for Opts {
             server_public_key: None,
             statement_cache: DEFAULT_STATEMENT_CACHE,
             compress: None,
+            local_infile_dir: None,
         }
     }
 }
@@ -289,8 +305,42 @@ fn first_response(
     }
 }
 
-fn load_public_key(path: &std::path::Path) -> Result<rsa::PublicKey> {
-    let pem = std::fs::read(path).map_err(|e| {
+/// [`Opts::local_infile_dir`] resolved, or why it cannot be used.
+fn local_infile_dir(opts: &Opts) -> Result<Option<PathBuf>> {
+    opts.local_infile_dir
+        .as_deref()
+        .map(allowed_directory)
+        .transpose()
+}
+
+fn allowed_directory(path: &Path) -> Result<PathBuf> {
+    let resolved = fs::canonicalize(path)
+        .map_err(|err| Error::Config(format!("local_infile_dir {}: {err}", path.display())))?;
+    if !resolved.is_dir() {
+        return Err(Error::Config(format!(
+            "local_infile_dir {} is not a directory",
+            path.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Fills `buf` from `file` unless it ends first; returns the bytes read.
+fn read_full(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while let Some(rest) = buf.get_mut(filled..).filter(|rest| !rest.is_empty()) {
+        match file.read(rest) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(filled)
+}
+
+fn load_public_key(path: &Path) -> Result<rsa::PublicKey> {
+    let pem = fs::read(path).map_err(|e| {
         Error::Config(format!(
             "cannot read server_public_key {}: {e}",
             path.display()
@@ -397,6 +447,18 @@ pub struct PipelineTotals {
     pub error: Option<(usize, Error)>,
 }
 
+/// Which local files the server may ask for during the current command.
+#[derive(Debug)]
+enum Infile {
+    /// None.
+    Refuse,
+    /// Those the statement names (`LOAD DATA LOCAL INFILE 'name'`).
+    Allow(Vec<Vec<u8>>),
+    /// None, and a request breaks the connection: the server would read
+    /// the statements sent after this one as the file's contents.
+    Pipelined,
+}
+
 /// The result set whose rows are still unread on the wire.
 #[derive(Debug, Clone, Copy)]
 struct Pending {
@@ -436,6 +498,10 @@ pub struct Conn {
     compression: Option<Compression>,
     /// zstd level sent in the handshake response.
     zstd_level: u8,
+    /// [`Opts::local_infile_dir`], resolved.
+    local_infile_dir: Option<PathBuf>,
+    /// Local files the current command may send.
+    infile: Infile,
 }
 
 impl Conn {
@@ -446,11 +512,22 @@ impl Conn {
     /// I/O failures, protocol violations, authentication errors reported
     /// by the server, or authentication methods not implemented yet.
     pub fn connect(opts: &Opts) -> Result<Self> {
-        Self::establish(Stream::connect(opts)?, opts)
+        // Settings first: a bad one fails before anything goes on the wire.
+        let local_infile_dir = local_infile_dir(opts)?;
+        Self::handshake(Stream::connect(opts)?, opts, local_infile_dir)
     }
 
     /// Handshake and authentication over an already open transport.
+    #[cfg(feature = "fuzzing")]
     pub(crate) fn establish(transport: Stream, opts: &Opts) -> Result<Self> {
+        Self::handshake(transport, opts, local_infile_dir(opts)?)
+    }
+
+    fn handshake(
+        transport: Stream,
+        opts: &Opts,
+        local_infile_dir: Option<PathBuf>,
+    ) -> Result<Self> {
         let mut stream = PacketStream::new(transport);
         let mut buf = Vec::new();
         stream.read_into(&mut buf)?;
@@ -462,6 +539,9 @@ impl Conn {
         let mut wanted = DEFAULT_CAPABILITIES | opts.client_flag;
         if opts.database.is_some() {
             wanted |= capability::CONNECT_WITH_DB;
+        }
+        if local_infile_dir.is_some() {
+            wanted |= capability::LOCAL_FILES;
         }
         let use_tls = Self::negotiate_tls(opts, &greeting)?;
         if use_tls {
@@ -520,6 +600,8 @@ impl Conn {
             statements: StatementCache::new(opts.statement_cache),
             compression,
             zstd_level,
+            local_infile_dir,
+            infile: Infile::Refuse,
         };
         conn.authenticate(opts)?;
         if let Some(algorithm) = compression {
@@ -689,6 +771,7 @@ impl Conn {
     /// I/O failures, protocol violations or an ERR packet from the server.
     pub fn query_streamed(&mut self, sql: &[u8]) -> Result<(QueryResult, Option<StreamId>)> {
         self.drain_results()?;
+        self.infile = self.allowed_files(sql);
         self.stream.write_command(command::QUERY, sql)?;
         self.binary_reply = false;
         self.read_head()
@@ -986,8 +1069,15 @@ impl Conn {
         payloads: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<Vec<ReplyStart>> {
         self.drain_results()?;
+        let payloads: Vec<&[u8]> = payloads.into_iter().collect();
+        self.infile = match payloads.as_slice() {
+            [only] if cmd == command::QUERY => self.allowed_files(only),
+            [_] => Infile::Refuse,
+            _ => Infile::Pipelined,
+        };
         let mut replies = Vec::new();
-        self.stream.write_commands(cmd, payloads, &mut replies)?;
+        self.stream
+            .write_commands(cmd, payloads.iter().copied(), &mut replies)?;
         self.binary_reply = cmd == command::STMT_EXECUTE;
         Ok(replies)
     }
@@ -1177,20 +1267,128 @@ impl Conn {
                 Ok((QueryResult::from_ok(ok), None))
             }
             Some(0xFF) => Err(parse_err(&self.buf)),
-            Some(0xFB) => {
-                // LOCAL INFILE request: refuse by sending an empty file.
-                self.stream.write_packet(&[])?;
-                self.read_packet()?;
-                if self.buf.first() == Some(&0x00) {
-                    self.status = parse_ok(&self.buf)?.status;
-                }
-                Err(Error::unsupported("LOAD DATA LOCAL INFILE"))
-            }
+            Some(0xFB) => self.local_infile(),
             Some(_) => {
                 let count = Reader::new(&self.buf).lenenc_len()?;
                 self.read_columns(count, self.binary_reply)
             }
             None => Err(Error::protocol("empty response packet")),
+        }
+    }
+
+    /// Local files `sql` may make the server ask for.
+    fn allowed_files(&self, sql: &[u8]) -> Infile {
+        if self.local_infile_dir.is_none() {
+            return Infile::Refuse;
+        }
+        let no_backslash_escapes = self.status & status::NO_BACKSLASH_ESCAPES != 0;
+        Infile::Allow(local_infile_names(sql, no_backslash_escapes))
+    }
+
+    /// Answers the server's request for a local file (`LOAD DATA LOCAL
+    /// INFILE`, the request in `buf`) with the file, or with an empty one
+    /// if it is not allowed, and reads the statement's reply.
+    fn local_infile(&mut self) -> Result<(QueryResult, Option<StreamId>)> {
+        if matches!(self.infile, Infile::Pipelined) {
+            self.stream.get_mut().shutdown();
+            return Err(Error::protocol(
+                "the server asked for a local file in the middle of a pipelined batch",
+            ));
+        }
+        let name = self.buf.get(1..).unwrap_or_default().to_vec();
+        let refused = match self.open_local_file(&name) {
+            Ok((path, file)) => {
+                self.send_file(&path, file)?;
+                None
+            }
+            Err(reason) => Some(reason),
+        };
+        if refused.is_some() {
+            // An empty file ends the request; the statement loads nothing.
+            self.stream.write_packet(&[])?;
+        }
+        self.read_packet()?;
+        let reply = match self.buf.first() {
+            Some(0x00) => {
+                let ok = parse_ok(&self.buf)?;
+                self.status = ok.status;
+                Ok((QueryResult::from_ok(ok), None))
+            }
+            Some(0xFF) => Err(parse_err(&self.buf)),
+            _ => Err(Error::protocol(
+                "expected an OK or ERR packet after a local file",
+            )),
+        };
+        match (refused, reply) {
+            (_, Err(err @ (Error::Io(_) | Error::Protocol(_)))) | (None, Err(err)) => Err(err),
+            (Some(reason), _) => Err(Error::LocalInfile(reason)),
+            (None, reply) => reply,
+        }
+    }
+
+    /// Opens the local file `name` (as the server asked for it) if this
+    /// command may send it, or says why not. Nothing on disk is touched
+    /// unless the statement named the file.
+    fn open_local_file(&self, name: &[u8]) -> std::result::Result<(PathBuf, File), String> {
+        let shown = String::from_utf8_lossy(name);
+        let Some(dir) = &self.local_infile_dir else {
+            return Err(format!(
+                "the server asked for {shown:?}, but LOAD DATA LOCAL INFILE is disabled \
+                 (local_infile_dir allows the files of a directory)"
+            ));
+        };
+        let named = match &self.infile {
+            Infile::Allow(names) => names.iter().any(|allowed| allowed == name),
+            Infile::Refuse | Infile::Pipelined => false,
+        };
+        if !named {
+            return Err(format!(
+                "the server asked for {shown:?}, which the statement being run does not name"
+            ));
+        }
+        let path = std::str::from_utf8(name)
+            .map_err(|_| format!("the file name {shown:?} is not valid UTF-8"))?;
+        // Relative names start at the working directory, as in other clients.
+        let resolved = fs::canonicalize(path).map_err(|err| format!("{path}: {err}"))?;
+        if !resolved.starts_with(dir) {
+            return Err(format!(
+                "{path} is outside local_infile_dir ({})",
+                dir.display()
+            ));
+        }
+        let file = File::open(&resolved).map_err(|err| format!("{path}: {err}"))?;
+        let is_file = file
+            .metadata()
+            .map_err(|err| format!("{path}: {err}"))?
+            .is_file();
+        if !is_file {
+            return Err(format!("{path} is not a regular file"));
+        }
+        Ok((resolved, file))
+    }
+
+    /// Sends `file` in packets and the empty packet that ends it. If the
+    /// file cannot be read to the end, the connection is closed instead,
+    /// so the server aborts the statement rather than loading part of it.
+    fn send_file(&mut self, path: &Path, mut file: File) -> Result<()> {
+        let mut chunk = vec![0; LOCAL_INFILE_CHUNK];
+        loop {
+            let len = match read_full(&mut file, &mut chunk) {
+                Ok(len) => len,
+                Err(err) => {
+                    self.stream.get_mut().shutdown();
+                    return Err(io::Error::new(
+                        err.kind(),
+                        format!("reading {}: {err}", path.display()),
+                    )
+                    .into());
+                }
+            };
+            if len == 0 {
+                return self.stream.write_packet(&[]);
+            }
+            self.stream
+                .write_packet(chunk.get(..len).unwrap_or_default())?;
         }
     }
 
@@ -1295,6 +1493,8 @@ impl Conn {
                 self.discard_pending_rows()?;
             }
         }
+        // What the previous command allowed ends with its results.
+        self.infile = Infile::Refuse;
         Ok(())
     }
 

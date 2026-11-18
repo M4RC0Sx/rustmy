@@ -8,6 +8,8 @@ use std::io;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Write;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use crate::Compression;
 use crate::Conn;
@@ -132,10 +134,13 @@ pub fn result_set(data: &[u8]) {
     }
 }
 
-/// SQL helpers used on user-written queries: the `INSERT … VALUES`
-/// recogniser and string escaping in both modes.
+/// SQL helpers used on user-written queries: the `INSERT … VALUES` and
+/// `LOAD DATA LOCAL INFILE` recognisers and string escaping in both modes.
 pub fn sql(data: &[u8]) {
     let _ = crate::sql::insert_values(data);
+    let _ = crate::sql::local_infile_names(data, false);
+    let _ = crate::sql::local_infile_names(data, true);
+    let _ = crate::sql::mentions_local_infile(data);
     let mut out = Vec::new();
     crate::sql::escape_into(&mut out, data, false);
     crate::sql::escape_into(&mut out, data, true);
@@ -163,7 +168,8 @@ pub fn text_values(data: &[u8]) {
 /// The whole client against a server that answers with `data`: handshake,
 /// authentication (every plugin, RSA, auth switches), queries, streamed
 /// result sets (batches, skips, rows left for the next command to discard),
-/// multiple results, pipelined batches and the other commands.
+/// multiple results, pipelined batches, `LOAD DATA LOCAL INFILE` requests
+/// (answered, refused, inside a pipeline) and the other commands.
 pub fn session(data: &[u8]) {
     // Recorded sessions are uncompressed; asking for compression (zstd,
     // zlib when the greeting offers no zstd) reads the same bytes as
@@ -172,7 +178,21 @@ pub fn session(data: &[u8]) {
     session_with(data, Some(Compression::Zstd { level: 3 }));
 }
 
+/// A small file in the temporary directory the sessions allow, which their
+/// `LOAD DATA LOCAL INFILE` names; `None` if it cannot be written.
+fn local_file() -> Option<&'static PathBuf> {
+    static FILE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let dir = std::fs::canonicalize(std::env::temp_dir()).ok()?;
+        let path = dir.join("rustmy-fuzz-local-infile.csv");
+        std::fs::write(&path, b"1,a\n2,b\n").ok()?;
+        Some(path)
+    })
+    .as_ref()
+}
+
 fn session_with(data: &[u8], compress: Option<Compression>) {
+    let file = local_file();
     let opts = Opts {
         user: b"fuzz".to_vec(),
         password: "secret".to_owned(),
@@ -183,6 +203,7 @@ fn session_with(data: &[u8], compress: Option<Compression>) {
             ..TlsOpts::default()
         },
         compress,
+        local_infile_dir: file.and_then(|path| path.parent()).map(Into::into),
         ..Opts::default()
     };
     let transport = Stream::Mock(MockStream(Cursor::new(data.to_vec())));
@@ -228,4 +249,10 @@ fn session_with(data: &[u8], compress: Option<Compression>) {
     let _ = conn.reset_connection();
     let _ = conn.change_user(b"other", "pw", Some(b"db"));
     let _ = conn.query(b"SELECT 2");
+    // Last, so the recorded seeds still reach everything above.
+    if let Some(path) = file.and_then(|path| path.to_str()) {
+        let load = format!("LOAD DATA LOCAL INFILE '{path}' INTO TABLE t");
+        let _ = conn.query(load.as_bytes());
+        let _ = conn.pipeline([load.as_bytes(), b"DO 7"]);
+    }
 }

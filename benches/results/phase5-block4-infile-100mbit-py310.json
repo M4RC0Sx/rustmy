@@ -1,0 +1,54 @@
+{
+  "date": "2026-11-18T16:25:26+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 5,
+  "title": "LOAD DATA LOCAL INFILE, 100 Mbit/s each way: throughput relative to mysqlclient",
+  "default": "rustmy",
+  "labels": {
+    "mysqlclient": "mysqlclient",
+    "pymysql": "PyMySQL"
+  },
+  "bandwidth_kbps": 12500,
+  "sweep": [
+    {
+      "label": "1M rows into BLACKHOLE",
+      "seconds": {
+        "mysqlclient": 4.905871750001097,
+        "pymysql": 4.924030667025363,
+        "rustmy": 4.880106249998789,
+        "mysqlclient zlib": 1.1860438750009052,
+        "rustmy zlib": 1.2211983750166837,
+        "rustmy zstd": 0.931750000017928
+      }
+    },
+    {
+      "label": "1M rows into InnoDB",
+      "seconds": {
+        "mysqlclient": 4.851561415998731,
+        "pymysql": 4.884638583986089,
+        "rustmy": 4.860684916988248,
+        "mysqlclient zlib": 1.4665243340132292,
+        "rustmy zlib": 1.3889933750033379,
+        "rustmy zstd": 1.3347854169842321
+      }
+    },
+    {
+      "label": "100 loads of 1,000 rows",
+      "seconds": {
+        "mysqlclient": 0.5781434580276255,
+        "pymysql": 0.7220445419952739,
+        "rustmy": 0.6861462499946356,
+        "mysqlclient zlib": 0.2968522919982206,
+        "rustmy zlib": 0.27157658300711773,
+        "rustmy zstd": 0.2581054159963969
+      }
+    }
+  ]
+}

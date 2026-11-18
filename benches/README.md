@@ -1064,3 +1064,99 @@ link is slow enough for their few bytes to matter. Through toxiproxy's
 bandwidth toxic every MariaDB reply to a lookup pays about 3 ms for every
 driver alike (MariaDB writes its small replies in more pieces), so that
 panel says nothing about compression.
+
+## Phase 5, block 4: LOAD DATA LOCAL INFILE (2026-11-18, Python 3.10)
+
+`local_infile.py` loads a CSV file of a million rows (about 45 MB) into a
+`BLACKHOLE` table, where the server parses the rows and drops them, so what
+is left is the client sending the file and the protocol; into an InnoDB
+table; and a file of 1,000 rows 100 times. rustmy against mysqlclient
+(`local_infile_dir`) and PyMySQL (`local_infile=True`); at 100 Mbit/s, through
+toxiproxy as in `compress.py`, also with compression:
+
+```sh
+docker compose --profile bench up -d --wait mysql toxiproxy
+uv run --no-sync python benches/local_infile.py \
+    --json benches/results/phase5-block4-infile-local-py310.json
+uv run --no-sync python benches/local_infile.py --bandwidth 12500 \
+    --json benches/results/phase5-block4-infile-100mbit-py310.json
+for run in local 100mbit; do
+  uv run --no-sync python benches/report.py --section phase5-block4-infile-$run \
+      benches/results/phase5-block4-infile-$run-py310.json
+done
+```
+
+MySQL 8.4, local (no cap):
+
+<!-- results:phase5-block4-infile-local:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase5-block4-infile-local-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase5-block4-infile-local-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-18T16:17:21+00:00
+
+| Configuration | 1M rows into BLACKHOLE | 1M rows into InnoDB | 100 loads of 1,000 rows | vs mysqlclient (1M rows into BLACKHOLE) | vs mysqlclient (1M rows into InnoDB) | vs mysqlclient (100 loads of 1,000 rows) |
+|---|--:|--:|--:|--:|--:|--:|
+| mysqlclient | 610.9 ms | 1300.6 ms | 81.7 ms | 1.00x | 1.00x | 1.00x |
+| PyMySQL | 621.4 ms | **1299.5 ms** | 86.1 ms | 0.98x | 1.00x | 0.95x |
+| rustmy (default) | **591.6 ms** | 1306.1 ms | **77.5 ms** | 1.03x | 1.00x | 1.05x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:phase5-block4-infile-local:end -->
+
+MySQL 8.4, 100 Mbit/s each way:
+
+<!-- results:phase5-block4-infile-100mbit:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase5-block4-infile-100mbit-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase5-block4-infile-100mbit-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-18T16:25:26+00:00
+
+| Configuration | 1M rows into BLACKHOLE | 1M rows into InnoDB | 100 loads of 1,000 rows | vs mysqlclient (1M rows into BLACKHOLE) | vs mysqlclient (1M rows into InnoDB) | vs mysqlclient (100 loads of 1,000 rows) |
+|---|--:|--:|--:|--:|--:|--:|
+| mysqlclient | 4905.9 ms | 4851.6 ms | 578.1 ms | 1.00x | 1.00x | 1.00x |
+| PyMySQL | 4924.0 ms | 4884.6 ms | 722.0 ms | 1.00x | 0.99x | 0.80x |
+| rustmy (default) | 4880.1 ms | 4860.7 ms | 686.1 ms | 1.01x | 1.00x | 0.84x |
+| mysqlclient zlib | 1186.0 ms | 1466.5 ms | 296.9 ms | 4.14x | 3.31x | 1.95x |
+| rustmy zlib | 1221.2 ms | 1389.0 ms | 271.6 ms | 4.02x | 3.49x | 2.13x |
+| rustmy zstd | **931.8 ms** | **1334.8 ms** | **258.1 ms** | 5.27x | 3.63x | 2.24x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:phase5-block4-infile-100mbit:end -->
+
+The file is the client's only work here, and it is little: locally the
+server sets the pace (parsing rows, writing InnoDB pages) and the three
+drivers are level, rustmy 3–5% ahead where the server does least
+(`BLACKHOLE`, small files). At 100 Mbit/s the link sets it: 45 MB take
+about 4.9 s with any driver, and compression is what matters, zstd loading
+the large file 5.3x faster than an uncompressed mysqlclient and 1.27x faster
+than its zlib (rustmy's zlib is 3% behind mysqlclient's on that file and
+ahead on the others).
+
+The 0.84x of the uncompressed small loads at 100 Mbit/s is not rustmy
+getting slower: it is mysqlclient getting faster after the large loads that
+run before it on the same connection. Measured on fresh connections
+(best of five rounds of 100 loads, in four runs), mysqlclient took
+673–700 ms, rustmy 681–710 ms and PyMySQL 665–693 ms; after one 1M-row load
+on each connection first, mysqlclient's best dropped to 592 ms and rustmy's
+stayed at 693 ms. libmysqlclient keeps buffers the large file grew, which
+apparently suits toxiproxy's bandwidth model with these small files; the
+sweep below shows rustmy's packet size does not change the time on an
+uncompressed capped link.
+
+Packet size (`LOCAL_INFILE_CHUNK`), 1M rows into `BLACKHOLE`, best of
+three rounds, ms:
+
+| Link | 4 KiB | 8 KiB | 16 KiB | 32 KiB | 64 KiB |
+|---|--:|--:|--:|--:|--:|
+| local | 586 | 576 | 569 | 565 | **564** |
+| local, TLS | 606 | 596 | 593 | 589 | **585** |
+| 100 Mbit/s | 4864 | **4858** | 4863 | 4880 | 4879 |
+| 100 Mbit/s, zlib | **1210** | 1223 | 1219 | 1232 | 1234 |
+| 100 Mbit/s, zstd | 979 | 973 | **931** | 944 | 977 |
+
+16 KiB: within 1% of the best locally and 5% faster than 64 KiB with zstd,
+the configuration meant for slow links.
