@@ -1,0 +1,49 @@
+{
+  "date": "2026-11-18T10:21:17+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1"
+  },
+  "repeat": 5,
+  "title": "Compression, 20 Mbit/s each way: throughput relative to mysqlclient",
+  "default": "rustmy",
+  "labels": {
+    "mysqlclient": "mysqlclient"
+  },
+  "bandwidth_kbps": 2500,
+  "sweep": [
+    {
+      "label": "fetchall 100k mixed rows",
+      "seconds": {
+        "mysqlclient": 3.96779295799206,
+        "mysqlclient zlib": 1.0794674160133582,
+        "rustmy": 3.837231707992032,
+        "rustmy zlib": 0.9489969160058536,
+        "rustmy zstd": 0.8560060419840738
+      }
+    },
+    {
+      "label": "1,000 SELECT by primary key",
+      "seconds": {
+        "mysqlclient": 0.5091086250031367,
+        "mysqlclient zlib": 0.3085310419846792,
+        "rustmy": 0.4929072920058388,
+        "rustmy zlib": 0.2934574169921689,
+        "rustmy zstd": 0.3055716250091791
+      }
+    },
+    {
+      "label": "executemany INSERT 10k rows",
+      "seconds": {
+        "mysqlclient": 0.7011294169933535,
+        "mysqlclient zlib": 0.2500887910136953,
+        "rustmy": 0.5672022499784362,
+        "rustmy zlib": 0.1839330840157345,
+        "rustmy zstd": 0.14763974997913465
+      }
+    }
+  ]
+}

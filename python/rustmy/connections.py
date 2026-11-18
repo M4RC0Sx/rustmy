@@ -60,12 +60,25 @@ def _with_option_file(
     for name, value in from_file.items():
         if name == "multi_statements":
             merged[name] = bool(given[name]) or bool(value)
+        elif name == "compress":
+            merged[name] = given[name] or value
         elif name == "found_rows":
             if value:
                 merged["client_flag"] = given["client_flag"] | CLIENT.FOUND_ROWS
         elif name in given and given[name] is None:
             merged[name] = value
     return merged
+
+
+def _compression(compress: object) -> str | None:
+    """``connect(compress=…)`` as the algorithm to ask for."""
+    if isinstance(compress, str):
+        if compress in {"zlib", "zstd"}:
+            return compress
+        msg = f"invalid compress {compress!r}; expected True, 'zlib' or 'zstd'"
+        raise ValueError(msg)
+    # True, or a number as mysqlclient takes it.
+    return "zlib" if compress else None
 
 
 class Connection:
@@ -121,6 +134,8 @@ class Connection:
         server_public_key: PathArg | None = None,
         binary_prefix: bool = True,
         statement_cache_size: int = 32,
+        compress: bool | str = False,
+        zstd_level: int | None = None,
         read_default_file: PathArg | None = None,
         read_default_group: str | None = None,
     ) -> None:
@@ -139,8 +154,9 @@ class Connection:
         ``user``, ``password``, ``database``, ``socket``,
         ``default-character-set``, ``init-command``, ``connect-timeout``,
         ``ssl-mode``, ``ssl-ca``, ``ssl-cert``, ``ssl-key``,
-        ``server-public-key-path``, ``multi-statements`` and
-        ``return-found-rows``; other options are ignored.
+        ``server-public-key-path``, ``multi-statements``,
+        ``return-found-rows``, ``compress``, ``compression-algorithms`` and
+        ``zstd-compression-level``; other options are ignored.
 
         ``charset`` is the session's character set (default ``utf8mb4``;
         ``utf8`` means ``utf8mb4``): queries are encoded and text results
@@ -173,6 +189,13 @@ class Connection:
         ``install_as_MySQLdb()`` alias defaults to it, as mysqlclient does).
         Multi-byte legacy character sets (gbk, big5, sjis…) always get a
         hexadecimal ``X'…'``, which is binary on its own.
+
+        ``compress=True`` (or ``"zlib"``) uses the compressed protocol with
+        zlib, which pays off on slow or metered networks and costs CPU on
+        fast ones; ``compress="zstd"`` uses zstd (MySQL 8.0.18+) at
+        ``zstd_level`` (1 to 22, default 3), or zlib if the server offers no
+        zstd (MariaDB). A server that offers no compression at all gets an
+        uncompressed connection: :attr:`compression` says what was agreed.
 
         Prepared statements (:class:`~rustmy.cursors.PreparedCursor`) are
         prepared once per connection: the last ``statement_cache_size`` stay
@@ -215,6 +238,8 @@ class Connection:
                     "server_public_key": server_public_key,
                     "multi_statements": multi_statements,
                     "client_flag": client_flag,
+                    "compress": compress,
+                    "zstd_level": zstd_level,
                     # An ``ssl`` dict says all there is to say about TLS.
                     **(
                         {}
@@ -236,6 +261,7 @@ class Connection:
             server_public_key = args["server_public_key"]
             multi_statements = args["multi_statements"]
             client_flag = args["client_flag"]
+            compress, zstd_level = args["compress"], args["zstd_level"]
             if ssl is None:
                 ssl_mode, ssl_ca = args["ssl_mode"], args["ssl_ca"]
                 ssl_cert, ssl_key = args["ssl_cert"], args["ssl_key"]
@@ -270,6 +296,8 @@ class Connection:
             ),
             binary_prefix=binary_prefix,
             statement_cache_size=statement_cache_size,
+            compress=_compression(compress),
+            zstd_level=3 if zstd_level is None else zstd_level,
         )
         self.cursorclass = cursorclass
         #: Python types to SQL literal encoders (MySQLdb's attribute), from
@@ -536,6 +564,11 @@ class Connection:
     def tls(self) -> bool:
         """Whether the connection is encrypted with TLS."""
         return self._conn.tls
+
+    @property
+    def compression(self) -> str | None:
+        """Compression in use: ``"zlib"``, ``"zstd"`` or ``None``."""
+        return self._conn.compression
 
     @property
     def open(self) -> bool:

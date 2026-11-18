@@ -178,14 +178,20 @@ def style_axis(ax: Any, theme: Theme, title: str, longest: float) -> None:
     ax.spines["bottom"].set_color(theme.grid)
 
 
-def finish(fig: Any, theme: Theme, path: Path, title: str) -> None:
-    """Title, driver legend and save."""
-    handles = [Patch(color=theme.series[d], label=LABELS[d]) for d in DRIVERS]
+def finish(
+    fig: Any,
+    theme: Theme,
+    path: Path,
+    title: str,
+    drivers: tuple[str, ...] = DRIVERS,
+) -> None:
+    """Title, legend of ``drivers`` and save."""
+    handles = [Patch(color=theme.series[d], label=LABELS[d]) for d in drivers]
     fig.suptitle(title, x=0.01, y=0.995, ha="left", color=theme.text, fontsize=12)
     fig.legend(
         handles=handles,
         loc="upper left",
-        ncols=len(DRIVERS),
+        ncols=len(drivers),
         frameon=False,
         labelcolor=theme.text,
         fontsize=9,
@@ -256,7 +262,8 @@ def plot_sweep(run: dict[str, Any], theme: Theme, path: Path) -> None:
     first.set_yticks(range(len(names)), names, color=theme.text, fontsize=9)
     first.invert_yaxis()
     title = run.get("title", "executemany INSERT: throughput relative to mysqlclient")
-    finish(fig, theme, path, f"{title} ({run['python']})")
+    drivers = tuple(d for d in DRIVERS if d in run["drivers"])
+    finish(fig, theme, path, f"{title} ({run['python']})", drivers)
 
 
 def table(run: dict[str, Any]) -> str:
@@ -290,10 +297,14 @@ def table(run: dict[str, Any]) -> str:
     setup = (
         f"**{run['python']}** · {title}{sqlalchemy}{run['server']} · "
         f"{run['machine']} · "
-        f"rustmy {drivers['rustmy']}, mysqlclient {drivers['mysqlclient']}, "
-        f"PyMySQL {drivers['pymysql']} · best of {run['repeat']} · {run['date']}"
+        f"{driver_versions(drivers)} · best of {run['repeat']} · {run['date']}"
     )
     return f"{setup}\n\n{header}" + "\n".join(lines) + "\n"
+
+
+def driver_versions(drivers: dict[str, str]) -> str:
+    """The drivers of a run with their versions (PyMySQL may be absent)."""
+    return ", ".join(f"{LABELS[name]} {version}" for name, version in drivers.items())
 
 
 def sweep_table(run: dict[str, Any]) -> str:
@@ -324,8 +335,7 @@ def sweep_table(run: dict[str, Any]) -> str:
     drivers = run["drivers"]
     setup = (
         f"**{run['python']}** · {run['server']} · {run['machine']} · "
-        f"rustmy {drivers['rustmy']}, mysqlclient {drivers['mysqlclient']}, "
-        f"PyMySQL {drivers['pymysql']} · best of {run['repeat']} · {run['date']}"
+        f"{driver_versions(drivers)} · best of {run['repeat']} · {run['date']}"
     )
     return f"{setup}\n\n{header}" + "\n".join(lines) + "\n"
 

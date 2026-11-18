@@ -4,7 +4,8 @@ Checks that the wheel imports from its install location (not a source tree),
 carries the expected version and its third-party licenses, and keeps the GIL
 off on free-threaded Python. With ``RUSTMY_SMOKE_HOST`` set, it also runs real
 queries as root (the CI servers' account): TLS negotiation, parameters, the
-main types, a database of its own, ``executemany`` and streaming. Runs on
+main types, a database of its own, ``executemany``, streaming and the
+compressed protocol (zlib and zstd: the bundled C code runs). Runs on
 every supported Python, so no syntax newer than 3.10.
 
     RUSTMY_SMOKE_HOST=127.0.0.1 RUSTMY_SMOKE_PASSWORD=rustmy \\
@@ -99,9 +100,41 @@ def check_server(host: str) -> str:
         streamed = conn.cursor(SSCursor)
         streamed.execute("SELECT id, s FROM smoke ORDER BY id")
         expect(list(streamed) == rows, "streamed rows differ")
-        return f"server {conn.get_server_info()}, TLS {conn.tls}"
+        server, tls = conn.get_server_info(), conn.tls
     finally:
         conn.close()
+    return f"server {server}, TLS {tls}, {check_compression(host, server)}"
+
+
+def check_compression(host: str, server: str) -> str:
+    """Runs the bundled zlib and zstd (C) code both ways on this platform."""
+    agreed = []
+    for algorithm in ("zlib", "zstd"):
+        conn = rustmy.connect(
+            host=host,
+            port=int(os.environ.get("RUSTMY_SMOKE_PORT", "3306")),
+            user=os.environ.get("RUSTMY_SMOKE_USER", "root"),
+            password=os.environ.get("RUSTMY_SMOKE_PASSWORD", ""),
+            compress=algorithm,
+        )
+        try:
+            # MariaDB has no zstd and falls back to zlib.
+            wanted = "zlib" if "MariaDB" in server else algorithm
+            expect(
+                conn.compression == wanted,
+                f"compress={algorithm!r} agreed {conn.compression!r}",
+            )
+            cursor = conn.cursor()
+            text = "compressible " * 20_000
+            cursor.execute("SELECT %s, REPEAT('row', 50000)", (text,))
+            expect(
+                cursor.fetchone() == (text, "row" * 50_000),
+                f"{algorithm} payloads did not round-trip",
+            )
+            agreed.append(wanted)
+        finally:
+            conn.close()
+    return f"compression {'/'.join(agreed)}"
 
 
 def main() -> None:

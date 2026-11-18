@@ -23,6 +23,7 @@ use crate::buf::Reader;
 use crate::buf::put_nul_bytes;
 use crate::charset::handshake_collation;
 use crate::column::Column;
+use crate::compress::Compression;
 use crate::constants::capability;
 use crate::constants::command;
 use crate::constants::status;
@@ -32,6 +33,7 @@ use crate::handshake::HandshakeResponse;
 use crate::handshake::ServerHandshake;
 use crate::handshake::ssl_request;
 use crate::packet::PacketStream;
+use crate::packet::ReplyStart;
 use crate::result::QueryResult;
 use crate::result::RowPacket;
 use crate::result::RowSet;
@@ -107,6 +109,9 @@ pub struct Opts {
     pub server_public_key: Option<PathBuf>,
     /// Prepared statements kept per connection ([`Conn::execute_cached`]).
     pub statement_cache: usize,
+    /// Compressed protocol, if the server offers it: zstd falls back to
+    /// zlib, and no compression at all if the server offers neither.
+    pub compress: Option<Compression>,
 }
 
 impl Default for Opts {
@@ -126,6 +131,7 @@ impl Default for Opts {
             tls: TlsOpts::default(),
             server_public_key: None,
             statement_cache: DEFAULT_STATEMENT_CACHE,
+            compress: None,
         }
     }
 }
@@ -426,6 +432,10 @@ pub struct Conn {
     binary_reply: bool,
     /// Statements prepared by [`Conn::execute_cached`], by SQL.
     statements: StatementCache,
+    /// Compression in use, negotiated in the handshake.
+    compression: Option<Compression>,
+    /// zstd level sent in the handshake response.
+    zstd_level: u8,
 }
 
 impl Conn {
@@ -457,6 +467,19 @@ impl Conn {
         if use_tls {
             wanted |= capability::SSL;
         }
+        // With both flags the server picks zlib: ask for one only.
+        let zstd_offered = greeting.capabilities & capability::ZSTD_COMPRESSION_ALGORITHM != 0;
+        let (compression, zstd_level) = match opts.compress {
+            Some(Compression::Zstd { level }) if zstd_offered => {
+                wanted |= capability::ZSTD_COMPRESSION_ALGORITHM;
+                (Some(Compression::Zstd { level }), level)
+            }
+            Some(_) if greeting.capabilities & capability::COMPRESS != 0 => {
+                wanted |= capability::COMPRESS;
+                (Some(Compression::Zlib), 0)
+            }
+            _ => (None, 0),
+        };
         let capabilities = wanted & greeting.capabilities;
         let collation =
             handshake_collation(&opts.charset, greeting.collation, greeting.is_mariadb())
@@ -495,8 +518,13 @@ impl Conn {
             last_stream_id: 0,
             binary_reply: false,
             statements: StatementCache::new(opts.statement_cache),
+            compression,
+            zstd_level,
         };
         conn.authenticate(opts)?;
+        if let Some(algorithm) = compression {
+            conn.stream.compress(algorithm)?;
+        }
         Ok(conn)
     }
 
@@ -524,6 +552,12 @@ impl Conn {
         Ok(server_has_tls)
     }
 
+    /// Compression in use, if any.
+    #[must_use]
+    pub const fn compression(&self) -> Option<Compression> {
+        self.compression
+    }
+
     /// Whether the connection is encrypted with TLS.
     #[must_use]
     pub fn is_tls(&self) -> bool {
@@ -542,6 +576,7 @@ impl Conn {
             auth_response: &auth_response,
             database: opts.database.as_deref(),
             auth_plugin: plugin.name(),
+            zstd_level: self.zstd_level,
         }
         .encode()?;
         self.stream.write_packet(&response)?;
@@ -843,9 +878,9 @@ impl Conn {
         &mut self,
         statements: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<PipelineTotals> {
-        let reply_seqs = self.send_pipeline(command::QUERY, statements)?;
+        let replies = self.send_pipeline(command::QUERY, statements)?;
         let mut totals = PipelineTotals::default();
-        self.read_replies(&reply_seqs, &mut totals)?;
+        self.read_replies(&replies, &mut totals)?;
         Ok(totals)
     }
 
@@ -862,9 +897,8 @@ impl Conn {
         statements: impl IntoIterator<Item = &'a [u8]>,
         last: &'a [u8],
     ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
-        let reply_seqs =
-            self.send_pipeline(command::QUERY, statements.into_iter().chain([last]))?;
-        self.finish_pipeline_streamed(&reply_seqs)
+        let replies = self.send_pipeline(command::QUERY, statements.into_iter().chain([last]))?;
+        self.finish_pipeline_streamed(&replies)
     }
 
     /// Runs `sql` as a prepared statement once per item of `params`,
@@ -883,10 +917,10 @@ impl Conn {
         params: &[Execute],
     ) -> Result<PipelineTotals> {
         let payloads = self.execute_payloads(sql, params)?;
-        let reply_seqs =
+        let replies =
             self.send_pipeline(command::STMT_EXECUTE, payloads.iter().map(Vec::as_slice))?;
         let mut totals = PipelineTotals::default();
-        self.read_replies(&reply_seqs, &mut totals)?;
+        self.read_replies(&replies, &mut totals)?;
         Ok(totals)
     }
 
@@ -905,9 +939,9 @@ impl Conn {
     ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
         let mut payloads = self.execute_payloads(sql, params)?;
         payloads.extend(self.execute_payloads(sql, std::slice::from_ref(last))?);
-        let reply_seqs =
+        let replies =
             self.send_pipeline(command::STMT_EXECUTE, payloads.iter().map(Vec::as_slice))?;
-        self.finish_pipeline_streamed(&reply_seqs)
+        self.finish_pipeline_streamed(&replies)
     }
 
     /// `COM_STMT_EXECUTE` payloads of `sql` (prepared if needed) for each
@@ -925,14 +959,14 @@ impl Conn {
     /// [`Conn::pipeline_streamed`] leaves it.
     fn finish_pipeline_streamed(
         &mut self,
-        reply_seqs: &[u8],
+        replies: &[ReplyStart],
     ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
-        let (&last_seq, others) = reply_seqs
+        let (&last, others) = replies
             .split_last()
             .ok_or_else(|| Error::protocol("empty pipeline"))?;
         let mut totals = PipelineTotals::default();
         self.read_replies(others, &mut totals)?;
-        self.stream.expect_seq(last_seq);
+        self.stream.expect_reply(last);
         if let Some((_, err)) = totals.error.take() {
             // The last statement ran too: read its reply before reporting.
             match self.read_reply(&mut totals) {
@@ -945,23 +979,23 @@ impl Conn {
     }
 
     /// Sends one `cmd` (`COM_QUERY` or `COM_STMT_EXECUTE`) per payload in a
-    /// single write; returns the sequence id each reply starts at.
+    /// single write; returns where each reply starts.
     fn send_pipeline<'a>(
         &mut self,
         cmd: u8,
         payloads: impl IntoIterator<Item = &'a [u8]>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Vec<ReplyStart>> {
         self.drain_results()?;
-        let mut reply_seqs = Vec::new();
-        self.stream.write_commands(cmd, payloads, &mut reply_seqs)?;
+        let mut replies = Vec::new();
+        self.stream.write_commands(cmd, payloads, &mut replies)?;
         self.binary_reply = cmd == command::STMT_EXECUTE;
-        Ok(reply_seqs)
+        Ok(replies)
     }
 
-    /// Reads the replies starting at `reply_seqs`, adding them to `totals`.
-    fn read_replies(&mut self, reply_seqs: &[u8], totals: &mut PipelineTotals) -> Result<()> {
-        for (index, &seq) in reply_seqs.iter().enumerate() {
-            self.stream.expect_seq(seq);
+    /// Reads the replies starting at `replies`, adding them to `totals`.
+    fn read_replies(&mut self, replies: &[ReplyStart], totals: &mut PipelineTotals) -> Result<()> {
+        for (index, &start) in replies.iter().enumerate() {
+            self.stream.expect_reply(start);
             match self.read_reply(totals) {
                 Ok(()) => {}
                 Err(err @ Error::Server { .. }) => {

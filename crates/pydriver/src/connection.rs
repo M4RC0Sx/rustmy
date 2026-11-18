@@ -19,6 +19,7 @@ use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
 use pyo3::types::PyString;
 use pyo3::types::PyTuple;
+use rustmy_proto::Compression;
 use rustmy_proto::Conn;
 use rustmy_proto::Error as ProtoError;
 use rustmy_proto::Execute;
@@ -1271,6 +1272,17 @@ impl Connection {
         self.peek(Conn::is_tls)
     }
 
+    /// Compression in use: `"zlib"`, `"zstd"` or `None`.
+    #[getter]
+    fn compression(&self) -> PyResult<Option<&'static str>> {
+        self.peek(|conn| {
+            conn.compression().map(|algorithm| match algorithm {
+                Compression::Zlib => "zlib",
+                Compression::Zstd { .. } => "zstd",
+            })
+        })
+    }
+
     #[getter]
     fn closed(&self) -> bool {
         matches!(
@@ -1324,6 +1336,8 @@ impl Connection {
     server_public_key = None,
     binary_prefix = true,
     statement_cache_size = 32,
+    compress = None,
+    zstd_level = 3,
 ))]
 #[expect(
     clippy::too_many_arguments,
@@ -1349,7 +1363,26 @@ pub(crate) fn connect(
     server_public_key: Option<PathBuf>,
     binary_prefix: bool,
     statement_cache_size: usize,
+    compress: Option<&str>,
+    zstd_level: u8,
 ) -> PyResult<Connection> {
+    let compress = match compress {
+        None => None,
+        Some("zlib") => Some(Compression::Zlib),
+        Some("zstd") if (1..=22).contains(&zstd_level) => {
+            Some(Compression::Zstd { level: zstd_level })
+        }
+        Some("zstd") => {
+            return Err(PyValueError::new_err(format!(
+                "zstd_level must be between 1 and 22, got {zstd_level}"
+            )));
+        }
+        Some(other) => {
+            return Err(PyValueError::new_err(format!(
+                "invalid compress {other:?}; expected zlib or zstd"
+            )));
+        }
+    };
     let mode = SslMode::parse(ssl_mode).ok_or_else(|| {
         PyValueError::new_err(format!(
             "invalid ssl_mode {ssl_mode:?}; expected disabled, preferred, required, \
@@ -1384,6 +1417,7 @@ pub(crate) fn connect(
         },
         server_public_key,
         statement_cache: statement_cache_size,
+        compress,
     };
     let conn = py.detach(|| Conn::connect(&opts)).map_err(|err| {
         from_proto(err, Phase::Connect, &target, |message| {

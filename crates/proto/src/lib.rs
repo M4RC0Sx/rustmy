@@ -12,6 +12,7 @@ pub mod binary;
 mod buf;
 pub mod charset;
 mod column;
+mod compress;
 mod conn;
 pub mod constants;
 mod error;
@@ -27,6 +28,7 @@ mod tls;
 
 pub use binary::Execute;
 pub use column::Column;
+pub use compress::Compression;
 pub use conn::Conn;
 pub use conn::DEFAULT_STATEMENT_CACHE;
 pub use conn::Opts;

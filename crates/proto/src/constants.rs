@@ -7,6 +7,7 @@ pub mod capability {
     pub const FOUND_ROWS: u32 = 1 << 1;
     pub const LONG_FLAG: u32 = 1 << 2;
     pub const CONNECT_WITH_DB: u32 = 1 << 3;
+    pub const COMPRESS: u32 = 1 << 5;
     pub const LOCAL_FILES: u32 = 1 << 7;
     pub const PROTOCOL_41: u32 = 1 << 9;
     pub const SSL: u32 = 1 << 11;
@@ -20,6 +21,8 @@ pub mod capability {
     pub const PLUGIN_AUTH_LENENC_CLIENT_DATA: u32 = 1 << 21;
     pub const SESSION_TRACK: u32 = 1 << 23;
     pub const DEPRECATE_EOF: u32 = 1 << 24;
+    /// MySQL 8.0.18+: zstd for the compressed protocol.
+    pub const ZSTD_COMPRESSION_ALGORITHM: u32 = 1 << 26;
 }
 
 /// Server status flags reported in OK and EOF packets.
