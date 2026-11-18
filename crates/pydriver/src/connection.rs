@@ -32,6 +32,7 @@ use rustmy_proto::TlsOpts;
 use rustmy_proto::charset::charset_of;
 use rustmy_proto::constants::status;
 use rustmy_proto::sql::insert_values;
+use rustmy_proto::sql::mentions_local_infile;
 
 use crate::charset::Codec;
 use crate::charset::UTF8;
@@ -540,7 +541,13 @@ impl Connection {
         let template = query.to_str()?;
         let encoder = this.encoder()?;
         let budget = this.peek(Conn::pipeline_budget)?;
-        let max_pipeline = max_pipeline.max(1);
+        // The server reads whatever follows a LOAD DATA LOCAL as its file:
+        // one statement per window.
+        let max_pipeline = if mentions_local_infile(template.as_bytes()) {
+            1
+        } else {
+            max_pipeline.max(1)
+        };
         let mut window = Window::default();
         let mut statement = Vec::new();
         let mut rowcount = 0;
@@ -1338,6 +1345,8 @@ impl Connection {
     statement_cache_size = 32,
     compress = None,
     zstd_level = 3,
+    local_infile = false,
+    local_infile_dir = None,
 ))]
 #[expect(
     clippy::too_many_arguments,
@@ -1365,7 +1374,15 @@ pub(crate) fn connect(
     statement_cache_size: usize,
     compress: Option<&str>,
     zstd_level: u8,
+    local_infile: bool,
+    local_infile_dir: Option<PathBuf>,
 ) -> PyResult<Connection> {
+    if local_infile && local_infile_dir.is_none() {
+        return Err(PyValueError::new_err(
+            "local_infile=True needs local_infile_dir: LOAD DATA LOCAL INFILE \
+             only sends files from a directory you allow",
+        ));
+    }
     let compress = match compress {
         None => None,
         Some("zlib") => Some(Compression::Zlib),
@@ -1418,6 +1435,7 @@ pub(crate) fn connect(
         server_public_key,
         statement_cache: statement_cache_size,
         compress,
+        local_infile_dir,
     };
     let conn = py.detach(|| Conn::connect(&opts)).map_err(|err| {
         from_proto(err, Phase::Connect, &target, |message| {

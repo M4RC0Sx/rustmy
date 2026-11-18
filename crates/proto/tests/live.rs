@@ -1066,3 +1066,48 @@ fn compression_is_optional() {
         assert_eq!(conn.capabilities() & capability::COMPRESS, 0, "{server:?}");
     }
 }
+
+/// `LOAD DATA LOCAL INFILE` of a file inside `local_infile_dir`, a refused
+/// one outside it, and the connection still in sync afterwards.
+#[test]
+#[ignore = "needs a server"]
+fn local_infile_loads_files_from_the_directory() {
+    let base = std::env::temp_dir().join(format!("rustmy-live-infile-{}", std::process::id()));
+    let allowed = base.join("allowed");
+    std::fs::create_dir_all(&allowed).unwrap();
+    let allowed = std::fs::canonicalize(allowed).unwrap();
+    let inside = allowed.join("rows.csv");
+    // Over 16 MiB: several packets, and several compressed ones.
+    let rows = 300_000;
+    let mut contents = String::new();
+    for i in 0..rows {
+        std::fmt::Write::write_fmt(&mut contents, format_args!("{i},{i:>50}\n")).unwrap();
+    }
+    std::fs::write(&inside, contents).unwrap();
+    let outside = std::fs::canonicalize(&base).unwrap().join("outside.csv");
+    std::fs::write(&outside, "1,secret\n").unwrap();
+    for server in servers() {
+        let mut o = opts(server, "rustmy");
+        o.local_infile_dir = Some(allowed.clone());
+        let mut conn = Conn::connect(&o).unwrap();
+        conn.query(b"CREATE TEMPORARY TABLE loaded (id INT, s VARCHAR(64))")
+            .unwrap();
+        let load = |path: &std::path::Path| {
+            format!(
+                "LOAD DATA LOCAL INFILE '{}' INTO TABLE loaded FIELDS TERMINATED BY ','",
+                path.display()
+            )
+        };
+        let result = conn.query(load(&inside).as_bytes()).unwrap();
+        assert_eq!(result.affected_rows, rows, "{server:?}");
+        match conn.query(load(&outside).as_bytes()) {
+            Err(Error::LocalInfile(reason)) => {
+                assert!(reason.contains("outside local_infile_dir"), "{reason}");
+            }
+            other => panic!("{server:?}: expected a refusal, got {other:?}"),
+        }
+        let count = conn.query(b"SELECT COUNT(*) FROM loaded").unwrap();
+        assert_eq!(table(&count), [[rows.to_string()]], "{server:?}");
+    }
+    std::fs::remove_dir_all(base).unwrap();
+}

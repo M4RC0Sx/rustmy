@@ -58,7 +58,7 @@ def _with_option_file(
         raise err.ProgrammingError(0, str(exc)) from None
     merged = dict(given)
     for name, value in from_file.items():
-        if name == "multi_statements":
+        if name in {"multi_statements", "local_infile"}:
             merged[name] = bool(given[name]) or bool(value)
         elif name == "compress":
             merged[name] = given[name] or value
@@ -136,6 +136,8 @@ class Connection:
         statement_cache_size: int = 32,
         compress: bool | str = False,
         zstd_level: int | None = None,
+        local_infile: bool = False,
+        local_infile_dir: PathArg | None = None,
         read_default_file: PathArg | None = None,
         read_default_group: str | None = None,
     ) -> None:
@@ -155,8 +157,9 @@ class Connection:
         ``default-character-set``, ``init-command``, ``connect-timeout``,
         ``ssl-mode``, ``ssl-ca``, ``ssl-cert``, ``ssl-key``,
         ``server-public-key-path``, ``multi-statements``,
-        ``return-found-rows``, ``compress``, ``compression-algorithms`` and
-        ``zstd-compression-level``; other options are ignored.
+        ``return-found-rows``, ``compress``, ``compression-algorithms``,
+        ``zstd-compression-level``, ``local-infile`` and
+        ``load-data-local-dir``; other options are ignored.
 
         ``charset`` is the session's character set (default ``utf8mb4``;
         ``utf8`` means ``utf8mb4``): queries are encoded and text results
@@ -196,6 +199,18 @@ class Connection:
         ``zstd_level`` (1 to 22, default 3), or zlib if the server offers no
         zstd (MariaDB). A server that offers no compression at all gets an
         uncompressed connection: :attr:`compression` says what was agreed.
+
+        ``LOAD DATA LOCAL INFILE`` is off by default: the server names the
+        file the client sends, so a malicious one could ask for any file.
+        ``local_infile_dir`` turns it on for the files inside that directory
+        (resolved when connecting, symbolic links included); a request is
+        answered only if the statement being run names that very file and
+        the file, resolved too, is inside the directory. Anything else is
+        refused with :class:`~rustmy.err.OperationalError` 2068 and an empty
+        file, without reading the disk. Relative names start at the working
+        directory, as in other clients. ``local_infile=True`` is accepted for
+        compatibility but needs ``local_infile_dir``: rustmy never sends
+        files from anywhere.
 
         Prepared statements (:class:`~rustmy.cursors.PreparedCursor`) are
         prepared once per connection: the last ``statement_cache_size`` stay
@@ -240,6 +255,8 @@ class Connection:
                     "client_flag": client_flag,
                     "compress": compress,
                     "zstd_level": zstd_level,
+                    "local_infile": local_infile,
+                    "local_infile_dir": local_infile_dir,
                     # An ``ssl`` dict says all there is to say about TLS.
                     **(
                         {}
@@ -262,6 +279,8 @@ class Connection:
             multi_statements = args["multi_statements"]
             client_flag = args["client_flag"]
             compress, zstd_level = args["compress"], args["zstd_level"]
+            local_infile = args["local_infile"]
+            local_infile_dir = args["local_infile_dir"]
             if ssl is None:
                 ssl_mode, ssl_ca = args["ssl_mode"], args["ssl_ca"]
                 ssl_cert, ssl_key = args["ssl_cert"], args["ssl_key"]
@@ -298,6 +317,8 @@ class Connection:
             statement_cache_size=statement_cache_size,
             compress=_compression(compress),
             zstd_level=3 if zstd_level is None else zstd_level,
+            local_infile=bool(local_infile),
+            local_infile_dir=local_infile_dir,
         )
         self.cursorclass = cursorclass
         #: Python types to SQL literal encoders (MySQLdb's attribute), from

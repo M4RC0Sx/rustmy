@@ -118,6 +118,7 @@ pub(crate) mod client_code {
     pub(crate) const SERVER_LOST: u16 = 2013;
     pub(crate) const SSL_CONNECTION_ERROR: u16 = 2026;
     pub(crate) const MALFORMED_PACKET: u16 = 2027;
+    pub(crate) const LOCAL_INFILE_REJECTED: u16 = 2068;
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -175,6 +176,9 @@ pub(crate) fn from_proto(
             client_code::SSL_CONNECTION_ERROR,
             format!("TLS/SSL error: {message}"),
         )),
+        err @ ProtoError::LocalInfile(_) => {
+            OperationalError::new_err((client_code::LOCAL_INFILE_REJECTED, err.to_string()))
+        }
         ProtoError::Config(message) => InterfaceError::new_err((0, message)),
         ProtoError::Unsupported(message) => NotSupportedError::new_err((0, message)),
         err @ (ProtoError::ResultDiscarded | ProtoError::Parameters { .. }) => {

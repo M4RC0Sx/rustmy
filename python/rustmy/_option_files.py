@@ -201,6 +201,7 @@ _STRING_OPTIONS = {
     "ssl-cert": "ssl_cert",
     "ssl-key": "ssl_key",
     "server-public-key-path": "server_public_key",
+    "load-data-local-dir": "local_infile_dir",
 }
 #: Options that take a number.
 _NUMBER_OPTIONS = {
@@ -214,6 +215,7 @@ _FLAG_OPTIONS = {
     "multi-queries": "multi_statements",
     "return-found-rows": "found_rows",
     "compress": "compress",
+    "local-infile": "local_infile",
 }
 _FALSE = {"0", "false", "off", "no"}
 

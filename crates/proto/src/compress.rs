@@ -157,7 +157,7 @@ impl Compressed {
     /// Decompressed bytes not handed out yet, reading the next compressed
     /// packet when there are none.
     fn available(&mut self, source: &mut impl Read) -> Result<&[u8]> {
-        while self.pos == self.input.len() {
+        while self.pos >= self.input.len() {
             self.fill(source)?;
         }
         Ok(self.input.get(self.pos..).unwrap_or_default())
@@ -165,6 +165,10 @@ impl Compressed {
 
     /// Reads the next compressed packet and decompresses it into `input`.
     fn fill(&mut self, source: &mut impl Read) -> Result<()> {
+        // Whatever happens below, nothing old is left to hand out.
+        release(&mut self.input);
+        self.input.clear();
+        self.pos = 0;
         let mut header = [0u8; HEADER_LEN];
         source.read_exact(&mut header)?;
         let [c0, c1, c2, seq, u0, u1, u2] = header;
@@ -179,7 +183,6 @@ impl Compressed {
         let plain_len = usize::try_from(u32::from_le_bytes([u0, u1, u2, 0]))
             .map_err(|_| Error::protocol("packet length exceeds address space"))?;
         release(&mut self.wire);
-        release(&mut self.input);
         self.wire.clear();
         let read = source
             .take(u64::from(wire_len))
@@ -187,8 +190,6 @@ impl Compressed {
         if u64::try_from(read).ok() != Some(u64::from(wire_len)) {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
         }
-        self.input.clear();
-        self.pos = 0;
         if plain_len == 0 {
             std::mem::swap(&mut self.input, &mut self.wire);
             return Ok(());
@@ -209,6 +210,7 @@ impl Compressed {
                 .is_ok(),
         };
         if !complete || self.input.len() != plain_len {
+            self.input.clear();
             return Err(Error::protocol("corrupt compressed packet"));
         }
         Ok(())
@@ -412,6 +414,8 @@ mod tests {
                     "{algorithm:?} {declared}: {err}"
                 );
                 assert!(reader.input.capacity() < (1 << 20) + 4096);
+                // Nothing of it is handed out later.
+                assert_eq!(reader.input, b"");
             }
             if algorithm == Compression::Zlib {
                 let mut trailing = wire.clone();
@@ -440,6 +444,27 @@ mod tests {
                     .read_exact(&mut Cursor::new(truncated), &mut [0u8; 1])
                     .is_err()
             );
+        }
+    }
+
+    /// Found by the `session` fuzz target: a packet that failed to arrive
+    /// right after a large one (whose buffer was released) left the read
+    /// position past the end, and the next read spun forever on an empty
+    /// slice instead of failing.
+    #[test]
+    fn a_failed_read_after_a_large_packet_is_not_a_hang() {
+        let large = noise(2 << 20);
+        let mut writer = Compressed::new(Compression::Zlib).unwrap();
+        let mut wire = writer.encode(&large).to_vec();
+        // The next packet's header, and then the stream ends.
+        wire.extend_from_slice(&[10, 0, 0, writer.seq(), 0, 0, 0]);
+        let mut reader = Compressed::new(Compression::Zlib).unwrap();
+        let mut source = Cursor::new(wire);
+        let mut out = Vec::new();
+        reader.append(&mut source, &mut out, large.len()).unwrap();
+        assert_eq!(out, large);
+        for _ in 0..2 {
+            assert!(reader.read_exact(&mut source, &mut [0u8; 4]).is_err());
         }
     }
 

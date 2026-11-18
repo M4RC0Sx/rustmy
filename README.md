@@ -109,7 +109,10 @@ Or with uv: `uv add rustmy`. Wheels cover Linux (glibc and musl, x86_64 and
 aarch64), macOS (Intel and Apple Silicon) and Windows (x64 and arm64), for
 CPython 3.10 to 3.15 and the free-threaded 3.14t and 3.15t (3.11 and later on
 Windows arm64, where there is no official CPython 3.10). Every wheel is
-installed and tested before release.
+installed and tested before release. Elsewhere (FreeBSD, ppc64le, s390x,
+32-bit systems, a new Python before its wheels), pip builds rustmy from the
+source distribution, which needs a Rust toolchain and a C compiler (for the
+bundled zstd library).
 
 ## Usage
 
@@ -327,6 +330,42 @@ SQLAlchemy takes it in the URL (`?compress=zstd&zstd_level=3`), and option
 files through `compress`, `compression-algorithms` and
 `zstd-compression-level`.
 
+### Loading local files
+
+`LOAD DATA LOCAL INFILE` sends a file from the client's disk. It is off by
+default, because the server names the file the client sends: a malicious or
+compromised server could ask for any file, after any statement. Allow a
+directory to turn it on:
+
+```python
+conn = rustmy.connect(..., local_infile_dir="/srv/imports")
+cursor = conn.cursor()
+cursor.execute(
+    "LOAD DATA LOCAL INFILE %s INTO TABLE orders FIELDS TERMINATED BY ','",
+    ("/srv/imports/orders.csv",),
+)
+print(cursor.rowcount)  # rows loaded
+```
+
+A request is answered only when the statement being run is a `LOAD DATA
+LOCAL INFILE` (or `LOAD XML LOCAL INFILE`) that names that very file, and
+the file, with symbolic links and `..` resolved, is inside the directory.
+Anything else (another file, a request after a `SELECT`, a link pointing out
+of the directory) gets an empty file and raises `OperationalError` 2068,
+and nothing is read unless the statement named that file; the connection
+stays usable. Relative names start at
+the working directory, as in other clients. The file is streamed, never read
+into memory whole, with the GIL released, and compressed like everything else
+on a compressed connection. `executemany` runs these statements one at a
+time. The server must allow it too: MySQL 8.0+ turns `local_infile` off by
+default (MariaDB leaves it on). SQLAlchemy takes `?local_infile_dir=…` in the
+URL, and option files `load-data-local-dir`.
+
+Locally the server sets the pace and rustmy loads as fast as mysqlclient. On
+a 100 Mbit/s link a 45 MB file takes 4.9 s uncompressed with any driver and
+0.93 s with `compress="zstd"`
+([numbers](benches/README.md#phase-5-block-4-load-data-local-infile-2026-11-18-python-310)).
+
 ### Character sets
 
 `utf8mb4` is the default and the right choice for new code. Legacy character
@@ -464,13 +503,15 @@ pinned by a test:
   of the failing statement's window has already run (see
   [Many rows at once](#many-rows-at-once); `cursor.max_pipeline = 1` sends
   them one by one, as both drivers do).
+- `LOAD DATA LOCAL INFILE` needs `local_infile_dir`: `local_infile=True`
+  alone, which lets mysqlclient and PyMySQL send any file the server asks for,
+  raises `ValueError` (see [Loading local files](#loading-local-files)).
 
 ## Limitations
 
 - **New.** rustmy is tested extensively but has no long production history
   yet. Please report anything that behaves differently from what you expect.
 - **Synchronous only.** No asyncio API yet.
-- **Not yet supported:** `LOAD DATA LOCAL INFILE`.
 - **Latency-bound workloads** (many tiny queries, one after another) gain
   little: the network dominates them with any driver. `executemany` is the
   exception: it pipelines its statements.
