@@ -213,42 +213,66 @@ impl Converter {
         &self,
         py: Python<'py>,
         rows: &RowSet,
+        push: impl FnMut(Bound<'py, PyAny>),
+    ) -> PyResult<()> {
+        // Decided once per batch: each protocol gets its own loop, so text
+        // rows (every query but prepared ones) pay nothing for binary ones.
+        if rows.is_binary() {
+            self.convert_rows::<true>(py, rows, push)
+        } else {
+            self.convert_rows::<false>(py, rows, push)
+        }
+    }
+
+    fn convert_rows<'py, const BINARY: bool>(
+        &self,
+        py: Python<'py>,
+        rows: &RowSet,
         mut push: impl FnMut(Bound<'py, PyAny>),
     ) -> PyResult<()> {
         let decimal = self.decimal.as_ref().map(|d| d.bind(py));
         let codec = &*self.codec;
         let custom = &self.custom;
-        let binary = rows.is_binary();
-        let cell_value = |cell: Option<&[u8]>, kind: Kind, column: &BinaryColumn| match (cell, kind)
-        {
-            (None, _) => Ok(py.None().into_bound(py)),
-            (Some(bytes), Kind::Custom { index, text }) if binary => {
-                let text_form =
-                    binary::to_text(column.column_type, column.unsigned, column.decimals, bytes)
-                        .ok_or_else(|| invalid(kind, bytes))?;
-                custom_value(py, custom, index, text, &text_form)
+        let cell_value = |cell: Option<&[u8]>, kind: Kind, index: usize| {
+            let Some(bytes) = cell else {
+                return Ok(py.None().into_bound(py));
+            };
+            if !BINARY {
+                return match kind {
+                    Kind::Custom { index, text } => custom_value(py, custom, index, text, bytes),
+                    _ => value(py, kind, bytes, decimal, codec),
+                };
             }
-            (Some(bytes), Kind::Custom { index, text }) => {
-                custom_value(py, custom, index, text, bytes)
+            let column = *self.binary.get(index).ok_or_else(|| invalid(kind, bytes))?;
+            match kind {
+                Kind::Custom { index, text } => {
+                    let text_form = binary::to_text(
+                        column.column_type,
+                        column.unsigned,
+                        column.decimals,
+                        bytes,
+                    )
+                    .ok_or_else(|| invalid(kind, bytes))?;
+                    custom_value(py, custom, index, text, &text_form)
+                }
+                _ => binary_value(py, kind, column, bytes, decimal, codec),
             }
-            (Some(bytes), _) if binary => binary_value(py, kind, *column, bytes, decimal, codec),
-            (Some(bytes), _) => value(py, kind, bytes, decimal, codec),
         };
         if let Some(keys) = &self.keys {
             for row in rows.rows() {
                 let dict = PyDict::new(py);
-                for (((cell, &kind), column), key) in
-                    row.cells().zip(&self.kinds).zip(&self.binary).zip(keys)
+                for (index, ((cell, &kind), key)) in
+                    row.cells().zip(&self.kinds).zip(keys).enumerate()
                 {
-                    dict.set_item(key.bind(py), cell_value(cell, kind, column)?)?;
+                    dict.set_item(key.bind(py), cell_value(cell, kind, index)?)?;
                 }
                 push(dict.into_any());
             }
         } else {
             let mut values = Vec::with_capacity(self.kinds.len());
             for row in rows.rows() {
-                for ((cell, &kind), column) in row.cells().zip(&self.kinds).zip(&self.binary) {
-                    values.push(cell_value(cell, kind, column)?);
+                for (index, (cell, &kind)) in row.cells().zip(&self.kinds).enumerate() {
+                    values.push(cell_value(cell, kind, index)?);
                 }
                 push(PyTuple::new(py, values.drain(..))?.into_any());
             }

@@ -96,7 +96,7 @@ fn push_fmt(out: &mut Vec<u8>, args: fmt::Arguments<'_>) {
     let _ = out.write_fmt(args);
 }
 
-/// A placeholder of a query template.
+/// A placeholder of a query template, as `PreparedSql` keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Slot {
     /// `%s`: the next item of a sequence.
@@ -105,13 +105,37 @@ pub(crate) enum Slot {
     Named(String),
 }
 
-/// Splits `template` into text (with `%%` already turned into `%`) and
-/// placeholders, in order.
-fn walk_template(
-    template: &str,
-    mut on_text: impl FnMut(&str) -> PyResult<()>,
-    mut on_slot: impl FnMut(Slot) -> PyResult<()>,
-) -> PyResult<()> {
+/// A placeholder while walking a template: the name borrowed from it.
+#[derive(Debug, Clone, Copy)]
+enum Placeholder<'a> {
+    Positional,
+    Named(&'a str),
+}
+
+impl Slot {
+    fn placeholder(&self) -> Placeholder<'_> {
+        match self {
+            Self::Positional => Placeholder::Positional,
+            Self::Named(name) => Placeholder::Named(name),
+        }
+    }
+}
+
+/// What [`walk_template`] does with each piece of a template. A trait
+/// rather than closures: both writers share one buffer, and each
+/// implementation gets its own copy of the loop (this is the hot path of
+/// every `execute`).
+trait TemplateSink<'t> {
+    /// A run of literal text (never empty).
+    fn text(&mut self, text: &'t str) -> PyResult<()>;
+    /// `%%`.
+    fn percent(&mut self);
+    fn placeholder(&mut self, placeholder: Placeholder<'t>) -> PyResult<()>;
+}
+
+/// Splits `template` into text, `%%` and placeholders, in order.
+#[inline]
+fn walk_template<'t>(template: &'t str, sink: &mut impl TemplateSink<'t>) -> PyResult<()> {
     let mut run_start = 0;
     let mut pos = 0;
     let bytes = template.as_bytes();
@@ -121,14 +145,14 @@ fn walk_template(
     {
         let percent = pos + offset;
         // `%` is ASCII, so these are character boundaries.
-        on_text(template.get(run_start..percent).unwrap_or_default())?;
+        text_run(sink, template, run_start, percent)?;
         match bytes.get(percent + 1) {
             Some(b'%') => {
-                on_text("%")?;
+                sink.percent();
                 pos = percent + 2;
             }
             Some(b's') => {
-                on_slot(Slot::Positional)?;
+                sink.placeholder(Placeholder::Positional)?;
                 pos = percent + 2;
             }
             Some(b'(') => {
@@ -145,7 +169,7 @@ fn walk_template(
                 }
                 // `(` and `)` are ASCII: character boundaries.
                 let name = template.get(name_start..close).unwrap_or_default();
-                on_slot(Slot::Named(name.to_owned()))?;
+                sink.placeholder(Placeholder::Named(name))?;
                 pos = close + 2;
             }
             other => {
@@ -160,18 +184,31 @@ fn walk_template(
         }
         run_start = pos;
     }
-    on_text(template.get(run_start..).unwrap_or_default())
+    text_run(sink, template, run_start, template.len())
 }
 
-/// The parameter for `slot`, the next positional one being
+#[inline]
+fn text_run<'t>(
+    sink: &mut impl TemplateSink<'t>,
+    template: &'t str,
+    start: usize,
+    end: usize,
+) -> PyResult<()> {
+    match template.get(start..end) {
+        Some(run) if !run.is_empty() => sink.text(run),
+        _ => Ok(()),
+    }
+}
+
+/// The parameter for `placeholder`, the next positional one being
 /// `next_positional`.
 fn slot_value<'a, 'py>(
-    slot: &Slot,
+    placeholder: Placeholder<'_>,
     args: &'a Args<'py>,
     next_positional: &mut usize,
 ) -> PyResult<std::borrow::Cow<'a, Bound<'py, PyAny>>> {
-    match (slot, args) {
-        (Slot::Positional, Args::Positional(values)) => {
+    match (placeholder, args) {
+        (Placeholder::Positional, Args::Positional(values)) => {
             let value = values.get(*next_positional).ok_or_else(|| {
                 programming_error(format!(
                     "not enough parameters: the query has more than {} %s placeholders",
@@ -181,14 +218,14 @@ fn slot_value<'a, 'py>(
             *next_positional += 1;
             Ok(std::borrow::Cow::Borrowed(value))
         }
-        (Slot::Positional, Args::Named(_)) => Err(programming_error(
+        (Placeholder::Positional, Args::Named(_)) => Err(programming_error(
             "%s placeholder used with mapping parameters; use %(name)s",
         )),
-        (Slot::Named(name), Args::Named(mapping)) => mapping
-            .get_item(name.as_str())
+        (Placeholder::Named(name), Args::Named(mapping)) => mapping
+            .get_item(name)
             .map(std::borrow::Cow::Owned)
             .map_err(|_| programming_error(format!("missing parameter {name:?}"))),
-        (Slot::Named(name), Args::Positional(_)) => Err(programming_error(format!(
+        (Placeholder::Named(name), Args::Positional(_)) => Err(programming_error(format!(
             "%({name})s placeholder needs mapping parameters"
         ))),
     }
@@ -215,6 +252,68 @@ pub(crate) struct PreparedSql {
     pub(crate) slots: Vec<Slot>,
 }
 
+/// Interpolation: placeholders become literals.
+struct Interpolate<'a, 'py> {
+    py: Python<'py>,
+    encoder: &'a Encoder,
+    out: &'a mut Vec<u8>,
+    args: &'a Args<'py>,
+    next_positional: usize,
+}
+
+impl<'t> TemplateSink<'t> for Interpolate<'_, '_> {
+    #[inline]
+    fn text(&mut self, text: &'t str) -> PyResult<()> {
+        self.encoder.codec.encode_into(self.py, self.out, text)
+    }
+
+    #[inline]
+    fn percent(&mut self) {
+        // ASCII in every connection character set.
+        self.out.push(b'%');
+    }
+
+    #[inline]
+    fn placeholder(&mut self, placeholder: Placeholder<'t>) -> PyResult<()> {
+        // `%s` with a sequence, by far the most common, without the `Cow`.
+        if let (Placeholder::Positional, Args::Positional(values)) = (placeholder, self.args)
+            && let Some(value) = values.get(self.next_positional)
+        {
+            self.next_positional += 1;
+            return self.encoder.literal(self.out, value);
+        }
+        let value = slot_value(placeholder, self.args, &mut self.next_positional)?;
+        self.encoder.literal(self.out, &value)
+    }
+}
+
+/// Preparation: placeholders become `?`, remembered in order.
+struct Prepare<'a, 'py> {
+    py: Python<'py>,
+    encoder: &'a Encoder,
+    sql: Vec<u8>,
+    slots: Vec<Slot>,
+}
+
+impl<'t> TemplateSink<'t> for Prepare<'_, '_> {
+    fn text(&mut self, text: &'t str) -> PyResult<()> {
+        self.encoder.codec.encode_into(self.py, &mut self.sql, text)
+    }
+
+    fn percent(&mut self) {
+        self.sql.push(b'%');
+    }
+
+    fn placeholder(&mut self, placeholder: Placeholder<'t>) -> PyResult<()> {
+        self.sql.push(b'?');
+        self.slots.push(match placeholder {
+            Placeholder::Positional => Slot::Positional,
+            Placeholder::Named(name) => Slot::Named(name.to_owned()),
+        });
+        Ok(())
+    }
+}
+
 impl Encoder {
     /// Appends `template` with its placeholders replaced by `args`.
     pub(crate) fn interpolate(
@@ -224,37 +323,30 @@ impl Encoder {
         template: &str,
         args: &Args<'_>,
     ) -> PyResult<()> {
-        let mut next_positional = 0;
-        // Both callbacks write to `out`.
-        let out = std::cell::RefCell::new(out);
-        walk_template(
-            template,
-            |text| self.codec.encode_into(py, &mut out.borrow_mut(), text),
-            |slot| {
-                let value = slot_value(&slot, args, &mut next_positional)?;
-                self.literal(&mut out.borrow_mut(), &value)
-            },
-        )?;
-        check_all_used(args, next_positional)
+        let mut sink = Interpolate {
+            py,
+            encoder: self,
+            out,
+            args,
+            next_positional: 0,
+        };
+        walk_template(template, &mut sink)?;
+        check_all_used(args, sink.next_positional)
     }
 
     /// `template` with `?` for each placeholder (`%s`, `%(name)s`) and `%`
     /// for each `%%`, for `COM_STMT_PREPARE`.
     pub(crate) fn prepared_sql(&self, py: Python<'_>, template: &str) -> PyResult<PreparedSql> {
-        let sql = std::cell::RefCell::new(Vec::with_capacity(template.len()));
-        let mut slots = Vec::new();
-        walk_template(
-            template,
-            |text| self.codec.encode_into(py, &mut sql.borrow_mut(), text),
-            |slot| {
-                sql.borrow_mut().push(b'?');
-                slots.push(slot);
-                Ok(())
-            },
-        )?;
+        let mut sink = Prepare {
+            py,
+            encoder: self,
+            sql: Vec::with_capacity(template.len()),
+            slots: Vec::new(),
+        };
+        walk_template(template, &mut sink)?;
         Ok(PreparedSql {
-            sql: sql.into_inner(),
-            slots,
+            sql: sink.sql,
+            slots: sink.slots,
         })
     }
 
@@ -269,7 +361,7 @@ impl Encoder {
         let mut next_positional = 0;
         let mut scratch = Vec::new();
         for slot in slots {
-            let value = slot_value(slot, args, &mut next_positional)?;
+            let value = slot_value(slot.placeholder(), args, &mut next_positional)?;
             self.bind_value(py, execute, &mut scratch, &value)?;
         }
         check_all_used(args, next_positional)
