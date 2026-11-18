@@ -209,8 +209,10 @@ def sweep_label(config: str, run: dict[str, Any]) -> str:
 
 
 def panel_title(panel: dict[str, Any]) -> str:
-    title: str = panel.get("label", f"{panel['rows']:,} rows")
-    return title
+    if "label" in panel:
+        label: str = panel["label"]
+        return label
+    return f"{panel['rows']:,} rows"
 
 
 def driver_of(config: str) -> str:

@@ -19,6 +19,13 @@ if TYPE_CHECKING:
     from tests.conftest import Server
 
 
+@pytest.fixture(params=["text", "prepared"])
+def cursor(conn: rustmy.Connection, request: pytest.FixtureRequest) -> rustmy.Cursor:
+    """Every test runs with a Cursor and with a PreparedCursor, which batch
+    and pipeline the same way (as text, or with typed parameters)."""
+    return conn.cursor(prepared=request.param == "prepared")
+
+
 @pytest.fixture
 def table(cursor: rustmy.Cursor) -> str:
     cursor.execute(

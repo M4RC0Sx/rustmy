@@ -115,3 +115,5 @@ jobs:
         env:
           RUSTMY_TEST_SERVERS: mysql,mariadb
       - run: uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db mysql --db mariadb
+      # Again with every statement prepared (?cursorclass=PreparedCursor).
+      - run: uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db mysql_prepared --db mariadb_prepared

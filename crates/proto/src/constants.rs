@@ -35,6 +35,9 @@ pub(crate) mod command {
     pub(crate) const QUIT: u8 = 0x01;
     pub(crate) const INIT_DB: u8 = 0x02;
     pub(crate) const QUERY: u8 = 0x03;
+    pub(crate) const STMT_PREPARE: u8 = 0x16;
+    pub(crate) const STMT_EXECUTE: u8 = 0x17;
+    pub(crate) const STMT_CLOSE: u8 = 0x19;
     pub(crate) const PING: u8 = 0x0E;
     pub(crate) const CHANGE_USER: u8 = 0x11;
     pub(crate) const RESET_CONNECTION: u8 = 0x1F;

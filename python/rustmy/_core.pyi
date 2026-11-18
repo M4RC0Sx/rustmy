@@ -39,6 +39,20 @@ class Connection:
         as_dict: bool = False,
         batch_bytes: int = 4096,
     ) -> StreamedResult: ...
+    def execute_prepared(
+        self,
+        query: str,
+        args: object = None,
+        as_dict: bool = False,
+        batch_bytes: int = 4096,
+    ) -> QueryResult: ...
+    def execute_prepared_streamed(
+        self,
+        query: str,
+        args: object = None,
+        as_dict: bool = False,
+        batch_bytes: int = 4096,
+    ) -> StreamedResult: ...
     def mogrify(self, query: str, args: object = None) -> str: ...
     def literal(self, value: object, /) -> str: ...
     def decode_statement(self, statement: bytes, /) -> str: ...
@@ -74,6 +88,17 @@ class Connection:
         as_dict: bool = False,
         batch_bytes: int = 4096,
     ) -> tuple[StreamedResult, int, bytes] | None: ...
+    def executemany_prepared_insert(
+        self, query: str, seq_of_args: Iterable[object], max_stmt_length: int
+    ) -> tuple[int, int | None, bytes | None] | None: ...
+    def executemany_prepared(
+        self,
+        query: str,
+        seq_of_args: Iterable[object],
+        max_pipeline: int,
+        as_dict: bool = False,
+        batch_bytes: int = 4096,
+    ) -> tuple[QueryResult, int, bytes] | None: ...
     def next_result(
         self, as_dict: bool = False, batch_bytes: int = 4096
     ) -> QueryResult | None: ...
@@ -130,6 +155,7 @@ def connect(
     ssl_key: str | PathLike[str] | None = None,
     server_public_key: str | PathLike[str] | None = None,
     binary_prefix: bool = True,
+    statement_cache_size: int = 32,
 ) -> Connection: ...
 def literal(value: object, no_backslash_escapes: bool = False) -> str: ...
 def escape_string(value: str, no_backslash_escapes: bool = False) -> str: ...

@@ -874,3 +874,72 @@ Times per driver; the fastest is in bold. Ratios above 1 mean rustmy is faster.
 | UPDATE matching no row (10,000 rows) | 30429.2 ms | 2498.4 ms | 792.3 ms | 252.4 ms | **185.9 ms** |
 | DELETE by primary key (10,000 rows) | 33444.8 ms | 3930.1 ms | 1174.7 ms | 815.5 ms | **788.3 ms** |
 <!-- results:phase5-block2:end -->
+
+## Phase 5, block 3: prepared statements (2026-11-17, Python 3.10)
+
+`PreparedCursor` runs server-side prepared statements over the binary
+protocol: typed parameters, binary rows, one prepare per statement and
+connection. `prepared.py` compares it with rustmy's own `Cursor`,
+mysqlclient and PyMySQL on the same table (int, bigint, varchar, double,
+datetime, date, decimal), every scenario passing its values as parameters:
+
+```sh
+uv run --no-sync python benches/prepared.py --repeat 5 \
+    --json benches/results/phase5-block3-prepared-py310.json
+uv run --no-sync python benches/prepared.py --repeat 5 --port 13307 \
+    --json benches/results/phase5-block3-prepared-mariadb-py310.json
+uv run --no-sync python benches/report.py --section phase5-block3 \
+    benches/results/phase5-block3-prepared-py310.json
+uv run --no-sync python benches/report.py --section phase5-block3-mariadb \
+    --output benches/results/phase5-block3-mariadb \
+    benches/results/phase5-block3-prepared-mariadb-py310.json
+```
+
+MySQL 8.4:
+
+<!-- results:phase5-block3:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase5-block3-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase5-block3-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-17T21:31:07+00:00
+
+| Configuration | fetchall 100k mixed rows | 10k SELECT by primary key | executemany INSERT 10k rows | executemany UPDATE 10k rows | vs mysqlclient (fetchall 100k mixed rows) | vs mysqlclient (10k SELECT by primary key) | vs mysqlclient (executemany INSERT 10k rows) | vs mysqlclient (executemany UPDATE 10k rows) |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| mysqlclient | 162.6 ms | 940.2 ms | 71.1 ms | 1237.6 ms | 1.00x | 1.00x | 1.00x | 1.00x |
+| PyMySQL | 473.9 ms | 1261.9 ms | 73.7 ms | 1182.9 ms | 0.34x | 0.75x | 0.96x | 1.05x |
+| rustmy Cursor (default) | 45.1 ms | 807.6 ms | **36.6 ms** | **684.6 ms** | 3.60x | 1.16x | 1.94x | 1.81x |
+| rustmy PreparedCursor | **25.0 ms** | **739.1 ms** | 53.1 ms | 690.0 ms | 6.51x | 1.27x | 1.34x | 1.79x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:phase5-block3:end -->
+
+MariaDB 11.4:
+
+<!-- results:phase5-block3-mariadb:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase5-block3-mariadb-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase5-block3-mariadb-light.svg">
+</picture>
+
+**CPython 3.10.19** · 11.4.13-MariaDB-ubu2404 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-17T21:31:57+00:00
+
+| Configuration | fetchall 100k mixed rows | 10k SELECT by primary key | executemany INSERT 10k rows | executemany UPDATE 10k rows | vs mysqlclient (fetchall 100k mixed rows) | vs mysqlclient (10k SELECT by primary key) | vs mysqlclient (executemany INSERT 10k rows) | vs mysqlclient (executemany UPDATE 10k rows) |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| mysqlclient | 164.9 ms | 818.8 ms | 60.8 ms | 777.0 ms | 1.00x | 1.00x | 1.00x | 1.00x |
+| PyMySQL | 469.5 ms | 1256.4 ms | 69.1 ms | 862.7 ms | 0.35x | 0.65x | 0.88x | 0.90x |
+| rustmy Cursor (default) | 47.4 ms | 788.5 ms | 25.8 ms | 232.9 ms | 3.48x | 1.04x | 2.35x | 3.34x |
+| rustmy PreparedCursor | **23.8 ms** | **754.8 ms** | **18.8 ms** | **215.4 ms** | 6.94x | 1.08x | 3.23x | 3.61x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:phase5-block3-mariadb:end -->
+
+What the numbers say: reading is where prepared statements pay off, with
+about half the time of `Cursor` for the same rows (the server sends numbers
+and dates in binary, a third less data here, and nothing is parsed). A
+statement already prepared saves the server its parsing, which shows a
+little in short lookups. Batches are on par with `Cursor`: `UPDATE`s are
+pipelined the same way, and `INSERT … VALUES` becomes multi-row prepared
+statements, faster than `Cursor`'s multi-row text on MariaDB and slower on
+MySQL (still ahead of both other drivers).

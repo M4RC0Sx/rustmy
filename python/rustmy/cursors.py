@@ -3,6 +3,8 @@
 :class:`Cursor` and :class:`DictCursor` read the whole result set when
 ``execute`` runs; :class:`SSCursor` and :class:`SSDictCursor` stream it,
 reading rows from the server in batches as they are fetched.
+:class:`PreparedCursor` and :class:`PreparedDictCursor` run server-side
+prepared statements (the binary protocol).
 """
 
 from __future__ import annotations
@@ -142,12 +144,13 @@ class Cursor:
         connection = self._get_connection()
         self._clear()
         self._last = (query, args)
-        self._set_result(
-            connection._execute(  # noqa: SLF001
-                query, args, as_dict=self._as_dict, batch_bytes=self._batch_bytes
-            )
-        )
+        self._set_result(self._run(connection, query, args))
         return self.rowcount
+
+    def _run(self, connection: Connection, query: str, args: Params) -> QueryResult:
+        return connection._execute(  # noqa: SLF001
+            query, args, as_dict=self._as_dict, batch_bytes=self._batch_bytes
+        )
 
     def executemany(self, query: str, seq_of_args: Iterable[Params]) -> int:
         """Run ``query`` once per item of ``seq_of_args``.
@@ -172,17 +175,21 @@ class Cursor:
             query, seq_of_args, self.max_stmt_length
         )
         if batched is not None:
-            rowcount, lastrowid, last_statement = batched
-            self.description = None
-            self._rows = ()
-            self._pos = 0
-            self.rowcount = rowcount
-            if lastrowid is not None:
-                self.lastrowid = lastrowid
-            if last_statement is not None:
-                self._last = last_statement
-            return rowcount
+            return self._set_batched(batched)
         return self._executemany_pipelined(connection, query, seq_of_args)
+
+    def _set_batched(self, batched: tuple[int, int | None, bytes | None]) -> int:
+        """The outcome of an ``executemany`` batched into multi-row INSERTs."""
+        rowcount, lastrowid, last_statement = batched
+        self.description = None
+        self._rows = ()
+        self._pos = 0
+        self.rowcount = rowcount
+        if lastrowid is not None:
+            self.lastrowid = lastrowid
+        if last_statement is not None:
+            self._last = last_statement
+        return rowcount
 
     def _executemany_pipelined(
         self, connection: Connection, query: str, seq_of_args: Iterable[Params]
@@ -311,6 +318,95 @@ class DictCursor(Cursor):
         def fetchmany(self, size: int | None = None) -> tuple[DictRow, ...]: ...  # type: ignore[override]
         def fetchall(self) -> tuple[DictRow, ...]: ...  # type: ignore[override]
         def __iter__(self) -> Iterator[DictRow]: ...  # type: ignore[override]
+
+
+class PreparedCursor(Cursor):
+    """Buffered cursor running server-side prepared statements.
+
+    The query's ``%s`` / ``%(name)s`` placeholders become ``?`` (``%%`` a
+    literal ``%``) and it is prepared once per connection: the
+    ``statement_cache_size`` most recent statements stay prepared. Parameters
+    travel as typed values (the binary protocol), never as SQL text, so
+    nothing depends on escaping. Rows come back as the same objects a
+    :class:`Cursor` returns.
+
+    A query without placeholders has nothing to bind and runs as with a
+    :class:`Cursor`, through the text protocol: DDL and introspection
+    statements behave as libraries expect (the server cannot prepare some of
+    them, and answers others differently when prepared). One with
+    placeholders the server cannot prepare raises its error (1295).
+
+    Parameters are typed values only: a sequence (``IN %s``) or a type with
+    a ``conv=`` encoder raises :class:`~rustmy.err.NotSupportedError`.
+    """
+
+    def _run(self, connection: Connection, query: str, args: Params) -> QueryResult:
+        return connection._execute_prepared(  # noqa: SLF001
+            query, args, as_dict=self._as_dict, batch_bytes=self._batch_bytes
+        )
+
+    def executemany(self, query: str, seq_of_args: Iterable[Params]) -> int:
+        """Run the prepared ``query`` once per item of ``seq_of_args``.
+
+        As with :meth:`Cursor.executemany`, a single-row ``INSERT``/
+        ``REPLACE … VALUES (…)`` becomes multi-row statements (prepared, with
+        the same number of rows each so that the statement is reused; at
+        most :attr:`~Cursor.max_stmt_length` bytes of parameters), and other
+        statements are pipelined: up to :attr:`~Cursor.max_pipeline`
+        executions go to the server before their replies are read, and an
+        error stops the batch at the end of its window. Returns the total
+        number of affected rows; the cursor keeps the last execution's
+        result.
+        """
+        connection = self._get_connection()
+        self._clear()
+        batched = connection._executemany_prepared_insert(  # noqa: SLF001
+            query, seq_of_args, self.max_stmt_length
+        )
+        if batched is not None:
+            return self._set_batched(batched)
+        pipelined = connection._executemany_prepared(  # noqa: SLF001
+            query,
+            seq_of_args,
+            self.max_pipeline,
+            as_dict=self._as_dict,
+            batch_bytes=self._batch_bytes,
+        )
+        if pipelined is None:
+            self.rowcount = 0
+            return 0
+        result, before, last_statement = pipelined
+        self._set_result(result)
+        self._last = last_statement
+        self.rowcount += before
+        return self.rowcount
+
+
+class PreparedDictCursor(PreparedCursor):
+    """:class:`PreparedCursor` returning each row as a dict, as
+    :class:`DictCursor` does."""
+
+    _as_dict = True
+
+    if TYPE_CHECKING:
+
+        def fetchone(self) -> DictRow | None: ...  # type: ignore[override]
+        def fetchmany(self, size: int | None = None) -> tuple[DictRow, ...]: ...  # type: ignore[override]
+        def fetchall(self) -> tuple[DictRow, ...]: ...  # type: ignore[override]
+        def __iter__(self) -> Iterator[DictRow]: ...  # type: ignore[override]
+
+
+def prepared_variant(cursorclass: type[Cursor]) -> type[Cursor]:
+    """The prepared-statement version of ``cursorclass``
+    (``cursor(prepared=True)``)."""
+    if issubclass(cursorclass, PreparedCursor):
+        return cursorclass
+    if cursorclass is Cursor:
+        return PreparedCursor
+    if cursorclass is DictCursor:
+        return PreparedDictCursor
+    msg = f"no prepared-statement version of {cursorclass.__name__}"
+    raise NotSupportedError(0, msg)
 
 
 class SSCursor(Cursor):

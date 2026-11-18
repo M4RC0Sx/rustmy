@@ -839,3 +839,92 @@ fn pipelined_statements_run_in_order_past_an_error() {
         assert_eq!(table(&conn.query(b"SELECT 2").unwrap()), [["2"]]);
     }
 }
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn prepared_statements_bind_and_read_binary_rows() {
+    use rustmy_proto::Execute;
+    use rustmy_proto::binary;
+
+    for server in servers() {
+        let mut conn = connect(server);
+        let statement = conn
+            .prepare(b"SELECT ?, ?, ?, ?, ?, CAST(? AS DATE)")
+            .unwrap();
+        assert_eq!(statement.params, 6, "{server:?}");
+        assert_eq!(statement.columns.len(), 6, "{server:?}");
+        let mut params = Execute::default();
+        params.int(-7);
+        params.uint(u64::MAX);
+        params.double(2.5);
+        params.text(b"text");
+        params.null();
+        params.date(2026, 11, 17);
+        let result = conn.execute(&params.finish(statement.id)).unwrap();
+        assert!(result.rows.is_binary());
+        let row: Vec<Option<Vec<u8>>> = result
+            .rows
+            .rows()
+            .next()
+            .unwrap()
+            .cells()
+            .map(|c| c.map(<[u8]>::to_vec))
+            .collect();
+        assert_eq!(binary::signed(row[0].as_deref().unwrap()), Some(-7));
+        assert_eq!(binary::unsigned(row[1].as_deref().unwrap()), Some(u64::MAX));
+        assert_eq!(binary::float(row[2].as_deref().unwrap(), 31), Some(2.5));
+        assert_eq!(row[3].as_deref(), Some(&b"text"[..]));
+        assert_eq!(row[4], None);
+        let date = binary::date(row[5].as_deref().unwrap()).unwrap();
+        assert_eq!((date.year, date.month, date.day), (2026, 11, 17));
+        conn.close_statement(statement.id).unwrap();
+
+        // Cached: wrong parameter count, then pipelined executions.
+        let mut one = Execute::default();
+        one.int(1);
+        let err = conn.execute_cached(b"SELECT ?, ?", &one).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Parameters {
+                    expected: 2,
+                    given: 1
+                }
+            ),
+            "{err:?}"
+        );
+        conn.query(b"CREATE TEMPORARY TABLE ps (n INT PRIMARY KEY)")
+            .unwrap();
+        let rows: Vec<Execute> = (0..5)
+            .map(|n| {
+                let mut row = Execute::default();
+                row.int(n);
+                row
+            })
+            .collect();
+        let totals = conn
+            .execute_many_cached(b"INSERT INTO ps VALUES (?)", &rows)
+            .unwrap();
+        assert_eq!(totals.rowcount, 5);
+        assert!(totals.error.is_none());
+        // A duplicate key in the middle: reported, the others still run.
+        let totals = conn
+            .execute_many_cached(
+                b"INSERT INTO ps VALUES (?)",
+                &[rows[0].clone(), {
+                    let mut row = Execute::default();
+                    row.int(9);
+                    row
+                }],
+            )
+            .unwrap();
+        assert!(matches!(
+            totals.error,
+            Some((0, Error::Server { code: 1062, .. }))
+        ));
+        assert_eq!(
+            table(&conn.query(b"SELECT COUNT(*) FROM ps").unwrap()),
+            [["6"]]
+        );
+    }
+}

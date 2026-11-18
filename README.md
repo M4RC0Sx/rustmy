@@ -38,6 +38,9 @@ with rustmy.connect(
   converted in Rust while the server sends the next batch. `executemany` of
   `UPDATE`/`DELETE` pipelines its statements: one network round trip per
   256 of them instead of one each.
+- **Prepared statements when you want them.** `PreparedCursor` uses the
+  binary protocol: typed parameters that never go through escaping, and rows
+  that are read about twice as fast again.
 - **Nothing to install but the wheel.** No libmysqlclient, no compiler, no
   `pkg-config`: TLS is [rustls](https://github.com/rustls/rustls), and the
   supported authentication methods are implemented in Rust.
@@ -208,6 +211,38 @@ with conn.cursor(DictCursor) as cursor:
 ```
 
 `rustmy.connect(..., cursorclass=DictCursor)` makes it the default.
+
+### Prepared statements
+
+`PreparedCursor` (and `PreparedDictCursor`) runs server-side prepared
+statements over MySQL's binary protocol. Parameters travel as typed values,
+never as SQL text, so nothing depends on escaping; rows arrive in binary
+form, so numbers and dates need no parsing (reading 100,000 mixed rows takes
+about half the time of `Cursor`); and each statement is prepared once per
+connection:
+
+```python
+with conn.cursor(prepared=True) as cursor:
+    cursor.execute("SELECT id, name, price FROM products WHERE price > %s", (4,))
+    print(cursor.fetchall())  # the same objects a Cursor returns
+```
+
+- Write `%s` / `%(name)s` placeholders as usual; they become `?`. A query
+  without placeholders has nothing to bind and runs as a `Cursor` runs it.
+- The last `statement_cache_size` statements (32 by default, a `connect()`
+  argument) stay prepared on the server, which allows 16,382 across all its
+  connections by default (`max_prepared_stmt_count`).
+- `executemany` batches `INSERT … VALUES` into multi-row prepared statements
+  and pipelines everything else, as `Cursor` does.
+- Parameters are values only: a sequence for `IN %s`, or a type with a
+  `conv=` encoder, raises `NotSupportedError`. A statement the server cannot
+  prepare raises its error.
+- SQLAlchemy can use it for every statement:
+  `mysql+rustmy://user:password@host/db?cursorclass=PreparedCursor`
+  (its dialect test suite passes this way too).
+  Django cannot: its MySQL backend writes SQL that MySQL refuses to prepare
+  (`->> %s` for `JSONField`, `_binary %s` for `BinaryField`, parameters in
+  DDL), so keep the default cursor there.
 
 ### Large results without loading them
 
@@ -409,8 +444,7 @@ pinned by a test:
 - **New.** rustmy is tested extensively but has no long production history
   yet. Please report anything that behaves differently from what you expect.
 - **Synchronous only.** No asyncio API yet.
-- **Text protocol.** Server-side prepared statements, compression and
-  `LOAD DATA LOCAL INFILE` are not supported yet.
+- **Not yet supported:** compression and `LOAD DATA LOCAL INFILE`.
 - **Latency-bound workloads** (many tiny queries, one after another) gain
   little: the network dominates them with any driver. `executemany` is the
   exception: it pipelines its statements.
