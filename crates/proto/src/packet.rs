@@ -5,6 +5,7 @@
 //! followed by an empty packet.
 
 use std::io;
+use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Read;
 use std::io::Write;
@@ -35,6 +36,26 @@ pub(crate) struct PacketStream<S: Read + Write> {
     write_buf: Vec<u8>,
     /// Compressed layer, once negotiated and authenticated.
     compressed: Option<Box<Compressed>>,
+}
+
+/// Appends exactly `len` bytes of `source` to `out`. When the read buffer
+/// holds them all (nearly always: a row is one packet) they are copied
+/// straight from it; `take(len).read_to_end` would probe for an end it
+/// already knows, at a cost on every packet. Otherwise they are read as
+/// they come, never zero-filling a length only the peer vouches for.
+fn append_exact<R: Read>(source: &mut BufReader<R>, out: &mut Vec<u8>, len: usize) -> Result<()> {
+    if let Some(bytes) = source.buffer().get(..len) {
+        out.extend_from_slice(bytes);
+        source.consume(len);
+        return Ok(());
+    }
+    out.reserve(len);
+    let wanted = u64::try_from(len).map_err(|_| Error::protocol("packet length too large"))?;
+    let read = source.take(wanted).read_to_end(out)?;
+    if read != len {
+        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+    }
+    Ok(())
 }
 
 impl<S: Read + Write> PacketStream<S> {
@@ -114,11 +135,7 @@ impl<S: Read + Write> PacketStream<S> {
             if let Some(compressed) = &mut self.compressed {
                 compressed.append(&mut self.inner, out, len_usize)?;
             } else {
-                out.reserve(len_usize);
-                let read = (&mut self.inner).take(u64::from(len)).read_to_end(out)?;
-                if read != len_usize {
-                    return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
-                }
+                append_exact(&mut self.inner, out, len_usize)?;
             }
             if len_usize < MAX_PACKET_PAYLOAD {
                 return Ok(start..out.len());
@@ -318,6 +335,40 @@ mod tests {
     fn truncated_payload_is_an_error() {
         let mut ps = reader(vec![10, 0, 0, 0, b'a']);
         assert!(ps.read_into(&mut Vec::new()).is_err());
+    }
+
+    /// Hands out at most three bytes per read, as a slow socket would.
+    struct Trickle(Cursor<Vec<u8>>);
+
+    impl Read for Trickle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(3);
+            self.0.read(&mut buf[..n])
+        }
+    }
+
+    impl Write for Trickle {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reads_payloads_the_buffer_holds_only_in_part() {
+        // Each payload arrives over several reads, so the read buffer never
+        // holds one whole: the path that is not a plain copy.
+        let mut wire = vec![10, 0, 0, 0];
+        wire.extend_from_slice(b"0123456789");
+        wire.extend_from_slice(&[2, 0, 0, 1, b'a', b'b']);
+        let mut ps = PacketStream::new(Trickle(Cursor::new(wire)));
+        let mut out = Vec::new();
+        assert_eq!(ps.read_into(&mut out).unwrap(), 0..10);
+        assert_eq!(ps.read_into(&mut out).unwrap(), 10..12);
+        assert_eq!(out, b"0123456789ab");
     }
 
     #[test]
