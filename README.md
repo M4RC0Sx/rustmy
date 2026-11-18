@@ -236,7 +236,9 @@ with conn.cursor(prepared=True) as cursor:
   and pipelines everything else, as `Cursor` does.
 - Parameters are values only: a sequence for `IN %s`, or a type with a
   `conv=` encoder, raises `NotSupportedError`. A statement the server cannot
-  prepare raises its error.
+  prepare raises its error. MySQL 9.0 and later also refuse a `TIME`
+  parameter between 838:00:00 and 838:59:59 with fractional seconds
+  (error 1690, although it is in range); use `Cursor` for those.
 - SQLAlchemy can use it for every statement:
   `mysql+rustmy://user:password@host/db?cursorclass=PreparedCursor`
   (its dialect test suite passes this way too).

@@ -125,18 +125,73 @@ def test_rows_match_the_text_protocol(
 @pytest.mark.parametrize("definition", list(COLUMNS))
 @given(data=st.data())
 def test_typed_parameters_store_what_interpolation_stores(
-    tables: tuple[rustmy.Connection, dict[str, str]], definition: str, data: Any
+    server: Server,
+    tables: tuple[rustmy.Connection, dict[str, str]],
+    definition: str,
+    data: Any,
+) -> None:
+    _store_both_ways(
+        server, tables, definition, data.draw(COLUMNS[definition] | st.none())
+    )
+
+
+def _rejected_by_server(server: Server, value: object) -> bool:
+    """MySQL 9+ rejects a binary TIME parameter in hour 838 with a fraction
+    (1690, found by hypothesis), although the value is in range; 8.x and
+    MariaDB store it. Sending it as a string instead is no way out: MySQL
+    misreads a string parameter in ``CAST(? AS TIME)`` (``'10:00:00'`` gives
+    00:00:00, also with SQL-level ``PREPARE``), so the error stays."""
+    return (
+        server.name == "mysql"
+        and server.major_version >= 9
+        and isinstance(value, dt.timedelta)
+        and value.microseconds != 0
+        and abs(value) >= dt.timedelta(hours=838)
+    )
+
+
+def _store_both_ways(
+    server: Server,
+    tables: tuple[rustmy.Connection, dict[str, str]],
+    definition: str,
+    value: object,
 ) -> None:
     conn, names = tables
     table = names[definition]
-    value = data.draw(COLUMNS[definition] | st.none())
     cursor = conn.cursor()
     cursor.execute(f"DELETE FROM {table}")
     cursor.execute(f"INSERT INTO {table} VALUES (1, %s)", (value,))
-    conn.cursor(PreparedCursor).execute(f"INSERT INTO {table} VALUES (2, %s)", (value,))
+    insert = f"INSERT INTO {table} VALUES (2, %s)"
+    if _rejected_by_server(server, value):
+        with pytest.raises(rustmy.OperationalError) as info:
+            conn.cursor(PreparedCursor).execute(insert, (value,))
+        assert info.value.args[0] == 1690
+        return
+    conn.cursor(PreparedCursor).execute(insert, (value,))
     cursor.execute(f"SELECT v FROM {table} ORDER BY id")
     interpolated, typed = cursor.fetchall()
     assert typed == interpolated
+
+
+@pytest.mark.parametrize("definition", ["TIME", "TIME(6)"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        dt.timedelta(days=-35, seconds=3601, microseconds=1),
+        dt.timedelta(hours=838, microseconds=1),
+        dt.timedelta(hours=838, minutes=59, seconds=58, microseconds=999999),
+        -dt.timedelta(hours=838, minutes=30, microseconds=500000),
+        dt.timedelta(hours=838, minutes=59, seconds=59),
+        dt.timedelta(hours=837, minutes=59, seconds=59, microseconds=999999),
+    ],
+)
+def test_time_parameters_in_hour_838(
+    server: Server,
+    tables: tuple[rustmy.Connection, dict[str, str]],
+    definition: str,
+    value: dt.timedelta,
+) -> None:
+    _store_both_ways(server, tables, definition, value)
 
 
 def test_parameters_keep_their_type(conn: rustmy.Connection) -> None:
