@@ -943,3 +943,124 @@ little in short lookups. Batches are on par with `Cursor`: `UPDATE`s are
 pipelined the same way, and `INSERT … VALUES` becomes multi-row prepared
 statements, faster than `Cursor`'s multi-row text on MariaDB and slower on
 MySQL (still ahead of both other drivers).
+
+## Phase 5, block 4: compression (2026-11-18, Python 3.10)
+
+`compress.py` reads 100,000 mixed rows (the table of block 3), runs 1,000
+primary-key lookups and inserts 10,000 rows with `executemany`, with rustmy
+uncompressed, zlib and zstd against mysqlclient without and with
+`compress=True` (zlib; PyMySQL has no compressed protocol). Locally the
+drivers connect straight to the server; the capped runs go through the
+`toxiproxy` service of compose's `bench` profile, whose bandwidth toxic caps
+each direction:
+
+```sh
+docker compose --profile bench up -d --wait mysql mariadb toxiproxy
+uv run --no-sync python benches/compress.py \
+    --json benches/results/phase5-block4-compress-local-py310.json
+uv run --no-sync python benches/compress.py --bandwidth 12500 \
+    --json benches/results/phase5-block4-compress-100mbit-py310.json
+uv run --no-sync python benches/compress.py --bandwidth 2500 \
+    --json benches/results/phase5-block4-compress-20mbit-py310.json
+uv run --no-sync python benches/compress.py --port 13307 --bandwidth 12500 \
+    --json benches/results/phase5-block4-compress-mariadb-100mbit-py310.json
+for run in local 100mbit 20mbit mariadb-100mbit; do
+  uv run --no-sync python benches/report.py --section phase5-block4-$run \
+      benches/results/phase5-block4-compress-$run-py310.json
+done
+```
+
+MySQL 8.4, local (no cap):
+
+<!-- results:phase5-block4-local:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase5-block4-local-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase5-block4-local-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1 · best of 5 · 2026-11-18T10:19:12+00:00
+
+| Configuration | fetchall 100k mixed rows | 1,000 SELECT by primary key | executemany INSERT 10k rows | vs mysqlclient (fetchall 100k mixed rows) | vs mysqlclient (1,000 SELECT by primary key) | vs mysqlclient (executemany INSERT 10k rows) |
+|---|--:|--:|--:|--:|--:|--:|
+| mysqlclient | 161.2 ms | 83.6 ms | 71.2 ms | 1.00x | 1.00x | 1.00x |
+| mysqlclient zlib | 297.1 ms | 111.6 ms | 126.6 ms | 0.54x | 0.75x | 0.56x |
+| rustmy (default) | **49.6 ms** | **79.3 ms** | **35.6 ms** | 3.25x | 1.05x | 2.00x |
+| rustmy zlib | 179.1 ms | 94.7 ms | 43.2 ms | 0.90x | 0.88x | 1.65x |
+| rustmy zstd | 77.8 ms | 88.7 ms | 39.0 ms | 2.07x | 0.94x | 1.82x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:phase5-block4-local:end -->
+
+MySQL 8.4, 100 Mbit/s each way:
+
+<!-- results:phase5-block4-100mbit:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase5-block4-100mbit-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase5-block4-100mbit-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1 · best of 5 · 2026-11-18T10:19:47+00:00
+
+| Configuration | fetchall 100k mixed rows | 1,000 SELECT by primary key | executemany INSERT 10k rows | vs mysqlclient (fetchall 100k mixed rows) | vs mysqlclient (1,000 SELECT by primary key) | vs mysqlclient (executemany INSERT 10k rows) |
+|---|--:|--:|--:|--:|--:|--:|
+| mysqlclient | 906.0 ms | 146.8 ms | 169.8 ms | 1.00x | 1.00x | 1.00x |
+| mysqlclient zlib | 309.0 ms | 161.0 ms | 152.2 ms | 2.93x | 0.91x | 1.12x |
+| rustmy (default) | 776.6 ms | 147.9 ms | 147.3 ms | 1.17x | 0.99x | 1.15x |
+| rustmy zlib | 195.5 ms | 142.2 ms | 75.4 ms | 4.63x | 1.03x | 2.25x |
+| rustmy zstd | **173.0 ms** | **137.1 ms** | **56.5 ms** | 5.24x | 1.07x | 3.01x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:phase5-block4-100mbit:end -->
+
+MySQL 8.4, 20 Mbit/s each way:
+
+<!-- results:phase5-block4-20mbit:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase5-block4-20mbit-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase5-block4-20mbit-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1 · best of 5 · 2026-11-18T10:21:17+00:00
+
+| Configuration | fetchall 100k mixed rows | 1,000 SELECT by primary key | executemany INSERT 10k rows | vs mysqlclient (fetchall 100k mixed rows) | vs mysqlclient (1,000 SELECT by primary key) | vs mysqlclient (executemany INSERT 10k rows) |
+|---|--:|--:|--:|--:|--:|--:|
+| mysqlclient | 3967.8 ms | 509.1 ms | 701.1 ms | 1.00x | 1.00x | 1.00x |
+| mysqlclient zlib | 1079.5 ms | 308.5 ms | 250.1 ms | 3.68x | 1.65x | 2.80x |
+| rustmy (default) | 3837.2 ms | 492.9 ms | 567.2 ms | 1.03x | 1.03x | 1.24x |
+| rustmy zlib | 949.0 ms | **293.5 ms** | 183.9 ms | 4.18x | 1.73x | 3.81x |
+| rustmy zstd | **856.0 ms** | 305.6 ms | **147.6 ms** | 4.64x | 1.67x | 4.75x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:phase5-block4-20mbit:end -->
+
+MariaDB 11.4 (zlib only), 100 Mbit/s each way:
+
+<!-- results:phase5-block4-mariadb-100mbit:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/phase5-block4-mariadb-100mbit-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/phase5-block4-mariadb-100mbit-light.svg">
+</picture>
+
+**CPython 3.10.19** · 11.4.13-MariaDB-ubu2404 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1 · best of 5 · 2026-11-18T10:22:55+00:00
+
+| Configuration | fetchall 100k mixed rows | 1,000 SELECT by primary key | executemany INSERT 10k rows | vs mysqlclient (fetchall 100k mixed rows) | vs mysqlclient (1,000 SELECT by primary key) | vs mysqlclient (executemany INSERT 10k rows) |
+|---|--:|--:|--:|--:|--:|--:|
+| mysqlclient | 908.7 ms | **3108.5 ms** | 300.8 ms | 1.00x | 1.00x | 1.00x |
+| mysqlclient zlib | 305.2 ms | 3327.8 ms | 229.6 ms | 2.98x | 0.93x | 1.31x |
+| rustmy (default) | 782.6 ms | 3207.2 ms | 193.9 ms | 1.16x | 0.97x | 1.55x |
+| rustmy zlib | **195.5 ms** | 3222.2 ms | **96.0 ms** | 4.65x | 0.96x | 3.13x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:phase5-block4-mariadb-100mbit:end -->
+
+What the numbers say: compression is for slow or metered links. Locally it
+only costs time, mostly on the server, which compresses every result (zlib
+level 6 more than triples the time to read 100,000 rows; zstd costs much
+less). At 100 Mbit/s the rows travel about four times smaller and reading
+them is 4.5x (zstd) and 4x (zlib) faster than uncompressed; with the same
+algorithm rustmy is about 1.6x faster than mysqlclient, which spends its
+own time decompressing and converting. Short lookups gain nothing until the
+link is slow enough for their few bytes to matter. Through toxiproxy's
+bandwidth toxic every MariaDB reply to a lookup pays about 3 ms for every
+driver alike (MariaDB writes its small replies in more pieces), so that
+panel says nothing about compression.

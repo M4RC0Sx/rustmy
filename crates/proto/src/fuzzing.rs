@@ -9,6 +9,7 @@ use std::io::Cursor;
 use std::io::Read;
 use std::io::Write;
 
+use crate::Compression;
 use crate::Conn;
 use crate::Opts;
 use crate::column::Column;
@@ -56,6 +57,29 @@ pub fn packets(data: &[u8]) {
     let mut stream = PacketStream::new(MockStream(Cursor::new(data.to_vec())));
     let mut out = Vec::new();
     while stream.read_into(&mut out).is_ok() {}
+}
+
+/// Compressed packet framing: the first byte picks zlib or zstd, the rest
+/// is what the server sends once compression is on.
+pub fn compressed(data: &[u8]) {
+    let Some((&selector, rest)) = data.split_first() else {
+        return;
+    };
+    let algorithm = if selector & 1 == 0 {
+        Compression::Zlib
+    } else {
+        Compression::Zstd { level: 3 }
+    };
+    let mut stream = PacketStream::new(MockStream(Cursor::new(rest.to_vec())));
+    if stream.compress(algorithm).is_err() {
+        return;
+    }
+    let mut out = Vec::new();
+    while stream.read_into(&mut out).is_ok() {
+        // Answers go through the compressed writer too.
+        let _ = stream.write_command(0x03, &out);
+        out.clear();
+    }
 }
 
 /// Column definitions, rows and terminators, text and binary. The first
@@ -141,6 +165,14 @@ pub fn text_values(data: &[u8]) {
 /// result sets (batches, skips, rows left for the next command to discard),
 /// multiple results, pipelined batches and the other commands.
 pub fn session(data: &[u8]) {
+    // Recorded sessions are uncompressed; asking for compression (zstd,
+    // zlib when the greeting offers no zstd) reads the same bytes as
+    // compressed packets once authentication is over.
+    session_with(data, None);
+    session_with(data, Some(Compression::Zstd { level: 3 }));
+}
+
+fn session_with(data: &[u8], compress: Option<Compression>) {
     let opts = Opts {
         user: b"fuzz".to_vec(),
         password: "secret".to_owned(),
@@ -150,6 +182,7 @@ pub fn session(data: &[u8]) {
             mode: SslMode::Disabled,
             ..TlsOpts::default()
         },
+        compress,
         ..Opts::default()
     };
     let transport = Stream::Mock(MockStream(Cursor::new(data.to_vec())));

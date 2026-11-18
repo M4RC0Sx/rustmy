@@ -45,6 +45,9 @@ def _selected_servers() -> tuple[list[str], bool]:
 
 
 _SERVERS, _EXPLICIT = _selected_servers()
+#: ``RUSTMY_TEST_COMPRESS`` (``zlib`` or ``zstd``): every connection the
+#: ``server`` fixture opens asks for the compressed protocol.
+_COMPRESS = os.environ.get("RUSTMY_TEST_COMPRESS") or None
 
 # SQLAlchemy's dialect suite is a pytest session of its own (see its pytest.ini).
 collect_ignore = ["sqla_suite"]
@@ -73,6 +76,8 @@ class Server:
             "password": "rustmy",
             "database": "rustmy_test",
         }
+        if _COMPRESS:
+            kwargs["compress"] = _COMPRESS
         kwargs.update(overrides)
         return rustmy.connect(**kwargs)
 

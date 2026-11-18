@@ -303,6 +303,30 @@ Authentication covers `caching_sha2_password`, `sha256_password` and
 `mysql_native_password` (MySQL), and `client_ed25519` and `parsec` (MariaDB),
 with or without TLS.
 
+### Compression
+
+Over a slow or metered link, the compressed protocol trades CPU for bytes:
+
+```python
+conn = rustmy.connect(host="db.example.com", user="app", compress=True)  # zlib
+conn = rustmy.connect(host="db.example.com", user="app", compress="zstd")
+print(conn.compression)  # what the server agreed: "zlib", "zstd" or None
+```
+
+`compress=True` is zlib, as in mysqlclient; zstd (MySQL 8.0.18+) takes a
+`zstd_level` from 1 to 22 (default 3). MariaDB has no zstd, so
+`compress="zstd"` falls back to zlib there; a server
+that offers no compression at all gives an uncompressed connection. It works
+with TLS, prepared statements and pipelined `executemany`. Over a
+100 Mbit/s link, reading 100,000 rows is about 4.5x faster with zstd than
+uncompressed (and 1.6x faster than mysqlclient's `compress=True` with the
+same zlib); on a fast local network it costs more CPU, mostly the server's,
+than it saves in transfer time, so leave it off there
+([numbers](benches/README.md#phase-5-block-4-compression-2026-11-18-python-310)).
+SQLAlchemy takes it in the URL (`?compress=zstd&zstd_level=3`), and option
+files through `compress`, `compression-algorithms` and
+`zstd-compression-level`.
+
 ### Character sets
 
 `utf8mb4` is the default and the right choice for new code. Legacy character
@@ -446,7 +470,7 @@ pinned by a test:
 - **New.** rustmy is tested extensively but has no long production history
   yet. Please report anything that behaves differently from what you expect.
 - **Synchronous only.** No asyncio API yet.
-- **Not yet supported:** compression and `LOAD DATA LOCAL INFILE`.
+- **Not yet supported:** `LOAD DATA LOCAL INFILE`.
 - **Latency-bound workloads** (many tiny queries, one after another) gain
   little: the network dominates them with any driver. `executemany` is the
   exception: it pipelines its statements.

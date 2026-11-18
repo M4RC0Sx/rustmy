@@ -63,6 +63,14 @@ def test_url_cursorclass_names_a_rustmy_cursor() -> None:
         dialect.create_connect_args(sa.make_url("mysql+rustmy://u@h/db?cursorclass=os"))
 
 
+def test_url_compress_keeps_the_algorithm() -> None:
+    dialect = sa.create_engine("mysql+rustmy://").dialect
+    for query, compress in [("true", True), ("0", False), ("zstd", "zstd")]:
+        url = sa.make_url(f"mysql+rustmy://u@h/db?compress={query}&zstd_level=9")
+        _, kwargs = dialect.create_connect_args(url)
+        assert (kwargs["compress"], kwargs["zstd_level"]) == (compress, 9)
+
+
 def test_url_arguments_use_rustmy_names() -> None:
     engine = sa.create_engine(
         "mysql+rustmy://app:s%40cret@db.example:3307/shop"

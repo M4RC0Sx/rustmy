@@ -101,6 +101,8 @@ pub(crate) struct HandshakeResponse<'a> {
     pub(crate) auth_response: &'a [u8],
     pub(crate) database: Option<&'a [u8]>,
     pub(crate) auth_plugin: &'a [u8],
+    /// zstd level, sent with `ZSTD_COMPRESSION_ALGORITHM`.
+    pub(crate) zstd_level: u8,
 }
 
 impl HandshakeResponse<'_> {
@@ -129,6 +131,9 @@ impl HandshakeResponse<'_> {
         }
         if caps & capability::PLUGIN_AUTH != 0 {
             put_nul_bytes(&mut out, self.auth_plugin);
+        }
+        if caps & capability::ZSTD_COMPRESSION_ALGORITHM != 0 {
+            out.push(self.zstd_level);
         }
         Ok(out)
     }
@@ -208,6 +213,7 @@ mod tests {
             auth_response: &[1, 2, 3],
             database: Some(b"db"),
             auth_plugin: b"mysql_native_password",
+            zstd_level: 0,
         }
         .encode()
         .unwrap();

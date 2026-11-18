@@ -203,12 +203,17 @@ _STRING_OPTIONS = {
     "server-public-key-path": "server_public_key",
 }
 #: Options that take a number.
-_NUMBER_OPTIONS = {"port": "port", "connect-timeout": "connect_timeout"}
+_NUMBER_OPTIONS = {
+    "port": "port",
+    "connect-timeout": "connect_timeout",
+    "zstd-compression-level": "zstd_level",
+}
 #: Flags (present, with no value or a true one) → ``connect()`` arguments.
 _FLAG_OPTIONS = {
     "multi-statements": "multi_statements",
     "multi-queries": "multi_statements",
     "return-found-rows": "found_rows",
+    "compress": "compress",
 }
 _FALSE = {"0", "false", "off", "no"}
 
@@ -229,4 +234,11 @@ def connect_args(options: dict[str, str]) -> dict[str, object]:
                 raise ValueError(msg) from None
         elif name in _FLAG_OPTIONS:
             args[_FLAG_OPTIONS[name]] = value.lower() not in _FALSE
+        elif name == "compression-algorithms" and value:
+            # A list the server picks from; zstd falls back to zlib here too.
+            algorithms = {a.strip().lower() for a in value.split(",")}
+            for algorithm in ("zstd", "zlib"):
+                if algorithm in algorithms:
+                    args["compress"] = algorithm
+                    break
     return args

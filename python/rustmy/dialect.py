@@ -87,11 +87,22 @@ class RustmyMySQLDialect(MySQLDialect_mysqldb):
             if name in _FLOAT_ARGS and isinstance(value, str)
         }
         cursorclass = url.query.get("cursorclass")
-        url = url.difference_update_query([*timeouts, "cursorclass"])
+        # mysqlclient's dialect would make ``compress`` a bool: keep "zstd".
+        compress = url.query.get("compress")
+        zstd_level = url.query.get("zstd_level")
+        url = url.difference_update_query(
+            [*timeouts, "cursorclass", "compress", "zstd_level"]
+        )
         args, kwargs = super().create_connect_args(url, _translate_args)
         kwargs.update(timeouts)
         if isinstance(cursorclass, str):
             kwargs["cursorclass"] = _cursor_class(cursorclass)
+        if isinstance(compress, str):
+            kwargs["compress"] = (
+                compress if compress in {"zlib", "zstd"} else util.asbool(compress)
+            )
+        if isinstance(zstd_level, str):
+            kwargs["zstd_level"] = int(zstd_level)
         for name in _BOOL_ARGS:
             if name in kwargs:
                 kwargs[name] = util.asbool(kwargs[name])

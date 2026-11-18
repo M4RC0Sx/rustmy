@@ -178,6 +178,23 @@ def test_connect_args() -> None:
         _option_files.connect_args({"port": "x"})
 
 
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        ({"compress": ""}, {"compress": True}),
+        ({"compress": "0"}, {"compress": False}),
+        ({"compression-algorithms": "zstd,zlib"}, {"compress": "zstd"}),
+        ({"compression-algorithms": "uncompressed,ZLIB"}, {"compress": "zlib"}),
+        ({"compression-algorithms": "uncompressed"}, {}),
+        ({"zstd-compression-level": "7"}, {"zstd_level": 7}),
+    ],
+)
+def test_compression_options(
+    options: dict[str, str], expected: dict[str, object]
+) -> None:
+    assert _option_files.connect_args(options) == expected
+
+
 # Against the servers.
 
 
@@ -234,6 +251,20 @@ def test_tls_and_flags_from_the_file(server: Server, tmp_path: Path) -> None:
     # An ssl dict covers TLS on its own: the file's ssl-mode is not used.
     with rustmy.connect(read_default_file=cnf, ssl={}) as conn:
         assert conn.tls
+
+
+def test_compression_from_the_file(server: Server, tmp_path: Path) -> None:
+    cnf = server_file(
+        server,
+        tmp_path / "my.cnf",
+        "compression-algorithms = zstd,zlib\nzstd-compression-level = 5\n",
+    )
+    zstd = "zstd" if server.name == "mysql" else "zlib"
+    with rustmy.connect(read_default_file=cnf) as conn:
+        assert conn.compression == zstd
+    # An argument wins over the file.
+    with rustmy.connect(read_default_file=cnf, compress="zlib") as conn:
+        assert conn.compression == "zlib"
 
 
 def test_bad_option_value(server: Server, tmp_path: Path) -> None:

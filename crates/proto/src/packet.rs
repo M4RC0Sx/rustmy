@@ -11,11 +11,21 @@ use std::io::Write;
 use std::ops::Range;
 
 use crate::MAX_PACKET_PAYLOAD;
+use crate::compress::Compressed;
+use crate::compress::Compression;
 use crate::error::Error;
 use crate::error::Result;
 
 const HEADER_LEN: usize = 4;
 const READ_BUFFER_CAPACITY: usize = 64 * 1024;
+
+/// Where a pipelined reply starts: the sequence id of its first packet and,
+/// on a compressed connection, of its first compressed packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplyStart {
+    pub(crate) seq: u8,
+    pub(crate) compressed: u8,
+}
 
 /// Buffered packet reader/writer over a byte stream.
 #[derive(Debug)]
@@ -23,6 +33,8 @@ pub(crate) struct PacketStream<S: Read + Write> {
     inner: BufReader<S>,
     seq: u8,
     write_buf: Vec<u8>,
+    /// Compressed layer, once negotiated and authenticated.
+    compressed: Option<Box<Compressed>>,
 }
 
 impl<S: Read + Write> PacketStream<S> {
@@ -31,6 +43,7 @@ impl<S: Read + Write> PacketStream<S> {
             inner: BufReader::with_capacity(READ_BUFFER_CAPACITY, stream),
             seq: 0,
             write_buf: Vec::new(),
+            compressed: None,
         }
     }
 
@@ -57,9 +70,19 @@ impl<S: Read + Write> PacketStream<S> {
         self.inner.get_mut()
     }
 
-    /// Every client command starts a new sequence.
-    pub(crate) const fn reset_seq(&mut self) {
+    /// From now on, every byte travels in compressed packets (once
+    /// authentication succeeds: its last packet is not compressed).
+    pub(crate) fn compress(&mut self, algorithm: Compression) -> Result<()> {
+        self.compressed = Some(Box::new(Compressed::new(algorithm)?));
+        Ok(())
+    }
+
+    /// Every client command starts a new sequence, compressed one included.
+    pub(crate) fn reset_seq(&mut self) {
         self.seq = 0;
+        if let Some(compressed) = &mut self.compressed {
+            compressed.set_seq(0);
+        }
     }
 
     /// Reads one logical payload (joining split packets) and appends it to
@@ -69,23 +92,33 @@ impl<S: Read + Write> PacketStream<S> {
         let start = out.len();
         loop {
             let mut header = [0u8; HEADER_LEN];
-            self.inner.read_exact(&mut header)?;
+            match &mut self.compressed {
+                None => self.inner.read_exact(&mut header)?,
+                Some(compressed) => compressed.read_exact(&mut self.inner, &mut header)?,
+            }
             let [l0, l1, l2, seq] = header;
-            if seq != self.seq {
+            // Compressed, only the compressed sequence is checked: servers
+            // move the ordinary one to it whenever they flush (see
+            // `compress`), and the compressed layer keeps us in sync.
+            if seq != self.seq && self.compressed.is_none() {
                 return Err(Error::protocol(format!(
                     "packet out of order: expected sequence {}, got {seq}",
                     self.seq
                 )));
             }
-            self.seq = self.seq.wrapping_add(1);
+            self.seq = seq.wrapping_add(1);
 
             let len = u32::from_le_bytes([l0, l1, l2, 0]);
             let len_usize = usize::try_from(len)
                 .map_err(|_| Error::protocol("packet length exceeds address space"))?;
-            out.reserve(len_usize);
-            let read = (&mut self.inner).take(u64::from(len)).read_to_end(out)?;
-            if read != len_usize {
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            if let Some(compressed) = &mut self.compressed {
+                compressed.append(&mut self.inner, out, len_usize)?;
+            } else {
+                out.reserve(len_usize);
+                let read = (&mut self.inner).take(u64::from(len)).read_to_end(out)?;
+                if read != len_usize {
+                    return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+                }
             }
             if len_usize < MAX_PACKET_PAYLOAD {
                 return Ok(start..out.len());
@@ -105,35 +138,54 @@ impl<S: Read + Write> PacketStream<S> {
     }
 
     /// Sends one command per item of `args` in a single write, without
-    /// waiting for any reply, and records in `reply_seqs` the sequence id
-    /// each reply starts at. Before reading reply `i`, call
-    /// [`PacketStream::expect_seq`] with `reply_seqs[i]`.
+    /// waiting for any reply, and records in `replies` where each reply
+    /// starts. Before reading reply `i`, call [`PacketStream::expect_reply`]
+    /// with `replies[i]`.
     pub(crate) fn write_commands<'a>(
         &mut self,
         cmd: u8,
         args: impl IntoIterator<Item = &'a [u8]>,
-        reply_seqs: &mut Vec<u8>,
+        replies: &mut Vec<ReplyStart>,
     ) -> Result<()> {
         let mut buf = std::mem::take(&mut self.write_buf);
         buf.clear();
+        // Compressed, each command goes in compressed packets of its own
+        // (see `compress`), so it is framed apart first.
+        let mut command = Vec::new();
         let mut encoded = Ok(());
         for arg in args {
             self.reset_seq();
-            encoded = self.encode_parts(&mut buf, &[cmd], arg);
+            let compressed = if self.compressed.is_some() {
+                command.clear();
+                encoded = self.encode_parts(&mut command, &[cmd], arg);
+                self.compressed.as_mut().map_or(0, |layer| {
+                    layer.encode_into(&command, &mut buf);
+                    layer.seq()
+                })
+            } else {
+                encoded = self.encode_parts(&mut buf, &[cmd], arg);
+                0
+            };
             if encoded.is_err() {
                 break;
             }
-            reply_seqs.push(self.seq);
+            replies.push(ReplyStart {
+                seq: self.seq,
+                compressed,
+            });
         }
-        let result = encoded.and_then(|()| self.send(&buf));
+        let result = encoded.and_then(|()| self.send_framed(&buf));
         self.write_buf = buf;
         result
     }
 
-    /// Sets the sequence id the next packet read must carry (the start of a
-    /// pipelined reply, from [`PacketStream::write_commands`]).
-    pub(crate) const fn expect_seq(&mut self, seq: u8) {
-        self.seq = seq;
+    /// Sets the sequence ids the next packets read must carry (the start of
+    /// a pipelined reply, from [`PacketStream::write_commands`]).
+    pub(crate) fn expect_reply(&mut self, start: ReplyStart) {
+        self.seq = start.seq;
+        if let Some(compressed) = &mut self.compressed {
+            compressed.set_seq(start.compressed);
+        }
     }
 
     /// Sends `head ++ body` as one logical payload without concatenating
@@ -172,9 +224,22 @@ impl<S: Read + Write> PacketStream<S> {
         }
     }
 
+    /// Sends packets, wrapping them in compressed ones if need be.
     fn send(&mut self, buf: &[u8]) -> Result<()> {
+        match &mut self.compressed {
+            None => self.send_framed(buf),
+            Some(compressed) => {
+                let stream = self.inner.get_mut();
+                let bytes = compressed.encode(buf);
+                Ok(stream.write_all(bytes).and_then(|()| stream.flush())?)
+            }
+        }
+    }
+
+    /// Sends bytes already framed for the wire.
+    fn send_framed(&mut self, bytes: &[u8]) -> Result<()> {
         let stream = self.inner.get_mut();
-        Ok(stream.write_all(buf).and_then(|()| stream.flush())?)
+        Ok(stream.write_all(bytes).and_then(|()| stream.flush())?)
     }
 
     fn push_header(&mut self, buf: &mut Vec<u8>, len: usize) -> Result<()> {
@@ -291,11 +356,12 @@ mod tests {
     fn pipelined_commands_each_start_a_sequence() {
         let mut ps = reader(Vec::new());
         let big = vec![b'x'; MAX_PACKET_PAYLOAD];
-        let mut reply_seqs = Vec::new();
-        ps.write_commands(0x03, [&b"A"[..], &big, b"B"], &mut reply_seqs)
+        let mut replies = Vec::new();
+        ps.write_commands(0x03, [&b"A"[..], &big, b"B"], &mut replies)
             .unwrap();
         // The second command takes two packets, so its reply starts at 2.
-        assert_eq!(reply_seqs, [1, 2, 1]);
+        let seqs: Vec<u8> = replies.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, [1, 2, 1]);
         let out = ps.inner.into_inner().output;
         assert_eq!(out[..6], [2, 0, 0, 0, 0x03, b'A']);
         let second = 6 + 4 + MAX_PACKET_PAYLOAD;
@@ -305,9 +371,12 @@ mod tests {
     }
 
     #[test]
-    fn expect_seq_sets_the_next_read() {
+    fn expect_reply_sets_the_next_read() {
         let mut ps = reader(vec![1, 0, 0, 4, b'a']);
-        ps.expect_seq(4);
+        ps.expect_reply(super::ReplyStart {
+            seq: 4,
+            compressed: 0,
+        });
         let mut out = Vec::new();
         ps.read_into(&mut out).unwrap();
         assert_eq!(out, b"a");

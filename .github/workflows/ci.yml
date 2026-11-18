@@ -68,11 +68,21 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - run: docker compose up -d --wait ${{ matrix.server }}
       - run: cargo nextest run -p rustmy-proto --run-ignored only --no-capture
+      # The same over the compressed protocol (zstd on MySQL; MariaDB has
+      # none and falls back to zlib, which the Python pass below uses).
+      - name: Rust, compressed
+        run: cargo nextest run -p rustmy-proto --run-ignored only --no-capture
+        env:
+          RUSTMY_TEST_COMPRESS: zstd
       - uses: astral-sh/setup-uv@v10.3.3
       # Two passes on the same server: Python 3.10 resolves SQLAlchemy 2.0,
       # Python 3.15 the latest line (2.1 needs Python 3.11+).
       - run: uv sync --locked
       - run: uv run pytest -m integration
+      - name: Python, compressed
+        run: uv run pytest -m integration
+        env:
+          RUSTMY_TEST_COMPRESS: zlib
       - run: uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db ${{ matrix.server }}
       - name: Python 3.15
         env:
