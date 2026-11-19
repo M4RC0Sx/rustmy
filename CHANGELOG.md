@@ -2,6 +2,30 @@
 
 All notable changes to rustmy are documented in this file. Versions follow [Semantic Versioning](https://semver.org) and entries come from [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.3.0](https://github.com/M4RC0Sx/rustmy/compare/v1.2.1...v1.3.0) (2026-11-19)
+
+### Features
+
+* default connect timeout over the whole handshake, TCP keepalive, get_server_public_key, and recovery from a full prepared-statement limit ([#48](https://github.com/M4RC0Sx/rustmy/issues/48)) ([e6f0ac4](https://github.com/M4RC0Sx/rustmy/commit/e6f0ac4c1564e15acb7c171bae152e2419b4a003))
+
+### Bug Fixes
+
+* bound parsec iterations by the connect timeout, ignore option files anyone can write, hide the password in Debug ([#45](https://github.com/M4RC0Sx/rustmy/issues/45)) ([45943e6](https://github.com/M4RC0Sx/rustmy/commit/45943e6dee46889ad61e975c9ee9568bc406d637))
+
+### Performance Improvements
+
+* build the TLS configuration once per process and skip SET NAMES on connect ([#46](https://github.com/M4RC0Sx/rustmy/issues/46)) ([e4bb4a9](https://github.com/M4RC0Sx/rustmy/commit/e4bb4a9f93d8e9cba2d51b05652195a1966356cd))
+* classify parameters by exact type first and release buffers grown by large packets ([#47](https://github.com/M4RC0Sx/rustmy/issues/47)) ([a9df0cb](https://github.com/M4RC0Sx/rustmy/commit/a9df0cb672d1d6ab8a776fe1b3453ca57a5be552))
+
+### Build System
+
+* build wheels with the maturin of uv.lock and credit the Rust standard library in THIRD-PARTY-LICENSES ([#49](https://github.com/M4RC0Sx/rustmy/issues/49)) ([8eaf72b](https://github.com/M4RC0Sx/rustmy/commit/8eaf72b7190284272e5916cb0cffc3d66ae34fc7))
+* **deps:** bump sha2 from 0.11.0 to 0.11.1 in the cargo group ([5126967](https://github.com/M4RC0Sx/rustmy/commit/51269678d14a0d3b9690973db91d3320931b9e3e))
+
+### Miscellaneous Chores
+
+* drop Pillow 12 from the lock and stop two harmful Dependabot updates ([#44](https://github.com/M4RC0Sx/rustmy/issues/44)) ([9bf5a86](https://github.com/M4RC0Sx/rustmy/commit/9bf5a863c3693504948e961647c3dfa296bcdf15))
+
 ## [1.2.1](https://github.com/M4RC0Sx/rustmy/compare/v1.2.0...v1.2.1) (2026-11-19)
 
 ### Documentation
