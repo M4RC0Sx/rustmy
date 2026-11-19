@@ -779,6 +779,15 @@ Before a release, `scripts/leak_check.py` runs every path through the driver
 compression, `LOAD DATA LOCAL INFILE`…) thousands of times and checks that
 memory stops growing.
 
+Releases are built and published by GitHub Actions, with every action pinned
+to a commit. Each wheel and the sdist carry a signed build provenance
+attestation, checked before publishing, and PyPI's own. To check a file you
+downloaded:
+
+```sh
+gh attestation verify rustmy-*.whl --repo M4RC0Sx/rustmy
+```
+
 ## Built with
 
 - [PyO3](https://github.com/PyO3/pyo3) and [maturin](https://github.com/PyO3/maturin): Rust bindings and packaging for Python.

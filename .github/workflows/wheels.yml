@@ -40,6 +40,12 @@ jobs:
   build:
     name: build (${{ matrix.platform.name }})
     runs-on: ${{ matrix.platform.runner }}
+    # Provenance attestations of release builds (see the attest steps).
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     strategy:
       fail-fast: false
       matrix:
@@ -56,11 +62,15 @@ jobs:
     env:
       PLATFORM_PYTHONS: ${{ matrix.platform.pythons || '3.10 3.11 3.12 3.13 3.14 3.14t 3.15 3.15t' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Stamp the release version
         if: inputs.version != ''
-        run: uv run --no-project scripts/set_version.py "${{ inputs.version }}"
+        env:
+          VERSION: ${{ inputs.version }}
+        run: uv run --no-project scripts/set_version.py "$VERSION"
       # Linux builds run in the manylinux/musllinux images, which ship every
       # CPython; elsewhere uv installs them and maturin gets their paths.
       - name: Interpreter paths
@@ -78,12 +88,18 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: echo "INTERPRETERS=$PLATFORM_PYTHONS" >> "$GITHUB_ENV"
-      - uses: PyO3/maturin-action@v1
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
           args: --release --locked --out dist --interpreter ${{ env.INTERPRETERS }}
-      - uses: actions/upload-artifact@v7
+      # Provenance for release builds only (release.yml grants the
+      # permissions; pull requests have none to give).
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        if: inputs.version != '' && github.event_name == 'push'
+        with:
+          subject-path: dist/*.whl
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheels-${{ matrix.platform.name }}
           path: dist/*.whl
@@ -91,17 +107,31 @@ jobs:
 
   sdist:
     runs-on: ubuntu-24.04
+    # Provenance attestations of release builds (see the attest steps).
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Stamp the release version
         if: inputs.version != ''
-        run: uv run --no-project scripts/set_version.py "${{ inputs.version }}"
-      - uses: PyO3/maturin-action@v1
+        env:
+          VERSION: ${{ inputs.version }}
+        run: uv run --no-project scripts/set_version.py "$VERSION"
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: sdist
           args: --out dist
-      - uses: actions/upload-artifact@v7
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        if: inputs.version != '' && github.event_name == 'push'
+        with:
+          subject-path: dist/*.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # wheels-*: release.yml collects everything with one plain pattern.
           name: wheels-sdist
@@ -136,12 +166,14 @@ jobs:
       RUSTMY_SMOKE_PASSWORD: rustmy
       RUSTMY_SMOKE_VERSION: ${{ inputs.version }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wheels-${{ matrix.platform.name }}
           path: dist
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         if: ${{ !matrix.platform.alpine }}
       - name: Smoke test
         if: ${{ !matrix.platform.alpine }}
@@ -189,16 +221,18 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wheels-${{ matrix.platform.name }}
           path: dist
-      - uses: shogo82148/actions-setup-mysql@v1
+      - uses: shogo82148/actions-setup-mysql@13a38f2af408e58a0c80168fc620a63a15357339 # v1.56.2
         if: ${{ !matrix.platform.import-only }}
         with:
           mysql-version: "8.4"
           root-password: rustmy
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Smoke test
         run: scripts/smoke_wheels.sh dist "$PLATFORM_PYTHONS"

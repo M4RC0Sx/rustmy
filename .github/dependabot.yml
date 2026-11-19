@@ -1,0 +1,59 @@
+# Weekly updates into develop, grouped so each ecosystem opens one pull
+# request (majors apart). Titles are Conventional Commits (pr-title.yml):
+# `build` for crates compiled into the wheels (a patch release), `chore` for
+# development tools, `ci` for workflows.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      prefix-development: chore
+      include: scope
+    groups:
+      cargo:
+        update-types: [minor, patch]
+
+  - package-ecosystem: uv
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    # Development and benchmark tools only: the package has no Python
+    # dependencies.
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      python:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    # semantic-release, the release tooling.
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      release-tooling:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    # Actions are pinned by commit; this keeps the pins and their version
+    # comments current.
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        update-types: [minor, patch]
