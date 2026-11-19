@@ -84,7 +84,9 @@ dev = [
 bench = [
     # Only to compare with in benches/showcase.py; never shipped.
     "django>=5.2",
-    "matplotlib>=3.10",
+    # Charts only (report.py, showcase_render.py). Python 3.11+: Pillow, its
+    # dependency, has no fixed release for 3.10 (Pillow 13 dropped it).
+    "matplotlib>=3.10; python_version >= '3.11'",
     "mysql-connector-python>=9.4",
     "mysqlclient>=2.2",
     "pytest-benchmark>=5.1",
