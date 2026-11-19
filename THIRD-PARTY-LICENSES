@@ -1998,7 +1998,7 @@ Used by:
 - pkcs1 0.8.0 (https://github.com/RustCrypto/formats)
 - pkcs8 0.11.0 (https://github.com/RustCrypto/formats)
 - sha1 0.11.0 (https://github.com/RustCrypto/hashes)
-- sha2 0.11.0 (https://github.com/RustCrypto/hashes)
+- sha2 0.11.1 (https://github.com/RustCrypto/hashes)
 - signature 3.0.0 (https://github.com/RustCrypto/traits)
 - spki 0.8.1 (https://github.com/RustCrypto/formats)
 
