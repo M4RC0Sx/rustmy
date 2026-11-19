@@ -1,0 +1,33 @@
+# Codecov: one flag per language (uploaded by .github/workflows/coverage.yml),
+# reported in pull requests but never failing them.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+flags:
+  python:
+    paths:
+      - python/rustmy/
+  rust:
+    paths:
+      - crates/
+
+ignore:
+  # Generated from the servers' error catalogues (scripts/generate_er.py).
+  - python/rustmy/constants/ER.py
+  # Only built with the `fuzzing` feature, for cargo-fuzz.
+  - crates/proto/src/fuzzing.rs
+  - fuzz/
+  # Test helpers and benchmarks.
+  - tests/
+  - benches/
+  - scripts/
+
+comment:
+  layout: "condensed_header, diff, flags, files"
+  require_changes: false

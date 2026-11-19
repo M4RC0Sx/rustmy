@@ -45,6 +45,16 @@ pub enum Error {
     /// A valid server request that this client does not implement yet.
     #[error("unsupported: {0}")]
     Unsupported(String),
+
+    /// The server asked for a local file (`LOAD DATA LOCAL INFILE`) that
+    /// this connection may not send; an empty one went instead.
+    #[error("LOAD DATA LOCAL INFILE file request rejected: {0}")]
+    LocalInfile(String),
+
+    /// A prepared statement executed with another number of parameters
+    /// than its placeholders.
+    #[error("the statement has {expected} placeholders but {given} parameters were given")]
+    Parameters { expected: u16, given: usize },
 }
 
 impl Error {

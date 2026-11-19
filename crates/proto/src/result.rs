@@ -1,10 +1,11 @@
-//! Command responses: OK, ERR and text-protocol result sets.
+//! Command responses: OK, ERR and result sets (text and binary protocol).
 
 use std::ops::Range;
 
 use crate::buf::LENENC_NULL;
 use crate::buf::Reader;
 use crate::column::Column;
+use crate::constants::ColumnType;
 use crate::error::Error;
 use crate::error::Result;
 
@@ -77,16 +78,49 @@ impl Cell {
     };
 }
 
+/// How a binary-protocol row stores one column's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Encoding {
+    /// Little-endian, this many bytes (integers, `FLOAT`, `DOUBLE`).
+    Fixed(usize),
+    /// A length byte, then that many bytes of date/time fields.
+    Temporal,
+    /// A length-encoded string, as in the text protocol.
+    LengthEncoded,
+}
+
+fn binary_encoding(column_type: ColumnType) -> Encoding {
+    match column_type {
+        ColumnType::NULL => Encoding::Fixed(0),
+        ColumnType::TINY => Encoding::Fixed(1),
+        ColumnType::SHORT | ColumnType::YEAR => Encoding::Fixed(2),
+        ColumnType::LONG | ColumnType::INT24 | ColumnType::FLOAT => Encoding::Fixed(4),
+        ColumnType::LONGLONG | ColumnType::DOUBLE => Encoding::Fixed(8),
+        ColumnType::DATE
+        | ColumnType::NEWDATE
+        | ColumnType::DATETIME
+        | ColumnType::TIMESTAMP
+        | ColumnType::TIME => Encoding::Temporal,
+        _ => Encoding::LengthEncoded,
+    }
+}
+
 /// All rows of a result set, stored as the raw row payloads in one
 /// contiguous buffer plus an index of where each cell starts and ends.
 ///
 /// Rows are read from the socket in one go (with the GIL released, in the
-/// Python binding) and converted to Python objects afterwards.
+/// Python binding) and converted to Python objects afterwards. A cell of a
+/// text-protocol row is the value as text; a cell of a binary-protocol row
+/// (prepared statements, [`RowSet::is_binary`]) is the value's bytes:
+/// little-endian integers and floats, date/time fields (empty for a zero
+/// value), or the same bytes as in text for every other type.
 #[derive(Debug, Default)]
 pub struct RowSet {
     data: Vec<u8>,
     cells: Vec<Cell>,
     columns: usize,
+    /// Each column's encoding in binary-protocol rows; empty for text rows.
+    binary: Vec<Encoding>,
 }
 
 impl RowSet {
@@ -95,7 +129,24 @@ impl RowSet {
             data: Vec::new(),
             cells: Vec::new(),
             columns,
+            binary: Vec::new(),
         }
+    }
+
+    fn new_binary(columns: &[Column]) -> Self {
+        Self {
+            binary: columns
+                .iter()
+                .map(|c| binary_encoding(c.column_type))
+                .collect(),
+            ..Self::new(columns.len())
+        }
+    }
+
+    /// Whether the rows come from the binary protocol (prepared statements).
+    #[must_use]
+    pub fn is_binary(&self) -> bool {
+        !self.binary.is_empty()
     }
 
     /// Number of rows.
@@ -140,13 +191,25 @@ impl RowSet {
         Self::new(columns)
     }
 
+    /// A binary-protocol row set whose columns have `types`.
+    #[cfg(feature = "fuzzing")]
+    pub(crate) fn new_binary_for_fuzzing(types: &[ColumnType]) -> Self {
+        Self {
+            binary: types.iter().map(|&t| binary_encoding(t)).collect(),
+            ..Self::new(types.len())
+        }
+    }
+
     /// Buffer the connection appends raw row packets to.
     pub(crate) fn data_mut(&mut self) -> &mut Vec<u8> {
         &mut self.data
     }
 
-    /// Indexes one text-protocol row stored at `range` of `data`.
+    /// Indexes one row stored at `range` of `data`.
     fn push_row(&mut self, range: Range<usize>) -> Result<()> {
+        if self.is_binary() {
+            return self.push_binary_row(range);
+        }
         let payload = self.data.get(range.clone()).unwrap_or_default();
         let mut r = Reader::new(payload);
         for _ in 0..self.columns {
@@ -162,6 +225,43 @@ impl RowSet {
                     end: start + len,
                 });
             }
+        }
+        if !r.is_empty() {
+            return Err(Error::protocol("row has more cells than columns"));
+        }
+        Ok(())
+    }
+
+    /// Indexes one binary-protocol row: a `0x00` header, a NULL bitmap
+    /// (offset by two bits) and the values of the columns that are not
+    /// NULL.
+    fn push_binary_row(&mut self, range: Range<usize>) -> Result<()> {
+        let payload = self.data.get(range.clone()).unwrap_or_default();
+        let mut r = Reader::new(payload);
+        if r.u8()? != 0x00 {
+            return Err(Error::protocol("binary row without its 0x00 header"));
+        }
+        let bitmap = r.take((self.columns + 7 + 2) / 8)?;
+        for (index, &encoding) in self.binary.iter().enumerate() {
+            let bit = index + 2;
+            let null = bitmap
+                .get(bit / 8)
+                .is_some_and(|byte| byte & (1 << (bit % 8)) != 0);
+            if null {
+                self.cells.push(Cell::NULL);
+                continue;
+            }
+            let len = match encoding {
+                Encoding::Fixed(len) => len,
+                Encoding::Temporal => usize::from(r.u8()?),
+                Encoding::LengthEncoded => r.lenenc_len()?,
+            };
+            let start = range.start + r.pos();
+            r.skip(len)?;
+            self.cells.push(Cell {
+                start,
+                end: start + len,
+            });
         }
         if !r.is_empty() {
             return Err(Error::protocol("row has more cells than columns"));
@@ -213,8 +313,12 @@ impl QueryResult {
         }
     }
 
-    pub(crate) fn rowset(columns: Vec<Column>) -> Self {
-        let rows = RowSet::new(columns.len());
+    pub(crate) fn rowset(columns: Vec<Column>, binary: bool) -> Self {
+        let rows = if binary {
+            RowSet::new_binary(&columns)
+        } else {
+            RowSet::new(columns.len())
+        };
         Self {
             columns,
             rows,

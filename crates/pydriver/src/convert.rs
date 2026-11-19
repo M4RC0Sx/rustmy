@@ -1,9 +1,10 @@
-//! Text-protocol values to Python objects.
+//! Result values to Python objects, from text-protocol rows and from
+//! binary-protocol ones (prepared statements), which give the same objects.
 //!
 //! Each column's converter (and, for dict rows, each key) is chosen once per
 //! result set; rows are then converted in a tight loop straight from the
-//! contiguous row buffer. Byte parsing lives in `rustmy_proto::text`; this
-//! module only builds objects.
+//! contiguous row buffer. Byte parsing lives in `rustmy_proto::text` and
+//! `rustmy_proto::binary`; this module only builds objects.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use pyo3::types::PyType;
 use rustmy_proto::Column;
 use rustmy_proto::QueryResult;
 use rustmy_proto::RowSet;
+use rustmy_proto::binary;
 use rustmy_proto::constants::ColumnType;
 use rustmy_proto::constants::column_flag;
 use rustmy_proto::text;
@@ -138,11 +140,20 @@ pub(crate) fn decimal_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
     DECIMAL.import(py, "decimal", "Decimal")
 }
 
+/// What a binary-protocol cell needs besides its `Kind`.
+#[derive(Debug, Clone, Copy)]
+struct BinaryColumn {
+    column_type: ColumnType,
+    unsigned: bool,
+    decimals: u8,
+}
+
 /// How the rows of one result set become Python objects, decided once from
 /// its columns.
 #[derive(Debug)]
 pub(crate) struct Converter {
     kinds: Vec<Kind>,
+    binary: Vec<BinaryColumn>,
     decimal: Option<Py<PyType>>,
     /// One key per column for dict rows; `None` for tuple rows.
     keys: Option<Vec<Py<PyString>>>,
@@ -179,8 +190,17 @@ impl Converter {
         } else {
             None
         };
+        let binary = columns
+            .iter()
+            .map(|c| BinaryColumn {
+                column_type: c.column_type,
+                unsigned: c.is_unsigned(),
+                decimals: c.decimals,
+            })
+            .collect();
         Ok(Self {
             kinds,
+            binary,
             decimal,
             keys: as_dict.then(|| dict_keys(py, columns, codec)),
             codec: Arc::clone(codec),
@@ -193,31 +213,66 @@ impl Converter {
         &self,
         py: Python<'py>,
         rows: &RowSet,
+        push: impl FnMut(Bound<'py, PyAny>),
+    ) -> PyResult<()> {
+        // Decided once per batch: each protocol gets its own loop, so text
+        // rows (every query but prepared ones) pay nothing for binary ones.
+        if rows.is_binary() {
+            self.convert_rows::<true>(py, rows, push)
+        } else {
+            self.convert_rows::<false>(py, rows, push)
+        }
+    }
+
+    fn convert_rows<'py, const BINARY: bool>(
+        &self,
+        py: Python<'py>,
+        rows: &RowSet,
         mut push: impl FnMut(Bound<'py, PyAny>),
     ) -> PyResult<()> {
         let decimal = self.decimal.as_ref().map(|d| d.bind(py));
         let codec = &*self.codec;
         let custom = &self.custom;
-        let cell_value = |cell: Option<&[u8]>, kind: Kind| match (cell, kind) {
-            (None, _) => Ok(py.None().into_bound(py)),
-            (Some(bytes), Kind::Custom { index, text }) => {
-                custom_value(py, custom, index, text, bytes)
+        let cell_value = |cell: Option<&[u8]>, kind: Kind, index: usize| {
+            let Some(bytes) = cell else {
+                return Ok(py.None().into_bound(py));
+            };
+            if !BINARY {
+                return match kind {
+                    Kind::Custom { index, text } => custom_value(py, custom, index, text, bytes),
+                    _ => value(py, kind, bytes, decimal, codec),
+                };
             }
-            (Some(bytes), _) => value(py, kind, bytes, decimal, codec),
+            let column = *self.binary.get(index).ok_or_else(|| invalid(kind, bytes))?;
+            match kind {
+                Kind::Custom { index, text } => {
+                    let text_form = binary::to_text(
+                        column.column_type,
+                        column.unsigned,
+                        column.decimals,
+                        bytes,
+                    )
+                    .ok_or_else(|| invalid(kind, bytes))?;
+                    custom_value(py, custom, index, text, &text_form)
+                }
+                _ => binary_value(py, kind, column, bytes, decimal, codec),
+            }
         };
         if let Some(keys) = &self.keys {
             for row in rows.rows() {
                 let dict = PyDict::new(py);
-                for ((cell, &kind), key) in row.cells().zip(&self.kinds).zip(keys) {
-                    dict.set_item(key.bind(py), cell_value(cell, kind)?)?;
+                for (index, ((cell, &kind), key)) in
+                    row.cells().zip(&self.kinds).zip(keys).enumerate()
+                {
+                    dict.set_item(key.bind(py), cell_value(cell, kind, index)?)?;
                 }
                 push(dict.into_any());
             }
         } else {
             let mut values = Vec::with_capacity(self.kinds.len());
             for row in rows.rows() {
-                for (cell, &kind) in row.cells().zip(&self.kinds) {
-                    values.push(cell_value(cell, kind)?);
+                for (index, (cell, &kind)) in row.cells().zip(&self.kinds).enumerate() {
+                    values.push(cell_value(cell, kind, index)?);
                 }
                 push(PyTuple::new(py, values.drain(..))?.into_any());
             }
@@ -303,6 +358,47 @@ pub(crate) fn description<'py>(
     PyTuple::new(py, items)
 }
 
+fn invalid(kind: Kind, bytes: &[u8]) -> PyErr {
+    DataError::new_err((
+        0,
+        format!(
+            "invalid {kind:?} value {:?}",
+            String::from_utf8_lossy(bytes)
+        ),
+    ))
+}
+
+/// A binary-protocol cell: numbers and dates from their fixed-width
+/// fields, the rest as in the text protocol (the same bytes).
+fn binary_value<'py>(
+    py: Python<'py>,
+    kind: Kind,
+    column: BinaryColumn,
+    bytes: &[u8],
+    decimal: Option<&Bound<'py, PyType>>,
+    codec: &Codec,
+) -> PyResult<Bound<'py, PyAny>> {
+    let invalid = || invalid(kind, bytes);
+    match kind {
+        Kind::Int if column.unsigned => binary::unsigned(bytes)
+            .ok_or_else(invalid)?
+            .into_bound_py_any(py),
+        Kind::Int => binary::signed(bytes)
+            .ok_or_else(invalid)?
+            .into_bound_py_any(py),
+        Kind::UInt => binary::unsigned(bytes)
+            .ok_or_else(invalid)?
+            .into_bound_py_any(py),
+        Kind::Float => binary::float(bytes, column.decimals)
+            .ok_or_else(invalid)?
+            .into_bound_py_any(py),
+        Kind::Date => Ok(date_object(py, binary::date(bytes))),
+        Kind::DateTime => Ok(datetime_object(py, binary::datetime(bytes))),
+        Kind::Time => time_object(py, binary::time(bytes)).ok_or_else(invalid),
+        _ => value(py, kind, bytes, decimal, codec),
+    }
+}
+
 fn value<'py>(
     py: Python<'py>,
     kind: Kind,
@@ -310,15 +406,7 @@ fn value<'py>(
     decimal: Option<&Bound<'py, PyType>>,
     codec: &Codec,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let invalid = || {
-        DataError::new_err((
-            0,
-            format!(
-                "invalid {kind:?} value {:?}",
-                String::from_utf8_lossy(bytes)
-            ),
-        ))
-    };
+    let invalid = || invalid(kind, bytes);
     match kind {
         Kind::Int => text::parse_i64(bytes)
             .ok_or_else(invalid)?
@@ -330,9 +418,9 @@ fn value<'py>(
             .ok_or_else(invalid)?
             .into_bound_py_any(py),
         Kind::Decimal => decimal.ok_or_else(invalid)?.call1((utf8(py, bytes)?,)),
-        Kind::Date => Ok(date(py, bytes)),
-        Kind::DateTime => Ok(datetime(py, bytes)),
-        Kind::Time => time(py, bytes).ok_or_else(invalid),
+        Kind::Date => Ok(date_object(py, text::parse_date(bytes))),
+        Kind::DateTime => Ok(datetime_object(py, text::parse_datetime(bytes))),
+        Kind::Time => time_object(py, text::parse_time(bytes)).ok_or_else(invalid),
         Kind::Text => codec.decode(py, bytes).map(Bound::into_any),
         // `Custom` cells go through `custom_value` instead.
         Kind::Bytes | Kind::Custom { .. } => Ok(PyBytes::new(py, bytes).into_any()),
@@ -367,15 +455,15 @@ fn utf8<'py>(py: Python<'py>, bytes: &[u8]) -> PyResult<Bound<'py, PyString>> {
 
 /// Zero or otherwise invalid dates, which MySQL can store under permissive
 /// SQL modes, become `None` (as in other MySQL drivers) rather than errors.
-fn date<'py>(py: Python<'py>, bytes: &[u8]) -> Bound<'py, PyAny> {
-    text::parse_date(bytes)
+fn date_object(py: Python<'_>, parsed: Option<text::Date>) -> Bound<'_, PyAny> {
+    parsed
         .and_then(|d| PyDate::new(py, i32::from(d.year), d.month, d.day).ok())
         .map_or_else(|| py.None().into_bound(py), Bound::into_any)
 }
 
 /// Naive `datetime.datetime`: the server stores no time zone.
-fn datetime<'py>(py: Python<'py>, bytes: &[u8]) -> Bound<'py, PyAny> {
-    text::parse_datetime(bytes)
+fn datetime_object(py: Python<'_>, parsed: Option<text::DateTime>) -> Bound<'_, PyAny> {
+    parsed
         .and_then(|v| {
             let d = v.date;
             PyDateTime::new(
@@ -395,8 +483,8 @@ fn datetime<'py>(py: Python<'py>, bytes: &[u8]) -> Bound<'py, PyAny> {
 }
 
 /// `TIME` as `datetime.timedelta` (it can be negative or exceed 24 h).
-fn time<'py>(py: Python<'py>, bytes: &[u8]) -> Option<Bound<'py, PyAny>> {
-    let t = text::parse_time(bytes)?;
+fn time_object(py: Python<'_>, parsed: Option<text::Time>) -> Option<Bound<'_, PyAny>> {
+    let t = parsed?;
     let seconds = i32::from(t.hours) * 3600 + i32::from(t.minutes) * 60 + i32::from(t.seconds);
     let micros = i32::try_from(t.micros).ok()?;
     let sign = if t.negative { -1 } else { 1 };

@@ -1,5 +1,8 @@
 //! A blocking connection: transport, handshake, authentication and commands.
 
+use std::collections::HashMap;
+use std::fs;
+use std::fs::File;
 use std::io;
 use std::io::Read;
 use std::io::Write;
@@ -8,6 +11,7 @@ use std::net::TcpStream;
 use std::net::ToSocketAddrs;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -17,10 +21,12 @@ use crate::auth::encrypt_password;
 use crate::auth::parse_public_key;
 use crate::auth::parsec_response;
 use crate::auth::trim_nonce;
+use crate::binary::Execute;
 use crate::buf::Reader;
 use crate::buf::put_nul_bytes;
 use crate::charset::handshake_collation;
 use crate::column::Column;
+use crate::compress::Compression;
 use crate::constants::capability;
 use crate::constants::command;
 use crate::constants::status;
@@ -30,6 +36,7 @@ use crate::handshake::HandshakeResponse;
 use crate::handshake::ServerHandshake;
 use crate::handshake::ssl_request;
 use crate::packet::PacketStream;
+use crate::packet::ReplyStart;
 use crate::result::QueryResult;
 use crate::result::RowPacket;
 use crate::result::RowSet;
@@ -38,6 +45,7 @@ use crate::result::parse_eof;
 use crate::result::parse_err;
 use crate::result::parse_ok;
 use crate::result::row_terminator;
+use crate::sql::local_infile_names;
 use crate::tls::SslMode;
 use crate::tls::TlsOpts;
 use crate::tls::client_config;
@@ -65,6 +73,20 @@ const PERFORM_FULL_AUTH: u8 = 0x04;
 const CACHING_SHA2_REQUEST_PUBLIC_KEY: u8 = 0x02;
 /// `sha256_password`: client asks for the server's RSA public key.
 const SHA256_REQUEST_PUBLIC_KEY: u8 = 0x01;
+
+/// The server could not re-prepare a statement after a schema change.
+const ER_NEED_REPREPARE: u16 = 1615;
+
+/// Bytes of a local file sent per packet (`LOAD DATA LOCAL INFILE`). Measured
+/// from 4 to 64 KiB (benches/README.md): flat on a local link, while over a
+/// slow compressed one 16 KiB was 5% faster with zstd than 64 KiB.
+const LOCAL_INFILE_CHUNK: usize = 16 * 1024;
+
+/// Default size of the prepared-statement cache: the server allows 16,382
+/// prepared statements across all its connections by default
+/// (`max_prepared_stmt_count`), so a few hundred pooled connections must
+/// fit.
+pub const DEFAULT_STATEMENT_CACHE: usize = 32;
 
 /// Connection parameters.
 #[derive(Debug, Clone)]
@@ -94,6 +116,17 @@ pub struct Opts {
     /// PEM file with the server's RSA public key, used to encrypt the
     /// password over plain TCP instead of asking the server for its key.
     pub server_public_key: Option<PathBuf>,
+    /// Prepared statements kept per connection ([`Conn::execute_cached`]).
+    pub statement_cache: usize,
+    /// Compressed protocol, if the server offers it: zstd falls back to
+    /// zlib, and no compression at all if the server offers neither.
+    pub compress: Option<Compression>,
+    /// Allows `LOAD DATA LOCAL INFILE` of the files inside this directory
+    /// (resolved when connecting, symbolic links included). A request is
+    /// answered only if the statement being run names that file and the
+    /// file, resolved too, is inside the directory; any other is refused
+    /// with [`Error::LocalInfile`] before touching the disk.
+    pub local_infile_dir: Option<PathBuf>,
 }
 
 impl Default for Opts {
@@ -112,6 +145,9 @@ impl Default for Opts {
             charset: "utf8mb4".to_owned(),
             tls: TlsOpts::default(),
             server_public_key: None,
+            statement_cache: DEFAULT_STATEMENT_CACHE,
+            compress: None,
+            local_infile_dir: None,
         }
     }
 }
@@ -269,8 +305,54 @@ fn first_response(
     }
 }
 
-fn load_public_key(path: &std::path::Path) -> Result<rsa::PublicKey> {
-    let pem = std::fs::read(path).map_err(|e| {
+/// Whether `reply` asks the server for its RSA public key. Only then may the
+/// next `AuthMoreData` be a key: accepting one at any other time would let a
+/// man in the middle replace a key pinned with `server_public_key` (or skip
+/// the request) and decrypt the password.
+fn requests_key(plugin: AuthPlugin, reply: &[u8]) -> bool {
+    matches!(
+        (plugin, reply),
+        (AuthPlugin::CachingSha2, [CACHING_SHA2_REQUEST_PUBLIC_KEY])
+            | (AuthPlugin::Sha256, [SHA256_REQUEST_PUBLIC_KEY])
+    )
+}
+
+/// [`Opts::local_infile_dir`] resolved, or why it cannot be used.
+fn local_infile_dir(opts: &Opts) -> Result<Option<PathBuf>> {
+    opts.local_infile_dir
+        .as_deref()
+        .map(allowed_directory)
+        .transpose()
+}
+
+fn allowed_directory(path: &Path) -> Result<PathBuf> {
+    let resolved = fs::canonicalize(path)
+        .map_err(|err| Error::Config(format!("local_infile_dir {}: {err}", path.display())))?;
+    if !resolved.is_dir() {
+        return Err(Error::Config(format!(
+            "local_infile_dir {} is not a directory",
+            path.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Fills `buf` from `file` unless it ends first; returns the bytes read.
+fn read_full(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0;
+    while let Some(rest) = buf.get_mut(filled..).filter(|rest| !rest.is_empty()) {
+        match file.read(rest) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(filled)
+}
+
+fn load_public_key(path: &Path) -> Result<rsa::PublicKey> {
+    let pem = fs::read(path).map_err(|e| {
         Error::Config(format!(
             "cannot read server_public_key {}: {e}",
             path.display()
@@ -294,6 +376,75 @@ pub enum ReadOutcome {
     Done { warnings: u16 },
 }
 
+/// A statement prepared on the server ([`Conn::prepare`]).
+#[derive(Debug, Clone)]
+pub struct Statement {
+    /// The server's id for it, valid on this connection only.
+    pub id: u32,
+    /// Number of `?` placeholders.
+    pub params: u16,
+    /// Columns of its result set (empty when it returns none).
+    pub columns: Vec<Column>,
+}
+
+/// Statements prepared by [`Conn::execute_cached`], keyed by their SQL; the
+/// least recently used is closed when a new one needs the room.
+#[derive(Debug, Default)]
+struct StatementCache {
+    capacity: usize,
+    entries: HashMap<Vec<u8>, (Statement, u64)>,
+    clock: u64,
+}
+
+impl StatementCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            // The statement being run is always kept.
+            capacity: capacity.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn get(&mut self, sql: &[u8]) -> Option<&Statement> {
+        self.clock += 1;
+        let clock = self.clock;
+        self.entries.get_mut(sql).map(|(statement, used)| {
+            *used = clock;
+            &*statement
+        })
+    }
+
+    /// The statement to close to make room for one more, if the cache is
+    /// full.
+    fn evict(&mut self) -> Option<u32> {
+        if self.entries.len() < self.capacity {
+            return None;
+        }
+        let oldest = self
+            .entries
+            .iter()
+            .min_by_key(|(_, (_, used))| *used)
+            .map(|(sql, _)| sql.clone())?;
+        self.entries
+            .remove(&oldest)
+            .map(|(statement, _)| statement.id)
+    }
+
+    fn insert(&mut self, sql: Vec<u8>, statement: Statement) {
+        self.clock += 1;
+        self.entries.insert(sql, (statement, self.clock));
+    }
+
+    /// Forgets every statement: the server has closed them.
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn remove(&mut self, sql: &[u8]) -> Option<u32> {
+        self.entries.remove(sql).map(|(statement, _)| statement.id)
+    }
+}
+
 /// What a pipelined batch did ([`Conn::pipeline`]).
 #[derive(Debug, Default)]
 pub struct PipelineTotals {
@@ -306,6 +457,18 @@ pub struct PipelineTotals {
     /// The first statement the server refused: its index in the batch and
     /// the error.
     pub error: Option<(usize, Error)>,
+}
+
+/// Which local files the server may ask for during the current command.
+#[derive(Debug)]
+enum Infile {
+    /// None.
+    Refuse,
+    /// Those the statement names (`LOAD DATA LOCAL INFILE 'name'`).
+    Allow(Vec<Vec<u8>>),
+    /// None, and a request breaks the connection: the server would read
+    /// the statements sent after this one as the file's contents.
+    Pipelined,
 }
 
 /// The result set whose rows are still unread on the wire.
@@ -338,6 +501,19 @@ pub struct Conn {
     pending: Option<Pending>,
     /// Last [`StreamId`] handed out.
     last_stream_id: u64,
+    /// Whether the reply being read comes from `COM_STMT_EXECUTE` (its
+    /// result sets, queued ones included, have binary rows).
+    binary_reply: bool,
+    /// Statements prepared by [`Conn::execute_cached`], by SQL.
+    statements: StatementCache,
+    /// Compression in use, negotiated in the handshake.
+    compression: Option<Compression>,
+    /// zstd level sent in the handshake response.
+    zstd_level: u8,
+    /// [`Opts::local_infile_dir`], resolved.
+    local_infile_dir: Option<PathBuf>,
+    /// Local files the current command may send.
+    infile: Infile,
 }
 
 impl Conn {
@@ -348,11 +524,22 @@ impl Conn {
     /// I/O failures, protocol violations, authentication errors reported
     /// by the server, or authentication methods not implemented yet.
     pub fn connect(opts: &Opts) -> Result<Self> {
-        Self::establish(Stream::connect(opts)?, opts)
+        // Settings first: a bad one fails before anything goes on the wire.
+        let local_infile_dir = local_infile_dir(opts)?;
+        Self::handshake(Stream::connect(opts)?, opts, local_infile_dir)
     }
 
     /// Handshake and authentication over an already open transport.
+    #[cfg(feature = "fuzzing")]
     pub(crate) fn establish(transport: Stream, opts: &Opts) -> Result<Self> {
+        Self::handshake(transport, opts, local_infile_dir(opts)?)
+    }
+
+    fn handshake(
+        transport: Stream,
+        opts: &Opts,
+        local_infile_dir: Option<PathBuf>,
+    ) -> Result<Self> {
         let mut stream = PacketStream::new(transport);
         let mut buf = Vec::new();
         stream.read_into(&mut buf)?;
@@ -365,10 +552,26 @@ impl Conn {
         if opts.database.is_some() {
             wanted |= capability::CONNECT_WITH_DB;
         }
+        if local_infile_dir.is_some() {
+            wanted |= capability::LOCAL_FILES;
+        }
         let use_tls = Self::negotiate_tls(opts, &greeting)?;
         if use_tls {
             wanted |= capability::SSL;
         }
+        // With both flags the server picks zlib: ask for one only.
+        let zstd_offered = greeting.capabilities & capability::ZSTD_COMPRESSION_ALGORITHM != 0;
+        let (compression, zstd_level) = match opts.compress {
+            Some(Compression::Zstd { level }) if zstd_offered => {
+                wanted |= capability::ZSTD_COMPRESSION_ALGORITHM;
+                (Some(Compression::Zstd { level }), level)
+            }
+            Some(_) if greeting.capabilities & capability::COMPRESS != 0 => {
+                wanted |= capability::COMPRESS;
+                (Some(Compression::Zlib), 0)
+            }
+            _ => (None, 0),
+        };
         let capabilities = wanted & greeting.capabilities;
         let collation =
             handshake_collation(&opts.charset, greeting.collation, greeting.is_mariadb())
@@ -405,8 +608,18 @@ impl Conn {
             buf,
             pending: None,
             last_stream_id: 0,
+            binary_reply: false,
+            statements: StatementCache::new(opts.statement_cache),
+            compression,
+            zstd_level,
+            local_infile_dir,
+            infile: Infile::Refuse,
         };
         conn.authenticate(opts)?;
+        conn.stream.authenticated();
+        if let Some(algorithm) = compression {
+            conn.stream.compress(algorithm)?;
+        }
         Ok(conn)
     }
 
@@ -434,6 +647,12 @@ impl Conn {
         Ok(server_has_tls)
     }
 
+    /// Compression in use, if any.
+    #[must_use]
+    pub const fn compression(&self) -> Option<Compression> {
+        self.compression
+    }
+
     /// Whether the connection is encrypted with TLS.
     #[must_use]
     pub fn is_tls(&self) -> bool {
@@ -452,10 +671,12 @@ impl Conn {
             auth_response: &auth_response,
             database: opts.database.as_deref(),
             auth_plugin: plugin.name(),
+            zstd_level: self.zstd_level,
         }
         .encode()?;
         self.stream.write_packet(&response)?;
-        self.auth_exchange(password, plugin, nonce)
+        let key_requested = requests_key(plugin, &auth_response);
+        self.auth_exchange(password, plugin, nonce, key_requested)
     }
 
     fn first_response(&self, plugin: AuthPlugin, password: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
@@ -464,12 +685,14 @@ impl Conn {
     }
 
     /// Runs the server-driven part of authentication (auth switches and
-    /// plugin-specific round trips) until OK or ERR.
+    /// plugin-specific round trips) until OK or ERR. `key_requested` says
+    /// whether what the client last sent asked for the server's public key.
     fn auth_exchange(
         &mut self,
         password: &[u8],
         mut plugin: AuthPlugin,
         mut nonce: Vec<u8>,
+        mut key_requested: bool,
     ) -> Result<()> {
         let secure = self.stream.get_ref().is_secure();
         loop {
@@ -513,8 +736,14 @@ impl Conn {
                                 vec![CACHING_SHA2_REQUEST_PUBLIC_KEY]
                             }
                         }
-                        // The public key we asked for.
+                        // The public key we asked for; never one we did not
+                        // (a pinned key is never requested).
                         (AuthPlugin::CachingSha2 | AuthPlugin::Sha256, pem) => {
+                            if !key_requested {
+                                return Err(Error::protocol(
+                                    "the server sent a public key the client did not request",
+                                ));
+                            }
                             encrypt_password(password, &nonce, &parse_public_key(pem)?)?
                         }
                         (AuthPlugin::Parsec, salt) => parsec_response(password, &nonce, salt)?,
@@ -531,6 +760,7 @@ impl Conn {
                 }
                 _ => return Err(Error::protocol("unexpected packet during authentication")),
             };
+            key_requested = requests_key(plugin, &reply);
             self.stream.write_packet(&reply)?;
         }
     }
@@ -564,8 +794,158 @@ impl Conn {
     /// I/O failures, protocol violations or an ERR packet from the server.
     pub fn query_streamed(&mut self, sql: &[u8]) -> Result<(QueryResult, Option<StreamId>)> {
         self.drain_results()?;
+        self.infile = self.allowed_files(sql);
         self.stream.write_command(command::QUERY, sql)?;
+        self.binary_reply = false;
         self.read_head()
+    }
+
+    /// Prepares `sql` (with `?` placeholders) on the server
+    /// (`COM_STMT_PREPARE`).
+    ///
+    /// # Errors
+    ///
+    /// I/O failures, protocol violations, or the server's error (a syntax
+    /// error, too many prepared statements...).
+    pub fn prepare(&mut self, sql: &[u8]) -> Result<Statement> {
+        self.drain_results()?;
+        self.stream.write_command(command::STMT_PREPARE, sql)?;
+        self.read_packet()?;
+        match self.buf.first() {
+            Some(0x00) => {}
+            Some(0xFF) => return Err(parse_err(&self.buf)),
+            _ => return Err(Error::protocol("unexpected reply to COM_STMT_PREPARE")),
+        }
+        let mut r = Reader::new(&self.buf);
+        r.skip(1)?;
+        let id = r.u32()?;
+        let columns = usize::from(r.u16()?);
+        let params = r.u16()?;
+        let deprecate_eof = self.capabilities & capability::DEPRECATE_EOF != 0;
+        // Parameter definitions say nothing useful (every type is "string"
+        // before the first execution).
+        for _ in 0..params {
+            self.read_packet()?;
+        }
+        if params > 0 && !deprecate_eof {
+            self.read_packet()?;
+        }
+        let mut definitions = Vec::with_capacity(columns.min(4096));
+        for _ in 0..columns {
+            self.read_packet()?;
+            definitions.push(Column::parse(&self.buf)?);
+        }
+        if columns > 0 && !deprecate_eof {
+            self.read_packet()?;
+        }
+        Ok(Statement {
+            id,
+            params,
+            columns: definitions,
+        })
+    }
+
+    /// Runs a prepared statement (`COM_STMT_EXECUTE`, `payload` from
+    /// [`crate::Execute::finish`]) and returns its first result, leaving
+    /// rows on the wire as [`Conn::query_streamed`] does. Rows are binary
+    /// ([`RowSet::is_binary`]).
+    ///
+    /// # Errors
+    ///
+    /// I/O failures, protocol violations or an ERR packet from the server.
+    pub fn execute_streamed(&mut self, payload: &[u8]) -> Result<(QueryResult, Option<StreamId>)> {
+        self.drain_results()?;
+        self.stream.write_command(command::STMT_EXECUTE, payload)?;
+        self.binary_reply = true;
+        self.read_head()
+    }
+
+    /// Like [`Conn::execute_streamed`], reading every row.
+    ///
+    /// # Errors
+    ///
+    /// As [`Conn::execute_streamed`].
+    pub fn execute(&mut self, payload: &[u8]) -> Result<QueryResult> {
+        let (result, stream) = self.execute_streamed(payload)?;
+        self.read_all(result, stream)
+    }
+
+    /// Frees a prepared statement on the server (`COM_STMT_CLOSE`, which
+    /// has no reply).
+    ///
+    /// # Errors
+    ///
+    /// I/O failures.
+    pub fn close_statement(&mut self, id: u32) -> Result<()> {
+        self.drain_results()?;
+        self.stream
+            .write_command(command::STMT_CLOSE, &id.to_le_bytes())
+    }
+
+    /// Runs `sql` as a prepared statement with `params`, preparing it first
+    /// unless this connection already has (the last
+    /// [`Opts::statement_cache`] statements are kept); returns its first
+    /// result as [`Conn::execute_streamed`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Parameters`] when `params` does not match the statement's
+    /// placeholders, and as [`Conn::prepare`] and [`Conn::execute_streamed`].
+    pub fn execute_cached_streamed(
+        &mut self,
+        sql: &[u8],
+        params: &Execute,
+    ) -> Result<(QueryResult, Option<StreamId>)> {
+        let id = self.cached_statement(sql, params)?;
+        match self.execute_streamed(&params.finish(id)) {
+            // The server could not re-prepare it after a schema change:
+            // prepare it again, once.
+            Err(Error::Server {
+                code: ER_NEED_REPREPARE,
+                ..
+            }) => {
+                if let Some(id) = self.statements.remove(sql) {
+                    self.close_statement(id)?;
+                }
+                let id = self.cached_statement(sql, params)?;
+                self.execute_streamed(&params.finish(id))
+            }
+            other => other,
+        }
+    }
+
+    /// Like [`Conn::execute_cached_streamed`], reading every row.
+    ///
+    /// # Errors
+    ///
+    /// As [`Conn::execute_cached_streamed`].
+    pub fn execute_cached(&mut self, sql: &[u8], params: &Execute) -> Result<QueryResult> {
+        let (result, stream) = self.execute_cached_streamed(sql, params)?;
+        self.read_all(result, stream)
+    }
+
+    /// The id of `sql` prepared on this connection, preparing it (and
+    /// closing the least recently used statement) if needed.
+    fn cached_statement(&mut self, sql: &[u8], params: &Execute) -> Result<u32> {
+        let expected = if let Some(statement) = self.statements.get(sql) {
+            (statement.id, statement.params)
+        } else {
+            if let Some(oldest) = self.statements.evict() {
+                self.close_statement(oldest)?;
+            }
+            let statement = self.prepare(sql)?;
+            let found = (statement.id, statement.params);
+            self.statements.insert(sql.to_vec(), statement);
+            found
+        };
+        let (id, placeholders) = expected;
+        if usize::from(placeholders) != params.len() {
+            return Err(Error::Parameters {
+                expected: placeholders,
+                given: params.len(),
+            });
+        }
+        Ok(id)
     }
 
     /// How many bytes of statements [`Conn::pipeline`] may send in one
@@ -604,9 +984,9 @@ impl Conn {
         &mut self,
         statements: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<PipelineTotals> {
-        let reply_seqs = self.send_pipeline(statements)?;
+        let replies = self.send_pipeline(command::QUERY, statements)?;
         let mut totals = PipelineTotals::default();
-        self.read_replies(&reply_seqs, &mut totals)?;
+        self.read_replies(&replies, &mut totals)?;
         Ok(totals)
     }
 
@@ -623,13 +1003,76 @@ impl Conn {
         statements: impl IntoIterator<Item = &'a [u8]>,
         last: &'a [u8],
     ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
-        let reply_seqs = self.send_pipeline(statements.into_iter().chain([last]))?;
-        let (&last_seq, others) = reply_seqs
+        let replies = self.send_pipeline(command::QUERY, statements.into_iter().chain([last]))?;
+        self.finish_pipeline_streamed(&replies)
+    }
+
+    /// Runs `sql` as a prepared statement once per item of `params`,
+    /// pipelined as [`Conn::pipeline`] runs text statements (preparing it
+    /// first unless this connection already has, as
+    /// [`Conn::execute_cached`] does).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Parameters`] when an item does not match the statement's
+    /// placeholders (nothing is sent), as [`Conn::prepare`], I/O failures
+    /// and protocol violations (server errors go in the totals).
+    pub fn execute_many_cached(
+        &mut self,
+        sql: &[u8],
+        params: &[Execute],
+    ) -> Result<PipelineTotals> {
+        let payloads = self.execute_payloads(sql, params)?;
+        let replies =
+            self.send_pipeline(command::STMT_EXECUTE, payloads.iter().map(Vec::as_slice))?;
+        let mut totals = PipelineTotals::default();
+        self.read_replies(&replies, &mut totals)?;
+        Ok(totals)
+    }
+
+    /// Like [`Conn::execute_many_cached`] with `last` run after `params`,
+    /// whose reply is left as [`Conn::execute_cached_streamed`] leaves it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Conn::execute_many_cached`], and the first server error of the
+    /// batch (once every reply has been read).
+    pub fn execute_many_cached_streamed(
+        &mut self,
+        sql: &[u8],
+        params: &[Execute],
+        last: &Execute,
+    ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
+        let mut payloads = self.execute_payloads(sql, params)?;
+        payloads.extend(self.execute_payloads(sql, std::slice::from_ref(last))?);
+        let replies =
+            self.send_pipeline(command::STMT_EXECUTE, payloads.iter().map(Vec::as_slice))?;
+        self.finish_pipeline_streamed(&replies)
+    }
+
+    /// `COM_STMT_EXECUTE` payloads of `sql` (prepared if needed) for each
+    /// item of `params`.
+    fn execute_payloads(&mut self, sql: &[u8], params: &[Execute]) -> Result<Vec<Vec<u8>>> {
+        let mut payloads = Vec::with_capacity(params.len());
+        for item in params {
+            let id = self.cached_statement(sql, item)?;
+            payloads.push(item.finish(id));
+        }
+        Ok(payloads)
+    }
+
+    /// Reads every reply of a pipelined batch but the last one's head, as
+    /// [`Conn::pipeline_streamed`] leaves it.
+    fn finish_pipeline_streamed(
+        &mut self,
+        replies: &[ReplyStart],
+    ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
+        let (&last, others) = replies
             .split_last()
             .ok_or_else(|| Error::protocol("empty pipeline"))?;
         let mut totals = PipelineTotals::default();
         self.read_replies(others, &mut totals)?;
-        self.stream.expect_seq(last_seq);
+        self.stream.expect_reply(last);
         if let Some((_, err)) = totals.error.take() {
             // The last statement ran too: read its reply before reporting.
             match self.read_reply(&mut totals) {
@@ -641,23 +1084,31 @@ impl Conn {
         Ok((totals, head, stream))
     }
 
-    /// Sends one `COM_QUERY` per statement in a single write; returns the
-    /// sequence id each reply starts at.
+    /// Sends one `cmd` (`COM_QUERY` or `COM_STMT_EXECUTE`) per payload in a
+    /// single write; returns where each reply starts.
     fn send_pipeline<'a>(
         &mut self,
-        statements: impl IntoIterator<Item = &'a [u8]>,
-    ) -> Result<Vec<u8>> {
+        cmd: u8,
+        payloads: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<Vec<ReplyStart>> {
         self.drain_results()?;
-        let mut reply_seqs = Vec::new();
+        let payloads: Vec<&[u8]> = payloads.into_iter().collect();
+        self.infile = match payloads.as_slice() {
+            [only] if cmd == command::QUERY => self.allowed_files(only),
+            [_] => Infile::Refuse,
+            _ => Infile::Pipelined,
+        };
+        let mut replies = Vec::new();
         self.stream
-            .write_commands(command::QUERY, statements, &mut reply_seqs)?;
-        Ok(reply_seqs)
+            .write_commands(cmd, payloads.iter().copied(), &mut replies)?;
+        self.binary_reply = cmd == command::STMT_EXECUTE;
+        Ok(replies)
     }
 
-    /// Reads the replies starting at `reply_seqs`, adding them to `totals`.
-    fn read_replies(&mut self, reply_seqs: &[u8], totals: &mut PipelineTotals) -> Result<()> {
-        for (index, &seq) in reply_seqs.iter().enumerate() {
-            self.stream.expect_seq(seq);
+    /// Reads the replies starting at `replies`, adding them to `totals`.
+    fn read_replies(&mut self, replies: &[ReplyStart], totals: &mut PipelineTotals) -> Result<()> {
+        for (index, &start) in replies.iter().enumerate() {
+            self.stream.expect_reply(start);
             match self.read_reply(totals) {
                 Ok(()) => {}
                 Err(err @ Error::Server { .. }) => {
@@ -839,24 +1290,145 @@ impl Conn {
                 Ok((QueryResult::from_ok(ok), None))
             }
             Some(0xFF) => Err(parse_err(&self.buf)),
-            Some(0xFB) => {
-                // LOCAL INFILE request: refuse by sending an empty file.
-                self.stream.write_packet(&[])?;
-                self.read_packet()?;
-                if self.buf.first() == Some(&0x00) {
-                    self.status = parse_ok(&self.buf)?.status;
-                }
-                Err(Error::unsupported("LOAD DATA LOCAL INFILE"))
-            }
+            Some(0xFB) => self.local_infile(),
             Some(_) => {
                 let count = Reader::new(&self.buf).lenenc_len()?;
-                self.read_columns(count)
+                self.read_columns(count, self.binary_reply)
             }
             None => Err(Error::protocol("empty response packet")),
         }
     }
 
-    fn read_columns(&mut self, count: usize) -> Result<(QueryResult, Option<StreamId>)> {
+    /// Local files `sql` may make the server ask for.
+    fn allowed_files(&self, sql: &[u8]) -> Infile {
+        if self.local_infile_dir.is_none() {
+            return Infile::Refuse;
+        }
+        let no_backslash_escapes = self.status & status::NO_BACKSLASH_ESCAPES != 0;
+        Infile::Allow(local_infile_names(sql, no_backslash_escapes))
+    }
+
+    /// Answers the server's request for a local file (`LOAD DATA LOCAL
+    /// INFILE`, the request in `buf`) with the file, or with an empty one
+    /// if it is not allowed, and reads the statement's reply.
+    fn local_infile(&mut self) -> Result<(QueryResult, Option<StreamId>)> {
+        if matches!(self.infile, Infile::Pipelined) {
+            self.stream.get_mut().shutdown();
+            return Err(Error::protocol(
+                "the server asked for a local file in the middle of a pipelined batch",
+            ));
+        }
+        let name = self.buf.get(1..).unwrap_or_default().to_vec();
+        let refused = match self.open_local_file(&name) {
+            Ok((path, file)) => {
+                self.send_file(&path, file)?;
+                None
+            }
+            Err(reason) => Some(reason),
+        };
+        if refused.is_some() {
+            // An empty file ends the request; the statement loads nothing.
+            self.stream.write_packet(&[])?;
+        }
+        self.read_packet()?;
+        let reply = match self.buf.first() {
+            Some(0x00) => {
+                let ok = parse_ok(&self.buf)?;
+                self.status = ok.status;
+                Ok((QueryResult::from_ok(ok), None))
+            }
+            Some(0xFF) => Err(parse_err(&self.buf)),
+            _ => Err(Error::protocol(
+                "expected an OK or ERR packet after a local file",
+            )),
+        };
+        match (refused, reply) {
+            (_, Err(err @ (Error::Io(_) | Error::Protocol(_)))) | (None, Err(err)) => Err(err),
+            (Some(reason), _) => Err(Error::LocalInfile(reason)),
+            (None, reply) => reply,
+        }
+    }
+
+    /// Opens the local file `name` (as the server asked for it) if this
+    /// command may send it, or says why not. Nothing on disk is touched
+    /// unless the statement named the file.
+    fn open_local_file(&self, name: &[u8]) -> std::result::Result<(PathBuf, File), String> {
+        let shown = String::from_utf8_lossy(name);
+        let Some(dir) = &self.local_infile_dir else {
+            return Err(format!(
+                "the server asked for {shown:?}, but LOAD DATA LOCAL INFILE is disabled \
+                 (local_infile_dir allows the files of a directory)"
+            ));
+        };
+        let named = match &self.infile {
+            Infile::Allow(names) => names.iter().any(|allowed| allowed == name),
+            Infile::Refuse | Infile::Pipelined => false,
+        };
+        if !named {
+            return Err(format!(
+                "the server asked for {shown:?}, which the statement being run does not name"
+            ));
+        }
+        let path = std::str::from_utf8(name)
+            .map_err(|_| format!("the file name {shown:?} is not valid UTF-8"))?;
+        // Relative names start at the working directory, as in other clients.
+        let resolved = fs::canonicalize(path).map_err(|err| format!("{path}: {err}"))?;
+        if !resolved.starts_with(dir) {
+            return Err(format!(
+                "{path} is outside local_infile_dir ({})",
+                dir.display()
+            ));
+        }
+        // Checked before opening too: opening a FIFO blocks until something
+        // writes to it, with the connection held. The descriptor is checked
+        // again below, in case the path changed in between.
+        let is_file = fs::metadata(&resolved)
+            .map_err(|err| format!("{path}: {err}"))?
+            .is_file();
+        if !is_file {
+            return Err(format!("{path} is not a regular file"));
+        }
+        let file = File::open(&resolved).map_err(|err| format!("{path}: {err}"))?;
+        let is_file = file
+            .metadata()
+            .map_err(|err| format!("{path}: {err}"))?
+            .is_file();
+        if !is_file {
+            return Err(format!("{path} is not a regular file"));
+        }
+        Ok((resolved, file))
+    }
+
+    /// Sends `file` in packets and the empty packet that ends it. If the
+    /// file cannot be read to the end, the connection is closed instead,
+    /// so the server aborts the statement rather than loading part of it.
+    fn send_file(&mut self, path: &Path, mut file: File) -> Result<()> {
+        let mut chunk = vec![0; LOCAL_INFILE_CHUNK];
+        loop {
+            let len = match read_full(&mut file, &mut chunk) {
+                Ok(len) => len,
+                Err(err) => {
+                    self.stream.get_mut().shutdown();
+                    return Err(io::Error::new(
+                        err.kind(),
+                        format!("reading {}: {err}", path.display()),
+                    )
+                    .into());
+                }
+            };
+            if len == 0 {
+                return self.stream.write_packet(&[]);
+            }
+            self.stream
+                .write_packet(chunk.get(..len).unwrap_or_default())?;
+        }
+    }
+
+    fn read_columns(
+        &mut self,
+        count: usize,
+        binary: bool,
+    ) -> Result<(QueryResult, Option<StreamId>)> {
         let deprecate_eof = self.capabilities & capability::DEPRECATE_EOF != 0;
         // Cap the preallocation: `count` comes from the server.
         let mut columns = Vec::with_capacity(count.min(4096));
@@ -874,7 +1446,7 @@ impl Conn {
         self.last_stream_id += 1;
         let id = StreamId(self.last_stream_id);
         self.pending = Some(Pending { id, deprecate_eof });
-        Ok((QueryResult::rowset(columns), Some(id)))
+        Ok((QueryResult::rowset(columns, binary), Some(id)))
     }
 
     /// Switches the default database (`COM_INIT_DB`). `database` is in the
@@ -900,6 +1472,8 @@ impl Conn {
     /// I/O failures or an ERR packet.
     pub fn reset_connection(&mut self) -> Result<()> {
         self.drain_results()?;
+        // The reset closes every prepared statement.
+        self.statements.clear();
         self.stream.write_command(command::RESET_CONNECTION, &[])?;
         self.expect_ok()
     }
@@ -921,6 +1495,8 @@ impl Conn {
         database: Option<&[u8]>,
     ) -> Result<()> {
         self.drain_results()?;
+        // The new session has none of the old one's prepared statements.
+        self.statements.clear();
         let plugin = self.default_plugin;
         let nonce = self.greeting_nonce.clone();
         let auth_response = self.first_response(plugin, password.as_bytes(), &nonce)?;
@@ -935,7 +1511,8 @@ impl Conn {
         payload.extend_from_slice(&u16::from(self.collation).to_le_bytes());
         put_nul_bytes(&mut payload, plugin.name());
         self.stream.write_command(command::CHANGE_USER, &payload)?;
-        self.auth_exchange(password.as_bytes(), plugin, nonce)
+        let key_requested = requests_key(plugin, &auth_response);
+        self.auth_exchange(password.as_bytes(), plugin, nonce, key_requested)
     }
 
     /// Discards unread rows of a streamed result set and unread results of
@@ -949,6 +1526,8 @@ impl Conn {
                 self.discard_pending_rows()?;
             }
         }
+        // What the previous command allowed ends with its results.
+        self.infile = Infile::Refuse;
         Ok(())
     }
 

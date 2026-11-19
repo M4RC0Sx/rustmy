@@ -1,0 +1,45 @@
+{
+  "date": "2026-11-18T16:17:21+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 5,
+  "title": "LOAD DATA LOCAL INFILE, local: throughput relative to mysqlclient",
+  "default": "rustmy",
+  "labels": {
+    "mysqlclient": "mysqlclient",
+    "pymysql": "PyMySQL"
+  },
+  "bandwidth_kbps": 0,
+  "sweep": [
+    {
+      "label": "1M rows into BLACKHOLE",
+      "seconds": {
+        "mysqlclient": 0.61091295897495,
+        "pymysql": 0.6213842919969466,
+        "rustmy": 0.5915562080044765
+      }
+    },
+    {
+      "label": "1M rows into InnoDB",
+      "seconds": {
+        "mysqlclient": 1.3006017500010785,
+        "pymysql": 1.2994853339914698,
+        "rustmy": 1.3060594589915127
+      }
+    },
+    {
+      "label": "100 loads of 1,000 rows",
+      "seconds": {
+        "mysqlclient": 0.08169583301059902,
+        "pymysql": 0.08607829199172556,
+        "rustmy": 0.07749620798858814
+      }
+    }
+  ]
+}

@@ -11,6 +11,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -19,12 +22,16 @@ jobs:
     name: Rust (fmt, clippy, tests)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: nextest
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The fuzzing hooks are compiled out of normal builds; lint them too.
@@ -34,7 +41,9 @@ jobs:
       # THIRD-PARTY-LICENSES ships in every wheel: it must match the crates
       # compiled in (regenerate with the command in about.toml). --locked, not
       # --frozen: the other platforms' crates may not be in this runner's cache.
-      - uses: taiki-e/install-action@cargo-about
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-about
       - run: cargo about generate --locked -m crates/pydriver/Cargo.toml about.hbs -o THIRD-PARTY-LICENSES
       - run: git diff --exit-code THIRD-PARTY-LICENSES
 
@@ -62,17 +71,31 @@ jobs:
       MARIADB_VERSION: ${{ matrix.version }}
       RUSTMY_TEST_SERVERS: ${{ matrix.server }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: nextest
       - run: docker compose up -d --wait ${{ matrix.server }}
       - run: cargo nextest run -p rustmy-proto --run-ignored only --no-capture
-      - uses: astral-sh/setup-uv@v10.3.3
+      # The same over the compressed protocol (zstd on MySQL; MariaDB has
+      # none and falls back to zlib, which the Python pass below uses).
+      - name: Rust, compressed
+        run: cargo nextest run -p rustmy-proto --run-ignored only --no-capture
+        env:
+          RUSTMY_TEST_COMPRESS: zstd
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       # Two passes on the same server: Python 3.10 resolves SQLAlchemy 2.0,
       # Python 3.15 the latest line (2.1 needs Python 3.11+).
       - run: uv sync --locked
       - run: uv run pytest -m integration
+      - name: Python, compressed
+        run: uv run pytest -m integration
+        env:
+          RUSTMY_TEST_COMPRESS: zlib
       - run: uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db ${{ matrix.server }}
       - name: Python 3.15
         env:
@@ -86,8 +109,24 @@ jobs:
     name: cargo-deny (licenses, advisories)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
+
+  msrv:
+    name: MSRV (Rust 1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Keep in step with rust-version in Cargo.toml: whoever builds from the
+      # sdist may have this toolchain and no newer.
+      - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # `+1.88`: rust-toolchain.toml would otherwise pick stable.
+      - run: cargo +1.88 check --workspace --locked
 
   python:
     name: Python ${{ matrix.python }}
@@ -98,10 +137,12 @@ jobs:
         # Every supported CPython plus the free-threaded builds ("t").
         python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
@@ -115,3 +156,5 @@ jobs:
         env:
           RUSTMY_TEST_SERVERS: mysql,mariadb
       - run: uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db mysql --db mariadb
+      # Again with every statement prepared (?cursorclass=PreparedCursor).
+      - run: uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db mysql_prepared --db mariadb_prepared

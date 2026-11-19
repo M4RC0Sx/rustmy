@@ -8,10 +8,11 @@ panic, hang or allocate without bound.
 |---|---|
 | `handshake` | the server greeting parser |
 | `packets` | packet framing (lengths, sequence ids, >16 MiB payloads) |
+| `compressed` | the compressed protocol layer (zlib or zstd, picked by the first byte): compressed headers and sequence ids, payloads that do not inflate to their declared length, packets split across compressed ones |
 | `result_set` | column definitions, rows, OK / ERR / EOF packets |
 | `text_values` | text-protocol integer, float, date and time parsers |
 | `sql` | the `INSERT … VALUES` recogniser used by `executemany` and string escaping |
-| `session` | the whole client against a scripted server: handshake, every authentication plugin (RSA, ed25519, parsec, auth switches), queries, multiple results, `ping`, `select_db`, `reset_connection`, `change_user` |
+| `session` | the whole client against a scripted server: handshake, every authentication plugin (RSA, ed25519, parsec, auth switches), queries, multiple results, prepared statements, pipelined batches, `ping`, `select_db`, `reset_connection`, `change_user`; each input runs twice, uncompressed and asking for compression (the replies after authentication are then read as compressed packets) |
 
 The hooks live behind the `fuzzing` feature of `rustmy-proto`
 (`crates/proto/src/fuzzing.rs`), which normal builds never enable.
@@ -42,3 +43,9 @@ TCP proxy while rustmy ran the same command sequence as the `session` target,
 one per authentication path: MySQL `caching_sha2_password` with RSA, MySQL
 auth switch to `mysql_native_password`, MariaDB native, `client_ed25519` and
 `parsec`. `seeds/handshake/*.bin` are the greeting packets taken from them.
+`seeds/session/local-infile.bin` is hand-built: a greeting, an OK for every
+reply the session reads before its `LOAD DATA LOCAL INFILE`, then a request
+for `/etc/passwd` (refused: not the statement's file) and one in the middle
+of a pipelined batch (the connection closes). `seeds/compressed/*.bin` are hand-built: an OK packet and a one-column result
+set wrapped in zlib, zstd and stored (uncompressed) compressed packets, one
+of them split across two compressed packets.

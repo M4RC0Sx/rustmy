@@ -7,6 +7,7 @@ pub mod capability {
     pub const FOUND_ROWS: u32 = 1 << 1;
     pub const LONG_FLAG: u32 = 1 << 2;
     pub const CONNECT_WITH_DB: u32 = 1 << 3;
+    pub const COMPRESS: u32 = 1 << 5;
     pub const LOCAL_FILES: u32 = 1 << 7;
     pub const PROTOCOL_41: u32 = 1 << 9;
     pub const SSL: u32 = 1 << 11;
@@ -20,6 +21,8 @@ pub mod capability {
     pub const PLUGIN_AUTH_LENENC_CLIENT_DATA: u32 = 1 << 21;
     pub const SESSION_TRACK: u32 = 1 << 23;
     pub const DEPRECATE_EOF: u32 = 1 << 24;
+    /// MySQL 8.0.18+: zstd for the compressed protocol.
+    pub const ZSTD_COMPRESSION_ALGORITHM: u32 = 1 << 26;
 }
 
 /// Server status flags reported in OK and EOF packets.
@@ -35,6 +38,9 @@ pub(crate) mod command {
     pub(crate) const QUIT: u8 = 0x01;
     pub(crate) const INIT_DB: u8 = 0x02;
     pub(crate) const QUERY: u8 = 0x03;
+    pub(crate) const STMT_PREPARE: u8 = 0x16;
+    pub(crate) const STMT_EXECUTE: u8 = 0x17;
+    pub(crate) const STMT_CLOSE: u8 = 0x19;
     pub(crate) const PING: u8 = 0x0E;
     pub(crate) const CHANGE_USER: u8 = 0x11;
     pub(crate) const RESET_CONNECTION: u8 = 0x1F;

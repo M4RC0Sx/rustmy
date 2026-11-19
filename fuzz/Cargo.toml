@@ -30,6 +30,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "compressed"
+path = "fuzz_targets/compressed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "result_set"
 path = "fuzz_targets/result_set.rs"
 test = false

@@ -3,7 +3,9 @@
 //! Ignored by default; run with `cargo nextest run --run-ignored only`.
 //! Override endpoints with `RUSTMY_TEST_MYSQL` / `RUSTMY_TEST_MARIADB`
 //! (`host:port`) and restrict servers with `RUSTMY_TEST_SERVERS`
-//! (`mysql`, `mariadb` or `mysql,mariadb`, the default).
+//! (`mysql`, `mariadb` or `mysql,mariadb`, the default). With
+//! `RUSTMY_TEST_COMPRESS` (`zlib` or `zstd`) every connection asks for the
+//! compressed protocol.
 
 #![expect(
     clippy::unwrap_used,
@@ -13,6 +15,7 @@
     reason = "test helpers outside #[test] functions must fail loudly too"
 )]
 
+use rustmy_proto::Compression;
 use rustmy_proto::Conn;
 use rustmy_proto::Error;
 use rustmy_proto::Opts;
@@ -77,7 +80,18 @@ fn opts(server: Server, user: &str) -> Opts {
         user: user.into(),
         password: "rustmy".to_owned(),
         database: Some(b"rustmy_test".to_vec()),
+        compress: compression_under_test(),
         ..Opts::default()
+    }
+}
+
+/// Compression every connection asks for, from `RUSTMY_TEST_COMPRESS`.
+fn compression_under_test() -> Option<Compression> {
+    match std::env::var("RUSTMY_TEST_COMPRESS").as_deref() {
+        Err(_) | Ok("") => None,
+        Ok("zlib") => Some(Compression::Zlib),
+        Ok("zstd") => Some(Compression::Zstd { level: 3 }),
+        Ok(other) => panic!("unknown RUSTMY_TEST_COMPRESS {other:?}"),
     }
 }
 
@@ -838,4 +852,262 @@ fn pipelined_statements_run_in_order_past_an_error() {
         assert!(matches!(err, Error::Server { code: 1146, .. }), "{err:?}");
         assert_eq!(table(&conn.query(b"SELECT 2").unwrap()), [["2"]]);
     }
+}
+
+#[test]
+#[ignore = "needs `docker compose up -d --wait`"]
+fn prepared_statements_bind_and_read_binary_rows() {
+    use rustmy_proto::Execute;
+    use rustmy_proto::binary;
+
+    for server in servers() {
+        let mut conn = connect(server);
+        let statement = conn
+            .prepare(b"SELECT ?, ?, ?, ?, ?, CAST(? AS DATE)")
+            .unwrap();
+        assert_eq!(statement.params, 6, "{server:?}");
+        assert_eq!(statement.columns.len(), 6, "{server:?}");
+        let mut params = Execute::default();
+        params.int(-7);
+        params.uint(u64::MAX);
+        params.double(2.5);
+        params.text(b"text");
+        params.null();
+        params.date(2026, 11, 17);
+        let result = conn.execute(&params.finish(statement.id)).unwrap();
+        assert!(result.rows.is_binary());
+        let row: Vec<Option<Vec<u8>>> = result
+            .rows
+            .rows()
+            .next()
+            .unwrap()
+            .cells()
+            .map(|c| c.map(<[u8]>::to_vec))
+            .collect();
+        assert_eq!(binary::signed(row[0].as_deref().unwrap()), Some(-7));
+        assert_eq!(binary::unsigned(row[1].as_deref().unwrap()), Some(u64::MAX));
+        assert_eq!(binary::float(row[2].as_deref().unwrap(), 31), Some(2.5));
+        assert_eq!(row[3].as_deref(), Some(&b"text"[..]));
+        assert_eq!(row[4], None);
+        let date = binary::date(row[5].as_deref().unwrap()).unwrap();
+        assert_eq!((date.year, date.month, date.day), (2026, 11, 17));
+        conn.close_statement(statement.id).unwrap();
+
+        // Cached: wrong parameter count, then pipelined executions.
+        let mut one = Execute::default();
+        one.int(1);
+        let err = conn.execute_cached(b"SELECT ?, ?", &one).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Parameters {
+                    expected: 2,
+                    given: 1
+                }
+            ),
+            "{err:?}"
+        );
+        conn.query(b"CREATE TEMPORARY TABLE ps (n INT PRIMARY KEY)")
+            .unwrap();
+        let rows: Vec<Execute> = (0..5)
+            .map(|n| {
+                let mut row = Execute::default();
+                row.int(n);
+                row
+            })
+            .collect();
+        let totals = conn
+            .execute_many_cached(b"INSERT INTO ps VALUES (?)", &rows)
+            .unwrap();
+        assert_eq!(totals.rowcount, 5);
+        assert!(totals.error.is_none());
+        // A duplicate key in the middle: reported, the others still run.
+        let totals = conn
+            .execute_many_cached(
+                b"INSERT INTO ps VALUES (?)",
+                &[rows[0].clone(), {
+                    let mut row = Execute::default();
+                    row.int(9);
+                    row
+                }],
+            )
+            .unwrap();
+        assert!(matches!(
+            totals.error,
+            Some((0, Error::Server { code: 1062, .. }))
+        ));
+        assert_eq!(
+            table(&conn.query(b"SELECT COUNT(*) FROM ps").unwrap()),
+            [["6"]]
+        );
+    }
+}
+
+/// The compressed protocol, with and without TLS: what the server
+/// negotiates, payloads over 16 MiB both ways, pipelined statements (each
+/// in compressed packets of its own) and session commands.
+#[test]
+#[ignore = "needs a server"]
+fn compressed_protocol() {
+    use rustmy_proto::Execute;
+
+    let first = |conn: &mut Conn, sql: &[u8]| table(&conn.query(sql).unwrap())[0][0].clone();
+    for server in servers() {
+        for (asked, tls) in [
+            (Compression::Zlib, SslMode::Disabled),
+            (Compression::Zstd { level: 3 }, SslMode::Disabled),
+            (Compression::Zstd { level: 19 }, SslMode::Required),
+        ] {
+            let context = format!("{server:?} {asked:?} {tls:?}");
+            let mut o = opts(server, "rustmy");
+            o.compress = Some(asked);
+            o.tls.mode = tls;
+            o.client_flag = capability::MULTI_STATEMENTS;
+            let mut conn = Conn::connect(&o).unwrap_or_else(|e| panic!("{context}: {e}"));
+            // MariaDB has no zstd: it falls back to zlib.
+            let expected = match (server, asked) {
+                (Server::Mariadb, _) => Compression::Zlib,
+                (Server::Mysql, asked) => asked,
+            };
+            assert_eq!(conn.compression(), Some(expected), "{context}");
+            if server == Server::Mysql {
+                let algorithm = conn
+                    .query(b"SHOW SESSION STATUS LIKE 'Compression_algorithm'")
+                    .unwrap();
+                let name = if expected == Compression::Zlib {
+                    "zlib"
+                } else {
+                    "zstd"
+                };
+                assert_eq!(table(&algorithm)[0][1], name, "{context}");
+            }
+            assert_eq!(first(&mut conn, b"SELECT 1"), "1", "{context}");
+            // Each result is flushed apart: its ordinary sequence restarts.
+            let results = conn.query(b"SELECT 1; SELECT 2; SELECT 3").unwrap();
+            assert_eq!(table(&results), [["1"]], "{context}");
+            assert_eq!(
+                table(&conn.next_result().unwrap().unwrap()),
+                [["2"]],
+                "{context}"
+            );
+            assert_eq!(
+                table(&conn.next_result().unwrap().unwrap()),
+                [["3"]],
+                "{context}"
+            );
+            assert!(conn.next_result().unwrap().is_none(), "{context}");
+
+            let row = conn.query(b"SELECT REPEAT('x', 17000000)").unwrap();
+            assert_eq!(table(&row)[0][0].len(), 17_000_000, "{context}");
+            let mut sql = b"SELECT LENGTH('".to_vec();
+            sql.extend(std::iter::repeat_n(b'y', 17_000_000));
+            sql.extend_from_slice(b"')");
+            assert_eq!(first(&mut conn, &sql), "17000000", "{context}");
+            assert_eq!(
+                first(&mut conn, b"SELECT LENGTH(RANDOM_BYTES(1000))"),
+                "1000",
+                "{context}: incompressible"
+            );
+
+            conn.query(b"CREATE TEMPORARY TABLE packed (id INT PRIMARY KEY, v VARCHAR(200))")
+                .unwrap();
+            let inserts: Vec<Vec<u8>> = (0..200)
+                .map(|i| format!("INSERT INTO packed VALUES ({i}, REPEAT('v', {}))", i % 150))
+                .map(String::into_bytes)
+                .collect();
+            let totals = conn.pipeline(inserts.iter().map(Vec::as_slice)).unwrap();
+            assert_eq!(totals.rowcount, 200, "{context}");
+            let failing: [&[u8]; 3] = [
+                b"UPDATE packed SET v = 'a' WHERE id = 1",
+                b"SELEC 1",
+                b"DO 1",
+            ];
+            let totals = conn.pipeline(failing).unwrap();
+            assert!(
+                matches!(totals.error, Some((1, Error::Server { code: 1064, .. }))),
+                "{context}"
+            );
+            let params: Vec<Execute> = (200..400)
+                .map(|i| {
+                    let mut e = Execute::default();
+                    e.int(i);
+                    e.text(format!("prepared value {i}, long enough to compress").as_bytes());
+                    e
+                })
+                .collect();
+            let totals = conn
+                .execute_many_cached(b"INSERT INTO packed VALUES (?, ?)", &params)
+                .unwrap();
+            assert_eq!(totals.rowcount, 200, "{context}");
+            assert_eq!(
+                first(&mut conn, b"SELECT COUNT(*) FROM packed"),
+                "400",
+                "{context}"
+            );
+
+            conn.reset_connection().unwrap();
+            conn.change_user(b"rustmy", "rustmy", Some(b"rustmy_test"))
+                .unwrap();
+            conn.ping().unwrap();
+            assert_eq!(first(&mut conn, b"SELECT 2"), "2", "{context}");
+        }
+    }
+}
+
+/// A server that offers no compression gets an uncompressed connection.
+#[test]
+#[ignore = "needs a server"]
+fn compression_is_optional() {
+    for server in servers() {
+        let mut o = opts(server, "rustmy");
+        o.compress = None;
+        let conn = Conn::connect(&o).unwrap();
+        assert_eq!(conn.compression(), None, "{server:?}");
+        assert_eq!(conn.capabilities() & capability::COMPRESS, 0, "{server:?}");
+    }
+}
+
+/// `LOAD DATA LOCAL INFILE` of a file inside `local_infile_dir`, a refused
+/// one outside it, and the connection still in sync afterwards.
+#[test]
+#[ignore = "needs a server"]
+fn local_infile_loads_files_from_the_directory() {
+    let base = std::env::temp_dir().join(format!("rustmy-live-infile-{}", std::process::id()));
+    let allowed = base.join("allowed");
+    std::fs::create_dir_all(&allowed).unwrap();
+    let allowed = std::fs::canonicalize(allowed).unwrap();
+    let inside = allowed.join("rows.csv");
+    // Over 16 MiB: several packets, and several compressed ones.
+    let rows = 300_000;
+    let mut contents = String::new();
+    for i in 0..rows {
+        std::fmt::Write::write_fmt(&mut contents, format_args!("{i},{i:>50}\n")).unwrap();
+    }
+    std::fs::write(&inside, contents).unwrap();
+    let outside = std::fs::canonicalize(&base).unwrap().join("outside.csv");
+    std::fs::write(&outside, "1,secret\n").unwrap();
+    for server in servers() {
+        let mut o = opts(server, "rustmy");
+        o.local_infile_dir = Some(allowed.clone());
+        let mut conn = Conn::connect(&o).unwrap();
+        conn.query(b"CREATE TEMPORARY TABLE loaded (id INT, s VARCHAR(64))")
+            .unwrap();
+        let load = |path: &std::path::Path| {
+            format!(
+                "LOAD DATA LOCAL INFILE '{}' INTO TABLE loaded FIELDS TERMINATED BY ','",
+                path.display()
+            )
+        };
+        let result = conn.query(load(&inside).as_bytes()).unwrap();
+        assert_eq!(result.affected_rows, rows, "{server:?}");
+        match conn.query(load(&outside).as_bytes()) {
+            Err(Error::LocalInfile(reason)) => {
+                assert!(reason.contains("outside local_infile_dir"), "{reason}");
+            }
+            other => panic!("{server:?}: expected a refusal, got {other:?}"),
+        }
+        let count = conn.query(b"SELECT COUNT(*) FROM loaded").unwrap();
+        assert_eq!(table(&count), [[rows.to_string()]], "{server:?}");
+    }
+    std::fs::remove_dir_all(base).unwrap();
 }

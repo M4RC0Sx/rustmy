@@ -1,6 +1,7 @@
-//! SQL text helpers for client-side parameter interpolation: string escaping
-//! and recognising `INSERT … VALUES (…)` statements that `executemany` can
-//! batch into multi-row inserts.
+//! SQL text helpers for client-side parameter interpolation: string escaping,
+//! recognising `INSERT … VALUES (…)` statements that `executemany` can
+//! batch into multi-row inserts, and the file names of `LOAD DATA LOCAL
+//! INFILE` statements (the only files the client sends).
 //!
 //! Everything works on UTF-8 / ASCII-compatible bytes and never panics.
 
@@ -110,6 +111,78 @@ pub fn insert_values(query: &[u8]) -> Option<InsertValues> {
     })
 }
 
+/// File names that the `LOAD DATA LOCAL INFILE` (and `LOAD XML LOCAL
+/// INFILE`) statements of `query` make the server ask for: the string
+/// literal after `INFILE`, unescaped as the server reads it (backslash
+/// escapes unless `no_backslash_escapes`, doubled quotes, adjacent literals
+/// joined).
+///
+/// The scan is byte-wise, so a name with a multi-byte character whose
+/// second byte is a backslash (sjis, gbk, big5) decodes differently from
+/// the server's: such a request is then refused, never granted.
+#[must_use]
+pub fn local_infile_names(query: &[u8], no_backslash_escapes: bool) -> Vec<Vec<u8>> {
+    let mut names = Vec::new();
+    scan_local_infile(query, no_backslash_escapes, |scanner| {
+        if let Some(name) = scanner.string_literal(no_backslash_escapes) {
+            names.push(name);
+        }
+    });
+    names
+}
+
+/// Whether `query` has a `LOAD DATA LOCAL INFILE` (or `LOAD XML LOCAL
+/// INFILE`) statement, with its file name written or still a placeholder.
+///
+/// Reads backslashes as escapes whatever the SQL mode: either way it can be
+/// wrong only on statements built to fool it, and both mistakes are safe (a
+/// statement sent alone needlessly, or a request inside a pipeline, which
+/// closes the connection).
+#[must_use]
+pub fn mentions_local_infile(query: &[u8]) -> bool {
+    let mut found = false;
+    scan_local_infile(query, false, |_| found = true);
+    found
+}
+
+/// Calls `found` with the scanner right after each `LOAD DATA|XML
+/// [LOW_PRIORITY|CONCURRENT] LOCAL INFILE` of `query` (and its spaces).
+/// Literals are skipped as the server reads them: with
+/// `no_backslash_escapes`, a backslash is an ordinary character.
+fn scan_local_infile(
+    query: &[u8],
+    no_backslash_escapes: bool,
+    mut found: impl FnMut(&mut Scanner<'_>),
+) {
+    let mut scanner = Scanner::new(query, 0);
+    scanner.backslash_escapes = !no_backslash_escapes;
+    // How many words of the statement's head have matched so far.
+    let mut matched = 0;
+    while let Some(token) = scanner.next_token() {
+        let word = match token {
+            Token::Word(range) => query.get(range).unwrap_or_default(),
+            Token::Space => continue,
+            Token::Close | Token::Other => {
+                matched = 0;
+                continue;
+            }
+        };
+        let is = |expected: &[u8]| word.eq_ignore_ascii_case(expected);
+        matched = match matched {
+            1 if is(b"DATA") || is(b"XML") => 2,
+            2 if is(b"LOW_PRIORITY") || is(b"CONCURRENT") => 2,
+            2 if is(b"LOCAL") => 3,
+            3 if is(b"INFILE") => {
+                scanner.skip_space();
+                found(&mut scanner);
+                0
+            }
+            _ if is(b"LOAD") => 1,
+            _ => 0,
+        };
+    }
+}
+
 /// Drops trailing whitespace and one optional `;`.
 fn trim_end_statement(bytes: &[u8]) -> &[u8] {
     let trimmed = bytes.trim_ascii_end();
@@ -151,6 +224,8 @@ fn starts_with_words(text: &[u8], words: &[&[u8]]) -> bool {
 enum Token {
     Word(Range<usize>),
     Close,
+    /// Whitespace or a comment.
+    Space,
     Other,
 }
 
@@ -160,6 +235,9 @@ struct Scanner<'a> {
     query: &'a [u8],
     pos: usize,
     depth: usize,
+    /// Whether a backslash escapes the next byte in string literals (off
+    /// under `NO_BACKSLASH_ESCAPES`).
+    backslash_escapes: bool,
 }
 
 impl<'a> Scanner<'a> {
@@ -168,6 +246,7 @@ impl<'a> Scanner<'a> {
             query,
             pos,
             depth: 0,
+            backslash_escapes: true,
         }
     }
 
@@ -186,19 +265,25 @@ impl<'a> Scanner<'a> {
             }
             b'#' => {
                 self.skip_line();
-                Some(Token::Other)
+                Some(Token::Space)
             }
             b'-' if self.peek(1) == Some(b'-')
                 && self.peek(2).is_none_or(|b| b.is_ascii_whitespace()) =>
             {
                 self.skip_line();
-                Some(Token::Other)
+                Some(Token::Space)
             }
+            // `/*! … */` runs on the server but counts as a comment here, so
+            // a `LOCAL` hidden in one is never seen: the request is refused.
             b'/' if self.peek(1) == Some(b'*') => {
                 let body = self.query.get(self.pos + 2..)?;
                 let end = body.windows(2).position(|w| w == b"*/")?;
                 self.pos += 2 + end + 2;
-                Some(Token::Other)
+                Some(Token::Space)
+            }
+            b if b.is_ascii_whitespace() => {
+                self.skip_space();
+                Some(Token::Space)
             }
             b'(' => {
                 self.depth += 1;
@@ -225,13 +310,13 @@ impl<'a> Scanner<'a> {
     }
 
     /// Skips a quoted string or identifier, honouring doubled quotes and,
-    /// for strings, backslash escapes.
+    /// for strings, backslash escapes (unless they are off).
     fn skip_quoted(&mut self, quote: u8) -> Option<()> {
         self.pos += 1;
         loop {
             let byte = self.peek(0)?;
             self.pos += 1;
-            if byte == b'\\' && quote != b'`' {
+            if byte == b'\\' && quote != b'`' && self.backslash_escapes {
                 self.pos += 1;
             } else if byte == quote {
                 if self.peek(0) == Some(quote) {
@@ -241,6 +326,52 @@ impl<'a> Scanner<'a> {
                 }
             }
         }
+    }
+
+    fn skip_space(&mut self) {
+        self.pos = skip_space(self.query, self.pos);
+    }
+
+    /// Reads the string literal at the current position as the server
+    /// reads it, joining adjacent literals (`'a' "b"` is `ab`). `None` if
+    /// there is none or it is unterminated.
+    fn string_literal(&mut self, no_backslash_escapes: bool) -> Option<Vec<u8>> {
+        let mut value = Vec::new();
+        let mut pieces = 0;
+        while let Some(quote) = self.peek(0).filter(|&b| b == b'\'' || b == b'"') {
+            self.pos += 1;
+            loop {
+                let byte = self.peek(0)?;
+                self.pos += 1;
+                if byte == b'\\' && !no_backslash_escapes {
+                    let escaped = self.peek(0)?;
+                    self.pos += 1;
+                    match escaped {
+                        b'0' => value.push(0),
+                        b'b' => value.push(0x08),
+                        b'n' => value.push(b'\n'),
+                        b'r' => value.push(b'\r'),
+                        b't' => value.push(b'\t'),
+                        b'Z' => value.push(0x1a),
+                        // Kept as is outside pattern matching.
+                        b'%' | b'_' => value.extend_from_slice(&[b'\\', escaped]),
+                        other => value.push(other),
+                    }
+                } else if byte == quote {
+                    if self.peek(0) == Some(quote) {
+                        self.pos += 1;
+                        value.push(quote);
+                    } else {
+                        break;
+                    }
+                } else {
+                    value.push(byte);
+                }
+            }
+            pieces += 1;
+            self.skip_space();
+        }
+        (pieces > 0).then_some(value)
     }
 
     fn skip_line(&mut self) {
@@ -257,6 +388,8 @@ impl<'a> Scanner<'a> {
 mod tests {
     use super::escape_into;
     use super::insert_values;
+    use super::local_infile_names;
+    use super::mentions_local_infile;
 
     fn escaped(value: &[u8], no_backslash_escapes: bool) -> Vec<u8> {
         let mut out = Vec::new();
@@ -363,6 +496,116 @@ mod tests {
         }
     }
 
+    fn names(query: &str, no_backslash_escapes: bool) -> Vec<String> {
+        local_infile_names(query.as_bytes(), no_backslash_escapes)
+            .into_iter()
+            .map(|name| String::from_utf8(name).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn local_infile_names_as_the_server_reads_them() {
+        let cases = [
+            ("LOAD DATA LOCAL INFILE 'a.csv' INTO TABLE t", vec!["a.csv"]),
+            (
+                "load data local infile \"b.csv\" into table t",
+                vec!["b.csv"],
+            ),
+            (
+                "LOAD DATA LOW_PRIORITY LOCAL INFILE '/tmp/c.csv' REPLACE INTO TABLE t",
+                vec!["/tmp/c.csv"],
+            ),
+            (
+                "LOAD DATA CONCURRENT LOCAL INFILE 'd' INTO TABLE t",
+                vec!["d"],
+            ),
+            ("LOAD XML LOCAL INFILE 'e.xml' INTO TABLE t", vec!["e.xml"]),
+            (
+                "LOAD /* c */ DATA\n-- c\nLOCAL # c\n INFILE   'f' INTO TABLE t",
+                vec!["f"],
+            ),
+            (
+                r"LOAD DATA LOCAL INFILE 'it''s \'q\' \\ \n' INTO TABLE t",
+                vec!["it's 'q' \\ \n"],
+            ),
+            (
+                r"LOAD DATA LOCAL INFILE 'a\%b\_c\x' INTO TABLE t",
+                vec![r"a\%b\_cx"],
+            ),
+            (
+                r#"LOAD DATA LOCAL INFILE 'part' "s" 'end' INTO TABLE t"#,
+                vec!["partsend"],
+            ),
+            (
+                "LOAD DATA LOCAL INFILE 'ñ 🦀.csv' INTO TABLE t",
+                vec!["ñ 🦀.csv"],
+            ),
+            (
+                "SELECT 1; LOAD DATA LOCAL INFILE 'x' INTO TABLE t; \
+                 LOAD DATA LOCAL INFILE 'y' INTO TABLE u",
+                vec!["x", "y"],
+            ),
+        ];
+        for (query, expected) in cases {
+            assert_eq!(names(query, false), expected, "{query}");
+            assert!(mentions_local_infile(query.as_bytes()), "{query}");
+        }
+        assert_eq!(
+            names(r"LOAD DATA LOCAL INFILE 'C:\data\x.csv' INTO TABLE t", true),
+            [r"C:\data\x.csv"]
+        );
+        assert_eq!(
+            names("LOAD DATA LOCAL INFILE 'it''s' INTO TABLE t", true),
+            ["it's"]
+        );
+    }
+
+    /// Literals before the statement are skipped as the server reads them.
+    /// Under `NO_BACKSLASH_ESCAPES` this query selects two adjacent string
+    /// literals and names no file; reading `\'` as an escaped quote would
+    /// take `"secret"` for the name of a `LOAD DATA LOCAL INFILE`.
+    #[test]
+    fn local_infile_scan_follows_the_sql_mode() {
+        let query = r#"SELECT '\' 'LOAD DATA LOCAL INFILE "secret" '"#;
+        assert_eq!(names(query, true), Vec::<String>::new());
+        // With backslash escapes the same bytes are a statement after a
+        // literal, and are read as such.
+        let query = r#"SELECT '\' '; LOAD DATA LOCAL INFILE "x" INTO TABLE t"#;
+        assert_eq!(names(query, false), ["x"]);
+        assert_eq!(names(query, true), Vec::<String>::new());
+    }
+
+    #[test]
+    fn local_infile_needs_the_whole_statement_head() {
+        for query in [
+            "LOAD DATA INFILE 'server-side.csv' INTO TABLE t",
+            "SELECT 'LOAD DATA LOCAL INFILE ''x'''",
+            "SELECT 1 -- LOAD DATA LOCAL INFILE 'x'",
+            "SELECT `LOAD DATA LOCAL INFILE 'x'`",
+            "LOAD DATA /*!LOCAL*/ INFILE 'x' INTO TABLE t",
+            "DOWNLOAD DATA LOCAL INFILE 'x'",
+            "LOAD DATA x LOCAL INFILE 'x'",
+            "LOAD, DATA LOCAL INFILE 'x'",
+            "",
+        ] {
+            assert_eq!(names(query, false), Vec::<String>::new(), "{query}");
+            assert!(!mentions_local_infile(query.as_bytes()), "{query}");
+        }
+        // A placeholder: the statement is there, its name not yet.
+        let template = "LOAD DATA LOCAL INFILE %s INTO TABLE t";
+        assert!(mentions_local_infile(template.as_bytes()));
+        assert_eq!(names(template, false), Vec::<String>::new());
+        // Unterminated literals name nothing.
+        assert_eq!(
+            names("LOAD DATA LOCAL INFILE 'x", false),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            names(r"LOAD DATA LOCAL INFILE 'x\", false),
+            Vec::<String>::new()
+        );
+    }
+
     #[test]
     fn arbitrary_bytes_never_panic() {
         let samples: [&[u8]; 5] = [
@@ -374,6 +617,7 @@ mod tests {
         ];
         for sample in samples {
             let _ = insert_values(sample);
+            let _ = local_infile_names(sample, false);
             let _ = escaped(sample, false);
             let _ = escaped(sample, true);
         }

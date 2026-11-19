@@ -9,6 +9,8 @@ these differences:
 
 - URL query arguments use rustmy's names (``user``, ``password``,
   ``database``, ``ssl_mode``, ``collation``…); timeouts may be fractional.
+  ``cursorclass`` names a class of :mod:`rustmy.cursors`, e.g.
+  ``?cursorclass=PreparedCursor`` for prepared statements.
 - No ``SET NAMES`` on every new connection: the handshake already sets the
   character set, with the server's default collation for it, and the
   statement would override an explicit ``collation``.
@@ -26,6 +28,7 @@ from sqlalchemy.dialects.mysql.mariadb import MariaDBDialect
 from sqlalchemy.dialects.mysql.mysqldb import MySQLDialect_mysqldb
 
 import rustmy
+import rustmy.cursors
 
 from rustmy.cursors import SSCursor
 
@@ -46,6 +49,15 @@ if TYPE_CHECKING:
 #: integers) and as booleans (the URL gives strings).
 _FLOAT_ARGS = ("connect_timeout", "read_timeout", "write_timeout")
 _BOOL_ARGS = ("autocommit", "multi_statements")
+
+
+def _cursor_class(name: str) -> type[rustmy.Cursor]:
+    """The class of :mod:`rustmy.cursors` called ``name``."""
+    found = getattr(rustmy.cursors, name, None)
+    if isinstance(found, type) and issubclass(found, rustmy.Cursor):
+        return found
+    msg = f"cursorclass={name!r} is not a cursor class of rustmy.cursors"
+    raise ValueError(msg)
 
 
 class RustmyMySQLDialect(MySQLDialect_mysqldb):
@@ -74,9 +86,23 @@ class RustmyMySQLDialect(MySQLDialect_mysqldb):
             for name, value in url.query.items()
             if name in _FLOAT_ARGS and isinstance(value, str)
         }
-        url = url.difference_update_query(timeouts)
+        cursorclass = url.query.get("cursorclass")
+        # mysqlclient's dialect would make ``compress`` a bool: keep "zstd".
+        compress = url.query.get("compress")
+        zstd_level = url.query.get("zstd_level")
+        url = url.difference_update_query(
+            [*timeouts, "cursorclass", "compress", "zstd_level"]
+        )
         args, kwargs = super().create_connect_args(url, _translate_args)
         kwargs.update(timeouts)
+        if isinstance(cursorclass, str):
+            kwargs["cursorclass"] = _cursor_class(cursorclass)
+        if isinstance(compress, str):
+            kwargs["compress"] = (
+                compress if compress in {"zlib", "zstd"} else util.asbool(compress)
+            )
+        if isinstance(zstd_level, str):
+            kwargs["zstd_level"] = int(zstd_level)
         for name in _BOOL_ARGS:
             if name in kwargs:
                 kwargs[name] = util.asbool(kwargs[name])

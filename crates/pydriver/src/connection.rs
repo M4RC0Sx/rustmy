@@ -19,8 +19,10 @@ use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
 use pyo3::types::PyString;
 use pyo3::types::PyTuple;
+use rustmy_proto::Compression;
 use rustmy_proto::Conn;
 use rustmy_proto::Error as ProtoError;
+use rustmy_proto::Execute;
 use rustmy_proto::Opts;
 use rustmy_proto::QueryResult;
 use rustmy_proto::ReadOutcome;
@@ -30,6 +32,7 @@ use rustmy_proto::TlsOpts;
 use rustmy_proto::charset::charset_of;
 use rustmy_proto::constants::status;
 use rustmy_proto::sql::insert_values;
+use rustmy_proto::sql::mentions_local_infile;
 
 use crate::charset::Codec;
 use crate::charset::UTF8;
@@ -99,6 +102,24 @@ type BatchTotals<'py> = (u64, Option<u64>, Option<Bound<'py, PyBytes>>);
 /// the rowcounts of the statements before it added up, and the last
 /// statement as sent.
 type PipelinedMany<'py> = (Py<PyAny>, u64, Bound<'py, PyBytes>);
+
+/// How a `PreparedCursor` statement runs: prepared, or as text when it has
+/// no placeholders (DDL and introspection, some of which the server cannot
+/// prepare or answers differently when prepared).
+#[derive(Debug)]
+enum Plan {
+    Text(Vec<u8>),
+    Prepared(Vec<u8>, Execute),
+}
+
+impl Plan {
+    fn run(&self, conn: &mut Conn) -> rustmy_proto::Result<(QueryResult, Option<StreamId>)> {
+        match self {
+            Self::Text(sql) => conn.query_streamed(sql),
+            Self::Prepared(sql, params) => conn.execute_cached_streamed(sql, params),
+        }
+    }
+}
 
 /// Statements of one pipelined `executemany` window, back to back.
 #[derive(Debug, Default)]
@@ -520,7 +541,13 @@ impl Connection {
         let template = query.to_str()?;
         let encoder = this.encoder()?;
         let budget = this.peek(Conn::pipeline_budget)?;
-        let max_pipeline = max_pipeline.max(1);
+        // The server reads whatever follows a LOAD DATA LOCAL as its file:
+        // one statement per window.
+        let max_pipeline = if mentions_local_infile(template.as_bytes()) {
+            1
+        } else {
+            max_pipeline.max(1)
+        };
         let mut window = Window::default();
         let mut statement = Vec::new();
         let mut rowcount = 0;
@@ -564,6 +591,127 @@ impl Connection {
                 .unwrap_or_else(|| py.None())
         };
         Ok(Some((result, rowcount + before, PyBytes::new(py, last))))
+    }
+
+    /// How `execute_prepared` runs `query` with `args`: prepared, with
+    /// `?` placeholders and the arguments bound to them, or (without
+    /// placeholders) as `execute` sends it.
+    fn prepared_statement(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyString>,
+        args: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Plan> {
+        let Some(args) = args.filter(|a| !a.is_none()) else {
+            return Ok(Plan::Text(self.statement(query, None)?.into_owned()));
+        };
+        let encoder = self.encoder()?;
+        let prepared = encoder.prepared_sql(py, query.to_str()?)?;
+        if prepared.slots.is_empty() {
+            // Interpolation still turns `%%` into `%` and checks that no
+            // argument is left over.
+            return Ok(Plan::Text(self.statement(query, Some(args))?.into_owned()));
+        }
+        let mut params = Execute::default();
+        encoder.bind(py, &mut params, &prepared.slots, &Args::from_py(args))?;
+        Ok(Plan::Prepared(prepared.sql, params))
+    }
+
+    /// Runs one window of a prepared `executemany`; the first server error
+    /// is raised once every reply is read.
+    fn run_prepared_window(&self, py: Python<'_>, sql: &[u8], window: &[Execute]) -> PyResult<u64> {
+        let totals = self.with_conn(py, |conn| conn.execute_many_cached(sql, window))?;
+        match totals.error {
+            Some((_, err)) => Err(self.failure_to_pyerr(Failure::Proto(err))),
+            None => Ok(totals.rowcount),
+        }
+    }
+
+    /// `executemany` of a `PreparedCursor`: as `pipelined_many`, with each
+    /// item bound to the prepared statement (one `COM_STMT_EXECUTE` each)
+    /// instead of interpolated. A query without placeholders runs as text,
+    /// as `execute_prepared` runs it.
+    fn prepared_many<'py>(
+        slf: &Bound<'py, Self>,
+        query: &Bound<'py, PyString>,
+        seq_of_args: &Bound<'py, PyAny>,
+        max_pipeline: usize,
+        streamed: bool,
+        as_dict: bool,
+        batch_bytes: usize,
+    ) -> PyResult<Option<PipelinedMany<'py>>> {
+        let py = slf.py();
+        let this = slf.get();
+        let template = query.to_str()?;
+        let encoder = this.encoder()?;
+        let prepared = encoder.prepared_sql(py, template)?;
+        if prepared.slots.is_empty() {
+            return Self::pipelined_many(
+                slf,
+                query,
+                seq_of_args,
+                max_pipeline,
+                streamed,
+                as_dict,
+                batch_bytes,
+            );
+        }
+        let sql = prepared.sql;
+        let budget = this.peek(Conn::pipeline_budget)?;
+        let max_pipeline = max_pipeline.max(1);
+        let mut window: Vec<Execute> = Vec::new();
+        let mut window_bytes = 0;
+        let mut rowcount = 0;
+        let mut last_args = None;
+        for item in seq_of_args.try_iter()? {
+            let mut params = Execute::default();
+            let bound = item.and_then(|args| {
+                encoder.bind(py, &mut params, &prepared.slots, &Args::from_py(&args))?;
+                Ok(args)
+            });
+            let args = match bound {
+                Ok(args) => args,
+                Err(err) => {
+                    // The items before it run, as in a loop of execute()
+                    // calls.
+                    if !window.is_empty() {
+                        this.run_prepared_window(py, &sql, &window)?;
+                    }
+                    return Err(err);
+                }
+            };
+            if !window.is_empty()
+                && (window.len() >= max_pipeline || window_bytes + params.encoded_len() > budget)
+            {
+                rowcount += this.run_prepared_window(py, &sql, &window)?;
+                window.clear();
+                window_bytes = 0;
+                py.check_signals()?;
+            }
+            window_bytes += params.encoded_len();
+            window.push(params);
+            last_args = Some(args);
+        }
+        let (Some(last), Some(last_args)) = (window.pop(), last_args) else {
+            return Ok(None);
+        };
+        let mut before = 0;
+        let start = |conn: &mut Conn| {
+            let (totals, head, id) = conn.execute_many_cached_streamed(&sql, &window, &last)?;
+            before = totals.rowcount;
+            Ok(Some((head, id)))
+        };
+        let result = if streamed {
+            let (head, started) = this.start_stream(py, start)?;
+            Self::stream_head(slf, head, started, as_dict, batch_bytes)?
+        } else {
+            this.buffered(py, as_dict, batch_bytes, start)?
+                .unwrap_or_else(|| py.None())
+        };
+        // `_executed`: the last item as `mogrify` shows it.
+        let mut shown = Vec::new();
+        encoder.interpolate(py, &mut shown, template, &Args::from_py(&last_args))?;
+        Ok(Some((result, rowcount + before, PyBytes::new(py, &shown))))
     }
 
     fn encoder(&self) -> PyResult<Encoder> {
@@ -673,6 +821,41 @@ impl Connection {
         let sql = this.statement(query, args)?;
         let (head, started) =
             this.start_stream(slf.py(), |conn| conn.query_streamed(&sql).map(Some))?;
+        Self::stream_head(slf, head, started, as_dict, batch_bytes)
+    }
+
+    /// Runs `query` as a prepared statement (binary protocol), its
+    /// placeholders bound to `args` as typed values; the statement is
+    /// prepared once per connection (`statement_cache_size` are kept). A
+    /// query without placeholders has nothing to bind and runs as `execute`
+    /// runs it. Returns what `execute` returns.
+    #[pyo3(signature = (query, args = None, as_dict = false, batch_bytes = 4096))]
+    fn execute_prepared(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyString>,
+        args: Option<&Bound<'_, PyAny>>,
+        as_dict: bool,
+        batch_bytes: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let plan = self.prepared_statement(py, query, args)?;
+        let result = self.buffered(py, as_dict, batch_bytes, |conn| plan.run(conn).map(Some))?;
+        Ok(result.unwrap_or_else(|| py.None()))
+    }
+
+    /// Like `execute_prepared`, streaming the rows as `execute_streamed`
+    /// does.
+    #[pyo3(signature = (query, args = None, as_dict = false, batch_bytes = 4096))]
+    fn execute_prepared_streamed(
+        slf: &Bound<'_, Self>,
+        query: &Bound<'_, PyString>,
+        args: Option<&Bound<'_, PyAny>>,
+        as_dict: bool,
+        batch_bytes: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let this = slf.get();
+        let plan = this.prepared_statement(slf.py(), query, args)?;
+        let (head, started) = this.start_stream(slf.py(), |conn| plan.run(conn).map(Some))?;
         Self::stream_head(slf, head, started, as_dict, batch_bytes)
     }
 
@@ -816,6 +999,123 @@ impl Connection {
             seq_of_args,
             max_pipeline,
             true,
+            as_dict,
+            batch_bytes,
+        )
+    }
+
+    /// `executemany` of a single-row `INSERT`/`REPLACE … VALUES (…)` with a
+    /// `PreparedCursor`: multi-row prepared statements (`VALUES (?, ?), (?,
+    /// ?)…`), as `executemany` batches them as text, with the parameters
+    /// still typed. Every statement has the same number of rows (from the
+    /// first row's size, within `max_stmt_length` and the server's 65,535
+    /// placeholders), so it is prepared once; a batch is cut short when a
+    /// row is larger than that size allows, and the last one holds what is
+    /// left. Returns what `executemany` returns, or `None` when the query
+    /// cannot be batched (before reading `seq_of_args`).
+    fn executemany_prepared_insert<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'py, PyString>,
+        seq_of_args: &Bound<'py, PyAny>,
+        max_stmt_length: usize,
+    ) -> PyResult<Option<BatchTotals<'py>>> {
+        let template = query.to_str()?;
+        let Some(parts) = insert_values(template.as_bytes()) else {
+            return Ok(None);
+        };
+        let (Some(prefix), Some(row), Some(suffix)) = (
+            template.get(parts.prefix),
+            template.get(parts.row),
+            template.get(parts.suffix),
+        ) else {
+            return Ok(None);
+        };
+        if has_placeholder(prefix.as_bytes()) || has_placeholder(suffix.as_bytes()) {
+            return Ok(None);
+        }
+        let encoder = self.encoder()?;
+        let row_sql = encoder.prepared_sql(py, row)?;
+        if row_sql.slots.is_empty() {
+            return Ok(None);
+        }
+        let prefix_sql = encoder.prepared_sql(py, prefix)?.sql;
+        let suffix_sql = encoder.prepared_sql(py, suffix)?.sql;
+        let most_rows = (usize::from(u16::MAX) / row_sql.slots.len()).max(1);
+        let statement = |rows: usize| {
+            let mut sql = prefix_sql.clone();
+            for i in 0..rows {
+                if i > 0 {
+                    sql.push(b',');
+                }
+                sql.extend_from_slice(&row_sql.sql);
+            }
+            sql.extend_from_slice(&suffix_sql);
+            sql
+        };
+        let run = |batch: &Execute, rows: usize, totals: &mut (u64, Option<u64>)| {
+            let sql = statement(rows);
+            let result = self.with_conn(py, |conn| conn.execute_cached(&sql, batch))?;
+            totals.0 += result.affected_rows;
+            totals.1 = Some(result.last_insert_id);
+            PyResult::Ok(())
+        };
+        let mut rows_per_statement = None;
+        let mut batch = Execute::default();
+        let mut batch_args = Vec::new();
+        let mut totals = (0, None);
+        for item in seq_of_args.try_iter()? {
+            let args = item?;
+            let mut values = Execute::default();
+            encoder.bind(py, &mut values, &row_sql.slots, &Args::from_py(&args))?;
+            let limit = *rows_per_statement.get_or_insert_with(|| {
+                (max_stmt_length / values.encoded_len().max(1)).clamp(1, most_rows)
+            });
+            if !batch_args.is_empty()
+                && (batch_args.len() >= limit
+                    || batch.encoded_len() + values.encoded_len() > max_stmt_length)
+            {
+                run(&batch, batch_args.len(), &mut totals)?;
+                batch.clear();
+                batch_args.clear();
+            }
+            batch.append(&values);
+            batch_args.push(args);
+        }
+        if batch_args.is_empty() {
+            return Ok(Some((0, None, None)));
+        }
+        run(&batch, batch_args.len(), &mut totals)?;
+        // `_executed`: the last statement, interpolated as `mogrify` shows
+        // it.
+        let mut shown = unescape_percent(&encoder, py, prefix)?;
+        for (i, args) in batch_args.iter().enumerate() {
+            if i > 0 {
+                shown.push(b',');
+            }
+            encoder.interpolate(py, &mut shown, row, &Args::from_py(args))?;
+        }
+        shown.extend_from_slice(&unescape_percent(&encoder, py, suffix)?);
+        Ok(Some((totals.0, totals.1, Some(PyBytes::new(py, &shown)))))
+    }
+
+    /// `executemany` of a `PreparedCursor`: each item bound to the
+    /// prepared statement, pipelined as `executemany_pipelined` does.
+    #[pyo3(signature = (query, seq_of_args, max_pipeline, as_dict = false, batch_bytes = 4096))]
+    fn executemany_prepared<'py>(
+        slf: &Bound<'py, Self>,
+        query: &Bound<'py, PyString>,
+        seq_of_args: &Bound<'py, PyAny>,
+        max_pipeline: usize,
+        as_dict: bool,
+        batch_bytes: usize,
+    ) -> PyResult<Option<PipelinedMany<'py>>> {
+        Self::prepared_many(
+            slf,
+            query,
+            seq_of_args,
+            max_pipeline,
+            false,
             as_dict,
             batch_bytes,
         )
@@ -979,6 +1279,17 @@ impl Connection {
         self.peek(Conn::is_tls)
     }
 
+    /// Compression in use: `"zlib"`, `"zstd"` or `None`.
+    #[getter]
+    fn compression(&self) -> PyResult<Option<&'static str>> {
+        self.peek(|conn| {
+            conn.compression().map(|algorithm| match algorithm {
+                Compression::Zlib => "zlib",
+                Compression::Zstd { .. } => "zstd",
+            })
+        })
+    }
+
     #[getter]
     fn closed(&self) -> bool {
         matches!(
@@ -1031,6 +1342,11 @@ impl Connection {
     ssl_key = None,
     server_public_key = None,
     binary_prefix = true,
+    statement_cache_size = 32,
+    compress = None,
+    zstd_level = 3,
+    local_infile = false,
+    local_infile_dir = None,
 ))]
 #[expect(
     clippy::too_many_arguments,
@@ -1055,7 +1371,35 @@ pub(crate) fn connect(
     ssl_key: Option<PathBuf>,
     server_public_key: Option<PathBuf>,
     binary_prefix: bool,
+    statement_cache_size: usize,
+    compress: Option<&str>,
+    zstd_level: u8,
+    local_infile: bool,
+    local_infile_dir: Option<PathBuf>,
 ) -> PyResult<Connection> {
+    if local_infile && local_infile_dir.is_none() {
+        return Err(PyValueError::new_err(
+            "local_infile=True needs local_infile_dir: LOAD DATA LOCAL INFILE \
+             only sends files from a directory you allow",
+        ));
+    }
+    let compress = match compress {
+        None => None,
+        Some("zlib") => Some(Compression::Zlib),
+        Some("zstd") if (1..=22).contains(&zstd_level) => {
+            Some(Compression::Zstd { level: zstd_level })
+        }
+        Some("zstd") => {
+            return Err(PyValueError::new_err(format!(
+                "zstd_level must be between 1 and 22, got {zstd_level}"
+            )));
+        }
+        Some(other) => {
+            return Err(PyValueError::new_err(format!(
+                "invalid compress {other:?}; expected zlib or zstd"
+            )));
+        }
+    };
     let mode = SslMode::parse(ssl_mode).ok_or_else(|| {
         PyValueError::new_err(format!(
             "invalid ssl_mode {ssl_mode:?}; expected disabled, preferred, required, \
@@ -1089,6 +1433,9 @@ pub(crate) fn connect(
             key: ssl_key,
         },
         server_public_key,
+        statement_cache: statement_cache_size,
+        compress,
+        local_infile_dir,
     };
     let conn = py.detach(|| Conn::connect(&opts)).map_err(|err| {
         from_proto(err, Phase::Connect, &target, |message| {

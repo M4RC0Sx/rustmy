@@ -5,17 +5,39 @@
 //! followed by an empty packet.
 
 use std::io;
+use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Read;
 use std::io::Write;
 use std::ops::Range;
 
 use crate::MAX_PACKET_PAYLOAD;
+use crate::compress::Compressed;
+use crate::compress::Compression;
 use crate::error::Error;
 use crate::error::Result;
 
 const HEADER_LEN: usize = 4;
 const READ_BUFFER_CAPACITY: usize = 64 * 1024;
+
+/// Largest logical payload accepted until authentication succeeds. The
+/// greeting, auth switches, RSA keys and OK/ERR packets are all far smaller,
+/// so a server (or anyone in between, before TLS) cannot make the client
+/// allocate without bound before it even knows who it talks to.
+pub(crate) const HANDSHAKE_PAYLOAD_LIMIT: usize = 64 * 1024;
+
+/// Largest logical payload accepted afterwards: 1 GiB, the most any server
+/// sends (`max_allowed_packet` cannot go higher) and libmysqlclient's own
+/// limit.
+pub(crate) const PAYLOAD_LIMIT: usize = 1 << 30;
+
+/// Where a pipelined reply starts: the sequence id of its first packet and,
+/// on a compressed connection, of its first compressed packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplyStart {
+    pub(crate) seq: u8,
+    pub(crate) compressed: u8,
+}
 
 /// Buffered packet reader/writer over a byte stream.
 #[derive(Debug)]
@@ -23,6 +45,30 @@ pub(crate) struct PacketStream<S: Read + Write> {
     inner: BufReader<S>,
     seq: u8,
     write_buf: Vec<u8>,
+    /// Compressed layer, once negotiated and authenticated.
+    compressed: Option<Box<Compressed>>,
+    /// Largest logical payload [`PacketStream::read_into`] accepts.
+    payload_limit: usize,
+}
+
+/// Appends exactly `len` bytes of `source` to `out`. When the read buffer
+/// holds them all (nearly always: a row is one packet) they are copied
+/// straight from it; `take(len).read_to_end` would probe for an end it
+/// already knows, at a cost on every packet. Otherwise they are read as
+/// they come, never zero-filling a length only the peer vouches for.
+fn append_exact<R: Read>(source: &mut BufReader<R>, out: &mut Vec<u8>, len: usize) -> Result<()> {
+    if let Some(bytes) = source.buffer().get(..len) {
+        out.extend_from_slice(bytes);
+        source.consume(len);
+        return Ok(());
+    }
+    out.reserve(len);
+    let wanted = u64::try_from(len).map_err(|_| Error::protocol("packet length too large"))?;
+    let read = source.take(wanted).read_to_end(out)?;
+    if read != len {
+        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+    }
+    Ok(())
 }
 
 impl<S: Read + Write> PacketStream<S> {
@@ -31,7 +77,15 @@ impl<S: Read + Write> PacketStream<S> {
             inner: BufReader::with_capacity(READ_BUFFER_CAPACITY, stream),
             seq: 0,
             write_buf: Vec::new(),
+            compressed: None,
+            payload_limit: HANDSHAKE_PAYLOAD_LIMIT,
         }
+    }
+
+    /// Raises the payload limit from [`HANDSHAKE_PAYLOAD_LIMIT`] to
+    /// [`PAYLOAD_LIMIT`], once authenticated.
+    pub(crate) fn authenticated(&mut self) {
+        self.payload_limit = PAYLOAD_LIMIT;
     }
 
     /// Hands the raw stream back (to wrap it in TLS) with the sequence id to
@@ -57,9 +111,19 @@ impl<S: Read + Write> PacketStream<S> {
         self.inner.get_mut()
     }
 
-    /// Every client command starts a new sequence.
-    pub(crate) const fn reset_seq(&mut self) {
+    /// From now on, every byte travels in compressed packets (once
+    /// authentication succeeds: its last packet is not compressed).
+    pub(crate) fn compress(&mut self, algorithm: Compression) -> Result<()> {
+        self.compressed = Some(Box::new(Compressed::new(algorithm)?));
+        Ok(())
+    }
+
+    /// Every client command starts a new sequence, compressed one included.
+    pub(crate) fn reset_seq(&mut self) {
         self.seq = 0;
+        if let Some(compressed) = &mut self.compressed {
+            compressed.set_seq(0);
+        }
     }
 
     /// Reads one logical payload (joining split packets) and appends it to
@@ -69,23 +133,36 @@ impl<S: Read + Write> PacketStream<S> {
         let start = out.len();
         loop {
             let mut header = [0u8; HEADER_LEN];
-            self.inner.read_exact(&mut header)?;
+            match &mut self.compressed {
+                None => self.inner.read_exact(&mut header)?,
+                Some(compressed) => compressed.read_exact(&mut self.inner, &mut header)?,
+            }
             let [l0, l1, l2, seq] = header;
-            if seq != self.seq {
+            // Compressed, only the compressed sequence is checked: servers
+            // move the ordinary one to it whenever they flush (see
+            // `compress`), and the compressed layer keeps us in sync.
+            if seq != self.seq && self.compressed.is_none() {
                 return Err(Error::protocol(format!(
                     "packet out of order: expected sequence {}, got {seq}",
                     self.seq
                 )));
             }
-            self.seq = self.seq.wrapping_add(1);
+            self.seq = seq.wrapping_add(1);
 
             let len = u32::from_le_bytes([l0, l1, l2, 0]);
             let len_usize = usize::try_from(len)
                 .map_err(|_| Error::protocol("packet length exceeds address space"))?;
-            out.reserve(len_usize);
-            let read = (&mut self.inner).take(u64::from(len)).read_to_end(out)?;
-            if read != len_usize {
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            let read = out.len().saturating_sub(start);
+            if read.saturating_add(len_usize) > self.payload_limit {
+                return Err(Error::protocol(format!(
+                    "the server sent a payload over the {} byte limit",
+                    self.payload_limit
+                )));
+            }
+            if let Some(compressed) = &mut self.compressed {
+                compressed.append(&mut self.inner, out, len_usize)?;
+            } else {
+                append_exact(&mut self.inner, out, len_usize)?;
             }
             if len_usize < MAX_PACKET_PAYLOAD {
                 return Ok(start..out.len());
@@ -105,35 +182,54 @@ impl<S: Read + Write> PacketStream<S> {
     }
 
     /// Sends one command per item of `args` in a single write, without
-    /// waiting for any reply, and records in `reply_seqs` the sequence id
-    /// each reply starts at. Before reading reply `i`, call
-    /// [`PacketStream::expect_seq`] with `reply_seqs[i]`.
+    /// waiting for any reply, and records in `replies` where each reply
+    /// starts. Before reading reply `i`, call [`PacketStream::expect_reply`]
+    /// with `replies[i]`.
     pub(crate) fn write_commands<'a>(
         &mut self,
         cmd: u8,
         args: impl IntoIterator<Item = &'a [u8]>,
-        reply_seqs: &mut Vec<u8>,
+        replies: &mut Vec<ReplyStart>,
     ) -> Result<()> {
         let mut buf = std::mem::take(&mut self.write_buf);
         buf.clear();
+        // Compressed, each command goes in compressed packets of its own
+        // (see `compress`), so it is framed apart first.
+        let mut command = Vec::new();
         let mut encoded = Ok(());
         for arg in args {
             self.reset_seq();
-            encoded = self.encode_parts(&mut buf, &[cmd], arg);
+            let compressed = if self.compressed.is_some() {
+                command.clear();
+                encoded = self.encode_parts(&mut command, &[cmd], arg);
+                self.compressed.as_mut().map_or(0, |layer| {
+                    layer.encode_into(&command, &mut buf);
+                    layer.seq()
+                })
+            } else {
+                encoded = self.encode_parts(&mut buf, &[cmd], arg);
+                0
+            };
             if encoded.is_err() {
                 break;
             }
-            reply_seqs.push(self.seq);
+            replies.push(ReplyStart {
+                seq: self.seq,
+                compressed,
+            });
         }
-        let result = encoded.and_then(|()| self.send(&buf));
+        let result = encoded.and_then(|()| self.send_framed(&buf));
         self.write_buf = buf;
         result
     }
 
-    /// Sets the sequence id the next packet read must carry (the start of a
-    /// pipelined reply, from [`PacketStream::write_commands`]).
-    pub(crate) const fn expect_seq(&mut self, seq: u8) {
-        self.seq = seq;
+    /// Sets the sequence ids the next packets read must carry (the start of
+    /// a pipelined reply, from [`PacketStream::write_commands`]).
+    pub(crate) fn expect_reply(&mut self, start: ReplyStart) {
+        self.seq = start.seq;
+        if let Some(compressed) = &mut self.compressed {
+            compressed.set_seq(start.compressed);
+        }
     }
 
     /// Sends `head ++ body` as one logical payload without concatenating
@@ -172,9 +268,22 @@ impl<S: Read + Write> PacketStream<S> {
         }
     }
 
+    /// Sends packets, wrapping them in compressed ones if need be.
     fn send(&mut self, buf: &[u8]) -> Result<()> {
+        match &mut self.compressed {
+            None => self.send_framed(buf),
+            Some(compressed) => {
+                let stream = self.inner.get_mut();
+                let bytes = compressed.encode(buf);
+                Ok(stream.write_all(bytes).and_then(|()| stream.flush())?)
+            }
+        }
+    }
+
+    /// Sends bytes already framed for the wire.
+    fn send_framed(&mut self, bytes: &[u8]) -> Result<()> {
         let stream = self.inner.get_mut();
-        Ok(stream.write_all(buf).and_then(|()| stream.flush())?)
+        Ok(stream.write_all(bytes).and_then(|()| stream.flush())?)
     }
 
     fn push_header(&mut self, buf: &mut Vec<u8>, len: usize) -> Result<()> {
@@ -195,6 +304,8 @@ mod tests {
     use std::io::Read;
     use std::io::Write;
 
+    use super::HANDSHAKE_PAYLOAD_LIMIT;
+    use super::PAYLOAD_LIMIT;
     use super::PacketStream;
     use crate::MAX_PACKET_PAYLOAD;
 
@@ -221,7 +332,14 @@ mod tests {
         }
     }
 
+    /// A stream past authentication (see [`handshake_reader`]).
     fn reader(bytes: Vec<u8>) -> PacketStream<Duplex> {
+        let mut ps = handshake_reader(bytes);
+        ps.authenticated();
+        ps
+    }
+
+    fn handshake_reader(bytes: Vec<u8>) -> PacketStream<Duplex> {
         PacketStream::new(Duplex {
             input: Cursor::new(bytes),
             output: Vec::new(),
@@ -255,6 +373,40 @@ mod tests {
         assert!(ps.read_into(&mut Vec::new()).is_err());
     }
 
+    /// Hands out at most three bytes per read, as a slow socket would.
+    struct Trickle(Cursor<Vec<u8>>);
+
+    impl Read for Trickle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(3);
+            self.0.read(&mut buf[..n])
+        }
+    }
+
+    impl Write for Trickle {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reads_payloads_the_buffer_holds_only_in_part() {
+        // Each payload arrives over several reads, so the read buffer never
+        // holds one whole: the path that is not a plain copy.
+        let mut wire = vec![10, 0, 0, 0];
+        wire.extend_from_slice(b"0123456789");
+        wire.extend_from_slice(&[2, 0, 0, 1, b'a', b'b']);
+        let mut ps = PacketStream::new(Trickle(Cursor::new(wire)));
+        let mut out = Vec::new();
+        assert_eq!(ps.read_into(&mut out).unwrap(), 0..10);
+        assert_eq!(ps.read_into(&mut out).unwrap(), 10..12);
+        assert_eq!(out, b"0123456789ab");
+    }
+
     #[test]
     fn joins_split_payload() {
         let payload = vec![7u8; MAX_PACKET_PAYLOAD + 10];
@@ -263,6 +415,35 @@ mod tests {
         let mut out = Vec::new();
         ps.read_into(&mut out).unwrap();
         assert_eq!(out, payload);
+    }
+
+    /// The limit counts the whole logical payload, split packets included,
+    /// and is checked from each header, before reading what it announces.
+    #[test]
+    fn payloads_over_the_limit_are_refused() {
+        // Before authentication: one packet just over 64 KiB, of which only
+        // the header arrives.
+        let len = u32::try_from(HANDSHAKE_PAYLOAD_LIMIT + 1)
+            .unwrap()
+            .to_le_bytes();
+        let mut ps = handshake_reader(vec![len[0], len[1], len[2], 0]);
+        let err = ps.read_into(&mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("byte limit"), "{err}");
+        // At the limit exactly, it is read.
+        let payload = vec![1u8; HANDSHAKE_PAYLOAD_LIMIT];
+        let mut ps = handshake_reader(written(&payload));
+        let mut out = Vec::new();
+        ps.read_into(&mut out).unwrap();
+        assert_eq!(out.len(), HANDSHAKE_PAYLOAD_LIMIT);
+        // Split packets add up: a limit just under two of them stops at the
+        // second header.
+        let mut ps = reader(written(&vec![7u8; MAX_PACKET_PAYLOAD + 10]));
+        ps.payload_limit = MAX_PACKET_PAYLOAD + 9;
+        let mut out = Vec::new();
+        let err = ps.read_into(&mut out).unwrap_err();
+        assert!(err.to_string().contains("byte limit"), "{err}");
+        assert_eq!(out.len(), MAX_PACKET_PAYLOAD);
+        assert_eq!(PAYLOAD_LIMIT, 1 << 30);
     }
 
     #[test]
@@ -291,11 +472,12 @@ mod tests {
     fn pipelined_commands_each_start_a_sequence() {
         let mut ps = reader(Vec::new());
         let big = vec![b'x'; MAX_PACKET_PAYLOAD];
-        let mut reply_seqs = Vec::new();
-        ps.write_commands(0x03, [&b"A"[..], &big, b"B"], &mut reply_seqs)
+        let mut replies = Vec::new();
+        ps.write_commands(0x03, [&b"A"[..], &big, b"B"], &mut replies)
             .unwrap();
         // The second command takes two packets, so its reply starts at 2.
-        assert_eq!(reply_seqs, [1, 2, 1]);
+        let seqs: Vec<u8> = replies.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, [1, 2, 1]);
         let out = ps.inner.into_inner().output;
         assert_eq!(out[..6], [2, 0, 0, 0, 0x03, b'A']);
         let second = 6 + 4 + MAX_PACKET_PAYLOAD;
@@ -305,9 +487,12 @@ mod tests {
     }
 
     #[test]
-    fn expect_seq_sets_the_next_read() {
+    fn expect_reply_sets_the_next_read() {
         let mut ps = reader(vec![1, 0, 0, 4, b'a']);
-        ps.expect_seq(4);
+        ps.expect_reply(super::ReplyStart {
+            seq: 4,
+            compressed: 0,
+        });
         let mut out = Vec::new();
         ps.read_into(&mut out).unwrap();
         assert_eq!(out, b"a");

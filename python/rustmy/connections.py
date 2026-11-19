@@ -20,6 +20,7 @@ from rustmy.converters import escape_string
 from rustmy.converters import split_conv
 from rustmy.converters import to_literal
 from rustmy.cursors import Cursor
+from rustmy.cursors import prepared_variant
 
 
 if TYPE_CHECKING:
@@ -57,14 +58,27 @@ def _with_option_file(
         raise err.ProgrammingError(0, str(exc)) from None
     merged = dict(given)
     for name, value in from_file.items():
-        if name == "multi_statements":
+        if name in {"multi_statements", "local_infile"}:
             merged[name] = bool(given[name]) or bool(value)
+        elif name == "compress":
+            merged[name] = given[name] or value
         elif name == "found_rows":
             if value:
                 merged["client_flag"] = given["client_flag"] | CLIENT.FOUND_ROWS
         elif name in given and given[name] is None:
             merged[name] = value
     return merged
+
+
+def _compression(compress: object) -> str | None:
+    """``connect(compress=…)`` as the algorithm to ask for."""
+    if isinstance(compress, str):
+        if compress in {"zlib", "zstd"}:
+            return compress
+        msg = f"invalid compress {compress!r}; expected True, 'zlib' or 'zstd'"
+        raise ValueError(msg)
+    # True, or a number as mysqlclient takes it.
+    return "zlib" if compress else None
 
 
 class Connection:
@@ -119,6 +133,11 @@ class Connection:
         ssl: Mapping[str, object] | bool | None = None,
         server_public_key: PathArg | None = None,
         binary_prefix: bool = True,
+        statement_cache_size: int = 32,
+        compress: bool | str = False,
+        zstd_level: int | None = None,
+        local_infile: bool = False,
+        local_infile_dir: PathArg | None = None,
         read_default_file: PathArg | None = None,
         read_default_group: str | None = None,
     ) -> None:
@@ -137,8 +156,10 @@ class Connection:
         ``user``, ``password``, ``database``, ``socket``,
         ``default-character-set``, ``init-command``, ``connect-timeout``,
         ``ssl-mode``, ``ssl-ca``, ``ssl-cert``, ``ssl-key``,
-        ``server-public-key-path``, ``multi-statements`` and
-        ``return-found-rows``; other options are ignored.
+        ``server-public-key-path``, ``multi-statements``,
+        ``return-found-rows``, ``compress``, ``compression-algorithms``,
+        ``zstd-compression-level``, ``local-infile`` and
+        ``load-data-local-dir``; other options are ignored.
 
         ``charset`` is the session's character set (default ``utf8mb4``;
         ``utf8`` means ``utf8mb4``): queries are encoded and text results
@@ -171,6 +192,30 @@ class Connection:
         ``install_as_MySQLdb()`` alias defaults to it, as mysqlclient does).
         Multi-byte legacy character sets (gbk, big5, sjis…) always get a
         hexadecimal ``X'…'``, which is binary on its own.
+
+        ``compress=True`` (or ``"zlib"``) uses the compressed protocol with
+        zlib, which pays off on slow or metered networks and costs CPU on
+        fast ones; ``compress="zstd"`` uses zstd (MySQL 8.0.18+) at
+        ``zstd_level`` (1 to 22, default 3), or zlib if the server offers no
+        zstd (MariaDB). A server that offers no compression at all gets an
+        uncompressed connection: :attr:`compression` says what was agreed.
+
+        ``LOAD DATA LOCAL INFILE`` is off by default: the server names the
+        file the client sends, so a malicious one could ask for any file.
+        ``local_infile_dir`` turns it on for the files inside that directory
+        (resolved when connecting, symbolic links included); a request is
+        answered only if the statement being run names that very file and
+        the file, resolved too, is inside the directory. Anything else is
+        refused with :class:`~rustmy.err.OperationalError` 2068 and an empty
+        file, without reading the disk. Relative names start at the working
+        directory, as in other clients. ``local_infile=True`` is accepted for
+        compatibility but needs ``local_infile_dir``: rustmy never sends
+        files from anywhere.
+
+        Prepared statements (:class:`~rustmy.cursors.PreparedCursor`) are
+        prepared once per connection: the last ``statement_cache_size`` stay
+        prepared on the server, which allows 16,382 across all its
+        connections by default (``max_prepared_stmt_count``).
 
         TLS: ``ssl_mode`` is one of ``disabled``, ``preferred`` (default),
         ``required`` (encrypted, server not verified), ``verify_ca`` and
@@ -208,6 +253,10 @@ class Connection:
                     "server_public_key": server_public_key,
                     "multi_statements": multi_statements,
                     "client_flag": client_flag,
+                    "compress": compress,
+                    "zstd_level": zstd_level,
+                    "local_infile": local_infile,
+                    "local_infile_dir": local_infile_dir,
                     # An ``ssl`` dict says all there is to say about TLS.
                     **(
                         {}
@@ -229,6 +278,9 @@ class Connection:
             server_public_key = args["server_public_key"]
             multi_statements = args["multi_statements"]
             client_flag = args["client_flag"]
+            compress, zstd_level = args["compress"], args["zstd_level"]
+            local_infile = args["local_infile"]
+            local_infile_dir = args["local_infile_dir"]
             if ssl is None:
                 ssl_mode, ssl_ca = args["ssl_mode"], args["ssl_ca"]
                 ssl_cert, ssl_key = args["ssl_cert"], args["ssl_key"]
@@ -262,6 +314,11 @@ class Connection:
                 None if server_public_key is None else os.fspath(server_public_key)
             ),
             binary_prefix=binary_prefix,
+            statement_cache_size=statement_cache_size,
+            compress=_compression(compress),
+            zstd_level=3 if zstd_level is None else zstd_level,
+            local_infile=bool(local_infile),
+            local_infile_dir=local_infile_dir,
         )
         self.cursorclass = cursorclass
         #: Python types to SQL literal encoders (MySQLdb's attribute), from
@@ -360,6 +417,31 @@ class Connection:
             query, seq_of_args, max_pipeline, as_dict, batch_bytes
         )
 
+    def _execute_prepared(
+        self, query: str, args: Params, *, as_dict: bool, batch_bytes: int
+    ) -> QueryResult:
+        return self._conn.execute_prepared(query, args, as_dict, batch_bytes)
+
+    def _executemany_prepared_insert(
+        self, query: str, seq_of_args: Iterable[Params], max_stmt_length: int
+    ) -> tuple[int, int | None, bytes | None] | None:
+        return self._conn.executemany_prepared_insert(
+            query, seq_of_args, max_stmt_length
+        )
+
+    def _executemany_prepared(
+        self,
+        query: str,
+        seq_of_args: Iterable[Params],
+        max_pipeline: int,
+        *,
+        as_dict: bool,
+        batch_bytes: int,
+    ) -> tuple[QueryResult, int, bytes] | None:
+        return self._conn.executemany_prepared(
+            query, seq_of_args, max_pipeline, as_dict, batch_bytes
+        )
+
     def _next_result(
         self, *, as_dict: bool = False, batch_bytes: int = 4096
     ) -> QueryResult | None:
@@ -371,30 +453,47 @@ class Connection:
         return self._conn.next_result_streamed(as_dict, batch_bytes)
 
     @overload
-    def cursor(self, cursorclass: None = None, *, cursor: None = None) -> Cursor: ...
+    def cursor(
+        self, cursorclass: None = None, *, cursor: None = None, prepared: bool = False
+    ) -> Cursor: ...
     @overload
     def cursor(
-        self, cursorclass: type[_CursorT], *, cursor: None = None
+        self,
+        cursorclass: type[_CursorT],
+        *,
+        cursor: None = None,
+        prepared: bool = False,
     ) -> _CursorT: ...
     @overload
     def cursor(
-        self, cursorclass: None = None, *, cursor: type[_CursorT]
+        self,
+        cursorclass: None = None,
+        *,
+        cursor: type[_CursorT],
+        prepared: bool = False,
     ) -> _CursorT: ...
     def cursor(
         self,
         cursorclass: type[Cursor] | None = None,
         *,
         cursor: type[Cursor] | None = None,
+        prepared: bool = False,
     ) -> Cursor:
         """Create a cursor of ``cursorclass``, by default the one given to
         ``connect()``. ``cursor=`` is accepted as an alias (PyMySQL's name).
+        ``prepared=True`` gives that class's prepared-statement version
+        (:class:`~rustmy.cursors.PreparedCursor` for ``Cursor``,
+        :class:`~rustmy.cursors.PreparedDictCursor` for ``DictCursor``).
         """
         if cursor is not None:
             if cursorclass is not None:
                 msg = "pass cursorclass or cursor, not both"
                 raise TypeError(msg)
             cursorclass = cursor
-        return (cursorclass or self.cursorclass)(self)
+        chosen = cursorclass or self.cursorclass
+        if prepared:
+            chosen = prepared_variant(chosen)
+        return chosen(self)
 
     def commit(self) -> None:
         self._query("COMMIT")
@@ -486,6 +585,11 @@ class Connection:
     def tls(self) -> bool:
         """Whether the connection is encrypted with TLS."""
         return self._conn.tls
+
+    @property
+    def compression(self) -> str | None:
+        """Compression in use: ``"zlib"``, ``"zstd"`` or ``None``."""
+        return self._conn.compression
 
     @property
     def open(self) -> bool:
