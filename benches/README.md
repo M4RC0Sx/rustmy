@@ -28,6 +28,141 @@ the development environment's version, so they compare with each other
 "Current results" measures today's code on the latest Python, what a new
 project installs, and is regenerated when a phase closes.
 
+## Showcase: everyday workloads at 100,000 and 1,000,000 rows (Python 3.14)
+
+What the main README shows: absolute times of the workloads applications
+run, through plain DB-API, prepared statements, SQLAlchemy 2 and Django, plus
+the peak memory of reading a million rows. Four drivers: rustmy, mysqlclient,
+PyMySQL and mysql-connector-python with its C extension (GPL; only installed
+to measure, in the `bench` group, never shipped). Python 3.14, because
+mysql-connector-python has no C extension for 3.15 yet and without it the
+comparison would not be fair.
+
+`showcase.py` loads a million orders (integers, a name, a decimal price, a
+microsecond datetime, a nullable date and a nullable note) and runs each area
+with each driver in a fresh process (Django can only load one `MySQLdb`; the
+memory peak needs a clean process). Plain TCP and `autocommit` for all; best
+of 5 at 100k rows and of 3 at 1M. Inserts go in `executemany` calls of 10,000
+rows for every driver (some build the whole batch as one statement, beyond
+`max_allowed_packet` at a million rows); the SQLAlchemy ORM insert uses
+`render_nulls=True`, without which the ORM splits the batch wherever the
+NULL columns change (thousands of statements, with any driver).
+
+```sh
+export UV_PROJECT_ENVIRONMENT=.venv-3.14
+PKG_CONFIG_PATH=/opt/homebrew/opt/mysql-client/lib/pkgconfig \
+    uv sync --python 3.14 --group bench
+uv run --no-sync --python 3.14 maturin develop --uv --release
+docker compose up -d --wait mysql
+P="uv run --no-sync --python 3.14 python"
+$P benches/showcase.py --json benches/results/showcase-py314.json   # ~1 hour
+$P benches/showcase.py --render benches/results/showcase-py314.json
+```
+
+`--render` draws one chart per area and the summary chart at the top of the
+main README (`hero-*.svg`), and rewrites the tables below and in the main
+README's Performance section.
+
+<!-- results:showcase:start -->
+**CPython 3.14.3** · MySQL 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8, mysql-connector-python 26.10.0 (C extension), SQLAlchemy 2.1.9, Django 6.1.3 · best of 5 (100k) and 3 (1M) · 2026-11-18T23:17:13+00:00
+
+#### DB-API
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/showcase-dbapi-dark.svg">
+  <img alt="DB-API: time per driver, lower is better" src="results/showcase-dbapi-light.svg">
+</picture>
+
+| Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
+|---|--:|--:|--:|--:|--:|--:|
+| Read rows (tuples) | 100,000 | **41 ms** | 124 ms | 308 ms | 154 ms | 3.0× faster |
+| Read rows (dicts) | 100,000 | **52 ms** | 131 ms | 340 ms | 211 ms | 2.5× faster |
+| Stream rows | 100,000 | **32 ms** | 102 ms | 321 ms | 182 ms | 3.2× faster |
+| Insert rows (executemany) | 100,000 | **336 ms** | 1.06 s | 638 ms | 590 ms | 3.2× faster |
+| Read rows (tuples) | 1,000,000 | **456 ms** | 1.31 s | 3.19 s | 1.60 s | 2.9× faster |
+| Read rows (dicts) | 1,000,000 | **534 ms** | 1.39 s | 3.52 s | 2.14 s | 2.6× faster |
+| Stream rows | 1,000,000 | **268 ms** | 1.04 s | 3.22 s | 1.81 s | 3.9× faster |
+| Insert rows (executemany) | 1,000,000 | **3.67 s** | 11.77 s | 6.60 s | 5.89 s | 3.2× faster |
+
+#### Prepared statements
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/showcase-prepared-dark.svg">
+  <img alt="Prepared statements: time per driver, lower is better" src="results/showcase-prepared-light.svg">
+</picture>
+
+| Workload | Rows | rustmy (prepared) | rustmy (text) | mysql-connector (prepared) | mysqlclient | PyMySQL | vs mysqlclient |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| Read rows | 100,000 | 42 ms | **41 ms** | 179 ms | 125 ms | 315 ms | 3.0× faster |
+| Read rows | 1,000,000 | 477 ms | **456 ms** | 1.80 s | 1.46 s | 3.15 s | 3.1× faster |
+
+#### SQLAlchemy 2
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/showcase-sqlalchemy-dark.svg">
+  <img alt="SQLAlchemy 2: time per driver, lower is better" src="results/showcase-sqlalchemy-light.svg">
+</picture>
+
+| Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
+|---|--:|--:|--:|--:|--:|--:|
+| Core: read rows | 100,000 | **55 ms** | 147 ms | 331 ms | 167 ms | 2.7× faster |
+| ORM: load objects | 100,000 | **247 ms** | 328 ms | 521 ms | 362 ms | 1.3× faster |
+| ORM: stream objects (yield_per) | 100,000 | **202 ms** | 255 ms | 492 ms | 331 ms | 1.3× faster |
+| ORM: bulk insert | 100,000 | **550 ms** | 1.43 s | 899 ms | 1.02 s | 2.6× faster |
+| Core: read rows | 1,000,000 | **536 ms** | 1.33 s | 3.32 s | 1.70 s | 2.5× faster |
+| ORM: load objects | 1,000,000 | **2.59 s** | 3.39 s | 5.38 s | 3.73 s | 1.3× faster |
+| ORM: stream objects (yield_per) | 1,000,000 | **1.90 s** | 2.45 s | 4.81 s | 3.24 s | 1.3× faster |
+| ORM: bulk insert | 1,000,000 | **5.52 s** | 15.07 s | 9.15 s | 9.94 s | 2.7× faster |
+
+#### Django
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/showcase-django-dark.svg">
+  <img alt="Django: time per driver, lower is better" src="results/showcase-django-light.svg">
+</picture>
+
+| Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
+|---|--:|--:|--:|--:|--:|--:|
+| QuerySet: load objects | 100,000 | **210 ms** | 278 ms | 480 ms | 400 ms | 1.3× faster |
+| QuerySet: values_list() | 100,000 | **46 ms** | 142 ms | 327 ms | 248 ms | 3.1× faster |
+| QuerySet: iterator() | 100,000 | **172 ms** | 265 ms | 450 ms | 365 ms | 1.5× faster |
+| bulk_create() | 100,000 | **1.17 s** | 1.41 s | 1.44 s | 1.93 s | 1.2× faster |
+| QuerySet: load objects | 1,000,000 | **1.93 s** | 2.72 s | 4.74 s | 3.96 s | 1.4× faster |
+| QuerySet: values_list() | 1,000,000 | **427 ms** | 1.25 s | 3.23 s | 2.46 s | 2.9× faster |
+| QuerySet: iterator() | 1,000,000 | **1.66 s** | 2.43 s | 4.49 s | 3.64 s | 1.5× faster |
+| bulk_create() | 1,000,000 | **11.43 s** | 13.89 s | 14.10 s | 19.39 s | 1.2× faster |
+
+#### Memory
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/showcase-memory-dark.svg">
+  <img alt="Memory: time per driver, lower is better" src="results/showcase-memory-light.svg">
+</picture>
+
+| Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
+|---|--:|--:|--:|--:|--:|--:|
+| Peak memory of fetchall() | 1,000,000 | 504 MiB | 696 MiB | 511 MiB | **496 MiB** | 28% less memory |
+<!-- results:showcase:end -->
+
+What the numbers say:
+
+- Plain DB-API is where rustmy gains most: 2.5–3.9x mysqlclient's speed
+  reading (more when streaming, where mysqlclient fetches one row per call),
+  and 3.2x inserting: mysqlclient sends `executemany` in 64 KiB
+  statements, rustmy in 256 KiB ones built in Rust.
+- Through an ORM, building a Python object per row costs the same with every
+  driver and dominates: rustmy is still 1.2–1.5x faster than mysqlclient and
+  2–2.5x faster than PyMySQL, and Django's `values_list()`, which builds no
+  objects, keeps nearly all of the DB-API gain (2.9–3.1x).
+- Prepared statements read this table as fast as text, not faster: its rows
+  are mostly strings, which travel the same way in both protocols, and the
+  binary protocol only saves parsing numbers and dates (on doubles, datetimes
+  and decimals it reads in about half the time; see the Phase 5, block 3
+  section). mysql-connector-python's prepared cursor is slower than its plain
+  one.
+- Memory: the four drivers hold a million rows in about the same space but
+  for mysqlclient, which takes 38% more than rustmy.
+
 ## Current results (Python 3.15)
 
 The latest code on CPython 3.15 (and SQLAlchemy 2.1 for the ORM), against
@@ -50,7 +185,6 @@ for section in spike cursors charsets conv orm; do
     $P benches/report.py --section current-$section \
         benches/results/current-$section-py315.json
 done
-$P benches/hero.py   # the summary chart at the top of the main README
 ```
 
 ### Main scenarios (`spike.py`)

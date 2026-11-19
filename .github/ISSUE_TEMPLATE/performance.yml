@@ -1,0 +1,38 @@
+name: Performance
+description: rustmy is slower than you expected, or than another driver.
+labels: ["performance"]
+body:
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload
+      description: >
+        What is slow, with code that measures it: the query, how many rows
+        and columns of which types, the cursor class, the framework.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: numbers
+    attributes:
+      label: Numbers
+      description: >
+        Times with rustmy and, if you have them, with another driver on the
+        same machine and server.
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: rustmy, Python and server versions
+      placeholder: "rustmy 1.2.0, CPython 3.13.2, MySQL 8.4.6"
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: Machine and network
+      description: Where the client and the server run, and the link between them.
+      placeholder: "Client and server on the same host / over a LAN / a cloud database 20 ms away"
+    validations:
+      required: true

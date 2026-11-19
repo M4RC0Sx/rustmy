@@ -9,38 +9,36 @@ wheels with no system libraries to install.
 [![Python versions](https://img.shields.io/pypi/pyversions/rustmy)](https://pypi.org/project/rustmy/)
 [![Free-threaded](https://img.shields.io/badge/free--threaded-3.14t%20%7C%203.15t-blue)](https://docs.python.org/3/howto/free-threading-python.html)
 [![CI](https://github.com/M4RC0Sx/rustmy/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/M4RC0Sx/rustmy/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/codecov/c/github/M4RC0Sx/rustmy/develop?label=coverage)](https://app.codecov.io/gh/M4RC0Sx/rustmy)
+[![Python coverage](https://img.shields.io/codecov/c/github/M4RC0Sx/rustmy/develop?flag=python&label=python%20coverage)](https://app.codecov.io/gh/M4RC0Sx/rustmy)
+[![Rust coverage](https://img.shields.io/codecov/c/github/M4RC0Sx/rustmy/develop?flag=rust&label=rust%20coverage)](https://app.codecov.io/gh/M4RC0Sx/rustmy)
 [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/M4RC0Sx/rustmy)
 [![Downloads](https://static.pepy.tech/badge/rustmy/month)](https://pepy.tech/project/rustmy)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/hero-dark.svg">
-  <img alt="rustmy against mysqlclient and PyMySQL: time to read 100,000 rows, insert 10,000 rows and read 100,000 rows through SQLAlchemy (lower is better; the figures are in the Performance table)" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/hero-light.svg">
+  <img alt="Time to read and insert 1,000,000 rows, and to load 1,000,000 objects through the SQLAlchemy and Django ORMs, with rustmy, mysqlclient, PyMySQL and mysql-connector-python (lower is better; the figures are in the Performance section)" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/hero-light.svg">
 </picture>
-
-```python
-import rustmy
-
-with rustmy.connect(
-    host="localhost", user="app", password="secret", database="shop"
-) as conn:
-    with conn.cursor() as cursor:
-        cursor.execute("SELECT id, name, price FROM products WHERE price < %s", (10,))
-        for product_id, name, price in cursor:
-            print(product_id, name, price)
-```
 
 ## Why rustmy
 
-- **Fast where it counts.** Reading rows is up to **5.3x faster than
-  mysqlclient** and **13x faster than PyMySQL**; bulk inserts are 1.6x faster
-  than both. Rows are read in small batches with the GIL released and
-  converted in Rust while the server sends the next batch. `executemany` of
-  `UPDATE`/`DELETE` pipelines its statements: one network round trip per
-  256 of them instead of one each.
+- **Fast where it counts.** Reading a million rows takes **0.46 s**, against
+  1.31 s with mysqlclient, 1.60 s with mysql-connector-python and 3.19 s with
+  PyMySQL: **2.9x faster than mysqlclient** and 7x faster than PyMySQL.
+  Inserting them with `executemany` is **3.2x faster** than mysqlclient, and
+  Django's `values_list()` 2.9x. Rows are read in small batches with the GIL
+  released and converted in Rust while the server sends the next batch.
+  `executemany` of `UPDATE`/`DELETE` pipelines its statements: one network
+  round trip per 256 of them instead of one each.
+- **Faster ORMs too.** SQLAlchemy and Django build an object per row, which
+  takes the same time with any driver; even so, loading a million objects is
+  1.3–1.5x faster than with mysqlclient and 2–2.5x faster than with PyMySQL.
+- **Less memory.** A million rows held at once take 28% less memory than with
+  mysqlclient; streaming cursors stay flat whatever the size.
 - **Prepared statements when you want them.** `PreparedCursor` uses the
-  binary protocol: typed parameters that never go through escaping, and rows
-  that are read about twice as fast again.
+  binary protocol: typed parameters that never go through escaping, and
+  numbers and dates that need no parsing.
 - **Nothing to install but the wheel.** No libmysqlclient, no compiler, no
   `pkg-config`: TLS is [rustls](https://github.com/rustls/rustls), and the
   supported authentication methods are implemented in Rust.
@@ -67,38 +65,208 @@ with rustmy.connect(
   tests against PyMySQL, fuzzing of the protocol code, and the integration
   tests on nine MySQL and MariaDB versions in CI.
 
+## Quick start
+
+```sh
+pip install rustmy                  # or: uv add rustmy
+pip install "rustmy[sqlalchemy]"    # with SQLAlchemy 2.0+
+```
+
+**Plain DB-API**, as with mysqlclient or PyMySQL:
+
+```python
+import rustmy
+
+with rustmy.connect(
+    host="localhost", user="app", password="secret", database="shop"
+) as conn:
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT id, name, price FROM products WHERE price < %s", (10,))
+        for product_id, name, price in cursor:
+            print(product_id, name, price)
+        cursor.executemany(
+            "INSERT INTO products (name, price) VALUES (%s, %s)",
+            [("tea", 3.5), ("coffee", 4.2)],
+        )
+    conn.commit()
+```
+
+**SQLAlchemy**: the `mysql+rustmy` (or `mariadb+rustmy`) URL, nothing to
+import:
+
+```python
+from sqlalchemy import create_engine, text
+
+engine = create_engine("mysql+rustmy://app:secret@localhost/shop", pool_pre_ping=True)
+with engine.connect() as conn:
+    rows = conn.execute(text("SELECT id, name FROM products")).all()
+```
+
+**Django**: two lines at the top of `settings.py`, then the usual MySQL
+backend:
+
+```python
+import rustmy
+
+rustmy.install_as_MySQLdb()
+
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.mysql",
+        "NAME": "shop",
+        "USER": "app",
+        "PASSWORD": "secret",
+        "HOST": "localhost",
+    }
+}
+```
+
+**pandas**, through SQLAlchemy:
+
+```python
+import pandas as pd
+from sqlalchemy import create_engine
+
+engine = create_engine("mysql+rustmy://app:secret@localhost/shop")
+orders = pd.read_sql("SELECT * FROM orders WHERE created_at >= '2026-01-01'", engine)
+```
+
+## How it compares
+
+| | rustmy | mysqlclient | PyMySQL | mysql-connector-python |
+|---|---|---|---|---|
+| Written in | Rust | C (wraps libmysqlclient) | Python | Python, optional C extension |
+| License | MIT or Apache-2.0 | GPL-2.0 | MIT | GPL-2.0 (with a FOSS exception) |
+| Linux and macOS install | wheel, nothing else | builds from source: libmysqlclient, its headers, `pkg-config`, a C compiler | pure Python | wheel |
+| Server-side prepared statements | yes (`PreparedCursor`) | no | no | yes |
+| `executemany` of `UPDATE`/`DELETE` | pipelined: up to 256 statements per round trip | batched only with `multi_statements` (2.3+) | one round trip each | one round trip each |
+| `LOAD DATA LOCAL INFILE` | only the file the statement names, inside one allowed directory | any file the server asks for, or one directory (`local_infile_dir`) | any file the server asks for | any file the server asks for, or one directory (`allow_local_infile_in_path`) |
+| asyncio API | not yet | no | no | yes |
+| SQLAlchemy dialect | `mysql+rustmy`, in this package | in SQLAlchemy | in SQLAlchemy | in SQLAlchemy |
+| Django | through `install_as_MySQLdb()` | Django's own backend | through `install_as_MySQLdb()` | its own backend |
+
 ## Performance
 
-CPython 3.15, MySQL 8.4 on the same machine, best of 5 to 10 runs, every
-driver over plain TCP. Higher is better: how many times faster rustmy is.
+Everyday workloads at 100,000 and 1,000,000 rows, each driver in its own
+process against the same MySQL 8.4 on the same machine, over plain TCP.
+The more rows an application reads or writes, the bigger the difference.
+When the time goes into the network round trip of many tiny queries, or into
+building ORM objects one by one, every driver gets closer to the others.
+mysql-connector-python runs with its C extension, on Python 3.14 (it has none
+for 3.15 yet).
 
-| Workload | vs mysqlclient | vs PyMySQL |
-|---|--:|--:|
-| Fetch 100k rows: `DATETIME` + `DATE` | **5.30x** | **13.2x** |
-| Fetch 100k rows: double, datetime, date, decimal | **2.78x** | 6.2x |
-| Fetch 100k rows: integers and strings | 1.56x | 6.2x |
-| Fetch 100k mixed rows as dicts (`DictCursor`) | 2.80x | 6.7x |
-| Stream 1M rows (`SSCursor`) | 2.00x | 9.4x |
-| Fetch 100k rows in `latin1` / `cp1251` | 1.9–2.0x | 3.3–3.6x |
-| `executemany` 10k rows | 1.65x | 1.57x |
-| SQLAlchemy Core: fetch 100k mixed rows | 2.25x | 4.7x |
-| SQLAlchemy ORM: `add_all` + commit 10k objects | 1.32x | 1.21x |
-| 10k tiny queries (`SELECT 1`) | 1.03x | 1.20x |
+<!-- showcase:start -->
+**CPython 3.14.3** · MySQL 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8, mysql-connector-python 26.10.0 (C extension), SQLAlchemy 2.1.9, Django 6.1.3 · best of 5 (100k) and 3 (1M) · 2026-11-18T23:17:13+00:00
+
+#### DB-API
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/current-spike-dark.svg">
-  <img alt="Throughput relative to mysqlclient" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/current-spike-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-dbapi-dark.svg">
+  <img alt="DB-API: time per driver, lower is better" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-dbapi-light.svg">
 </picture>
 
-What it means for your application: the more rows you read or write, the
-bigger the difference. When the time goes into the network round trip of many
-tiny queries, or into building ORM objects one by one, every driver performs
-about the same. Loading a million rows at once also takes 30% less memory
-than with mysqlclient (214 MiB against 304 MiB). Every scenario, the scripts
-and the history of each change are in
+<details>
+<summary>Numbers</summary>
+
+| Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
+|---|--:|--:|--:|--:|--:|--:|
+| Read rows (tuples) | 100,000 | **41 ms** | 124 ms | 308 ms | 154 ms | 3.0× faster |
+| Read rows (dicts) | 100,000 | **52 ms** | 131 ms | 340 ms | 211 ms | 2.5× faster |
+| Stream rows | 100,000 | **32 ms** | 102 ms | 321 ms | 182 ms | 3.2× faster |
+| Insert rows (executemany) | 100,000 | **336 ms** | 1.06 s | 638 ms | 590 ms | 3.2× faster |
+| Read rows (tuples) | 1,000,000 | **456 ms** | 1.31 s | 3.19 s | 1.60 s | 2.9× faster |
+| Read rows (dicts) | 1,000,000 | **534 ms** | 1.39 s | 3.52 s | 2.14 s | 2.6× faster |
+| Stream rows | 1,000,000 | **268 ms** | 1.04 s | 3.22 s | 1.81 s | 3.9× faster |
+| Insert rows (executemany) | 1,000,000 | **3.67 s** | 11.77 s | 6.60 s | 5.89 s | 3.2× faster |
+
+</details>
+
+#### Prepared statements
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-prepared-dark.svg">
+  <img alt="Prepared statements: time per driver, lower is better" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-prepared-light.svg">
+</picture>
+
+<details>
+<summary>Numbers</summary>
+
+| Workload | Rows | rustmy (prepared) | rustmy (text) | mysql-connector (prepared) | mysqlclient | PyMySQL | vs mysqlclient |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| Read rows | 100,000 | 42 ms | **41 ms** | 179 ms | 125 ms | 315 ms | 3.0× faster |
+| Read rows | 1,000,000 | 477 ms | **456 ms** | 1.80 s | 1.46 s | 3.15 s | 3.1× faster |
+
+</details>
+
+#### SQLAlchemy 2
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-sqlalchemy-dark.svg">
+  <img alt="SQLAlchemy 2: time per driver, lower is better" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-sqlalchemy-light.svg">
+</picture>
+
+<details>
+<summary>Numbers</summary>
+
+| Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
+|---|--:|--:|--:|--:|--:|--:|
+| Core: read rows | 100,000 | **55 ms** | 147 ms | 331 ms | 167 ms | 2.7× faster |
+| ORM: load objects | 100,000 | **247 ms** | 328 ms | 521 ms | 362 ms | 1.3× faster |
+| ORM: stream objects (yield_per) | 100,000 | **202 ms** | 255 ms | 492 ms | 331 ms | 1.3× faster |
+| ORM: bulk insert | 100,000 | **550 ms** | 1.43 s | 899 ms | 1.02 s | 2.6× faster |
+| Core: read rows | 1,000,000 | **536 ms** | 1.33 s | 3.32 s | 1.70 s | 2.5× faster |
+| ORM: load objects | 1,000,000 | **2.59 s** | 3.39 s | 5.38 s | 3.73 s | 1.3× faster |
+| ORM: stream objects (yield_per) | 1,000,000 | **1.90 s** | 2.45 s | 4.81 s | 3.24 s | 1.3× faster |
+| ORM: bulk insert | 1,000,000 | **5.52 s** | 15.07 s | 9.15 s | 9.94 s | 2.7× faster |
+
+</details>
+
+#### Django
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-django-dark.svg">
+  <img alt="Django: time per driver, lower is better" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-django-light.svg">
+</picture>
+
+<details>
+<summary>Numbers</summary>
+
+| Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
+|---|--:|--:|--:|--:|--:|--:|
+| QuerySet: load objects | 100,000 | **210 ms** | 278 ms | 480 ms | 400 ms | 1.3× faster |
+| QuerySet: values_list() | 100,000 | **46 ms** | 142 ms | 327 ms | 248 ms | 3.1× faster |
+| QuerySet: iterator() | 100,000 | **172 ms** | 265 ms | 450 ms | 365 ms | 1.5× faster |
+| bulk_create() | 100,000 | **1.17 s** | 1.41 s | 1.44 s | 1.93 s | 1.2× faster |
+| QuerySet: load objects | 1,000,000 | **1.93 s** | 2.72 s | 4.74 s | 3.96 s | 1.4× faster |
+| QuerySet: values_list() | 1,000,000 | **427 ms** | 1.25 s | 3.23 s | 2.46 s | 2.9× faster |
+| QuerySet: iterator() | 1,000,000 | **1.66 s** | 2.43 s | 4.49 s | 3.64 s | 1.5× faster |
+| bulk_create() | 1,000,000 | **11.43 s** | 13.89 s | 14.10 s | 19.39 s | 1.2× faster |
+
+</details>
+
+#### Memory
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-memory-dark.svg">
+  <img alt="Memory: time per driver, lower is better" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-memory-light.svg">
+</picture>
+
+<details>
+<summary>Numbers</summary>
+
+| Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
+|---|--:|--:|--:|--:|--:|--:|
+| Peak memory of fetchall() | 1,000,000 | 504 MiB | 696 MiB | 511 MiB | **496 MiB** | 28% less memory |
+
+</details>
+<!-- showcase:end -->
+
+How it was measured, more scenarios (character sets, `conv=`, cursors,
+compression over slow links, pipelining with latency) and the history of every
+optimization are in
 [benches/README.md](https://github.com/M4RC0Sx/rustmy/blob/master/benches/README.md).
 
-## Installation
+## Installation and compatibility
 
 ```sh
 pip install rustmy
@@ -106,13 +274,20 @@ pip install "rustmy[sqlalchemy]"   # with SQLAlchemy 2.0+
 ```
 
 Or with uv: `uv add rustmy`. Wheels cover Linux (glibc and musl, x86_64 and
-aarch64), macOS (Intel and Apple Silicon) and Windows (x64 and arm64), for
-CPython 3.10 to 3.15 and the free-threaded 3.14t and 3.15t (3.11 and later on
-Windows arm64, where there is no official CPython 3.10). Every wheel is
-installed and tested before release. Elsewhere (FreeBSD, ppc64le, s390x,
-32-bit systems, a new Python before its wheels), pip builds rustmy from the
-source distribution, which needs a Rust toolchain and a C compiler (for the
-bundled zstd library).
+aarch64), macOS (Intel and Apple Silicon) and Windows (x64 and arm64), and
+need nothing else installed. Every wheel is installed and tested before
+release. Elsewhere (FreeBSD, ppc64le, s390x, 32-bit systems, a new Python
+before its wheels), pip builds rustmy from the source distribution, which
+needs a Rust toolchain and a C compiler (for the bundled zstd library).
+
+| | Supported and tested in CI |
+|---|---|
+| Python | CPython 3.10 to 3.15, and the free-threaded 3.14t and 3.15t (on Windows arm64, from 3.11: there is no official CPython 3.10 for it). PyPy is not supported. |
+| MySQL | 8.0, 8.4 LTS, 9.7, 26.x |
+| MariaDB | 10.11, 11.4, 11.8, 12.3, 13.x |
+| SQLAlchemy | 2.0 and 2.1 (2.1 needs Python 3.11 or later; CI tests the latest release each Python gets) |
+| Django | 5.2 LTS (Python 3.10 or later) and 6.x (Python 3.12 or later); Django's whole test suite runs weekly in CI |
+| Platforms | Linux x86_64 and aarch64 (glibc, musl), macOS x86_64 and arm64, Windows x64 and arm64 |
 
 ## Usage
 
@@ -220,9 +395,9 @@ with conn.cursor(DictCursor) as cursor:
 `PreparedCursor` (and `PreparedDictCursor`) runs server-side prepared
 statements over MySQL's binary protocol. Parameters travel as typed values,
 never as SQL text, so nothing depends on escaping; rows arrive in binary
-form, so numbers and dates need no parsing (reading 100,000 mixed rows takes
-about half the time of `Cursor`); and each statement is prepared once per
-connection:
+form, so numbers and dates need no parsing (on a table of doubles, dates and
+decimals, reading takes about half the time of `Cursor`; on mostly text, about
+the same); and each statement is prepared once per connection:
 
 ```python
 with conn.cursor(prepared=True) as cursor:
@@ -464,18 +639,71 @@ connection from another thread raises `ProgrammingError` instead of corrupting
 it. On free-threaded Python nothing in rustmy serializes threads that use
 their own connections.
 
-## Compatibility
+### In production
 
-| | Supported and tested in CI |
-|---|---|
-| Python | CPython 3.10, 3.11, 3.12, 3.13, 3.14, 3.15, and free-threaded 3.14t, 3.15t |
-| MySQL | 8.0, 8.4 LTS, 9.7, 26.x |
-| MariaDB | 10.11, 11.4, 11.8, 12.3, 13.x |
-| SQLAlchemy | 2.0 and 2.1 (CI tests the latest release each Python gets) |
-| Django | 5.2 LTS and 6.1 (Django's test suite, weekly in CI) |
-| Platforms | Linux x86_64 and aarch64 (glibc, musl), macOS x86_64 and arm64, Windows x64 and arm64 |
+- **Verify the server.** The default `ssl_mode="preferred"` encrypts whenever
+  the server offers TLS, but it does not check the certificate and falls back
+  to plain text when TLS is not offered: it stops passive eavesdropping, not
+  someone who can intercept the connection and pretend to be the server.
+  Across any network you do not control, use `ssl_mode="verify_identity"`
+  (the system's CAs, or `ssl_ca=` for a private one).
+- **Set timeouts.** `connect_timeout`, `read_timeout` and `write_timeout`
+  (seconds, fractions allowed) are off by default, as in mysqlclient; without
+  them, a connection silently dropped by a firewall or load balancer can block
+  a read for minutes.
+- **Pool connections.** rustmy has no pool of its own: use SQLAlchemy's
+  (`pool_pre_ping=True`, and `pool_recycle` below the server's
+  `wait_timeout`) or Django's `CONN_MAX_AGE` with `CONN_HEALTH_CHECKS`. Each
+  thread uses its own connection, which is what pools hand out.
 
-### Coming from mysqlclient or PyMySQL
+With FastAPI, plain `def` endpoints run in its thread pool, and each borrows a
+pooled connection:
+
+```python
+from fastapi import FastAPI
+from sqlalchemy import create_engine, text
+
+engine = create_engine(
+    "mysql+rustmy://app:secret@db.internal/shop"
+    "?ssl_mode=verify_identity&connect_timeout=5&read_timeout=30",
+    pool_size=10,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+)
+app = FastAPI()
+
+
+@app.get("/products/{product_id}")
+def product(product_id: int) -> dict[str, object]:
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT id, name, price FROM products WHERE id = :id"),
+            {"id": product_id},
+        ).one()
+    return row._asdict()
+```
+
+### Security notes
+
+- Pass values as parameters (`%s`, `%(name)s`), never by formatting SQL
+  yourself: rustmy escapes them for the connection's character set and SQL
+  mode, and refuses text that the server would read differently.
+- To build SQL by hand, use the connection's `conn.escape_string()` and
+  `conn.literal()`, which follow its character set and
+  `NO_BACKSLASH_ESCAPES`. The module-level `rustmy.converters.escape_string()`
+  and `literal()` assume a UTF-8 connection in the default SQL mode.
+- An encoder given in `conv=` returns SQL text that goes into the statement
+  as it is: it must return a complete, escaped literal.
+- `multi_statements` is off unless you ask for it, and `LOAD DATA LOCAL
+  INFILE` only sends files from the directory you allow.
+- Without verified TLS (see above), whoever can intercept the connection can
+  impersonate the server, and with `caching_sha2_password` or
+  `sha256_password` obtain the password during a full authentication, as with
+  any MySQL client.
+- Please report vulnerabilities privately, as [SECURITY.md](SECURITY.md)
+  explains.
+
+## Coming from mysqlclient or PyMySQL
 
 Most code runs unchanged. The differences are deliberate, and each one is
 pinned by a test:
@@ -538,9 +766,16 @@ wire. Every pull request runs:
 - differential tests against [PyMySQL](https://github.com/PyMySQL/PyMySQL);
 - integration tests on all nine supported server versions, and every
   supported Python against MySQL and MariaDB;
-- performance tracking with [CodSpeed](https://codspeed.io/M4RC0Sx/rustmy);
+- performance tracking with [CodSpeed](https://codspeed.io/M4RC0Sx/rustmy),
+  and coverage of the Python and Rust code (the bindings included, measured
+  through the Python tests) on [Codecov](https://app.codecov.io/gh/M4RC0Sx/rustmy);
 - `cargo clippy` with pedantic lints and no panics, `cargo deny` for
   licenses and advisories; the protocol parsers are also fuzzed.
+
+Before a release, `scripts/leak_check.py` runs every path through the driver
+(connections, each cursor, prepared statements, errors, `executemany`,
+compression, `LOAD DATA LOCAL INFILE`…) thousands of times and checks that
+memory stops growing.
 
 ## Built with
 

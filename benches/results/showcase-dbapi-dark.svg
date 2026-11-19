@@ -1,0 +1,796 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="820.8pt" height="644.4pt" viewBox="0 0 820.8 644.4" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.11.2, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 644.4 
+L 820.8 644.4 
+L 820.8 0 
+L 0 0 
+z
+" style="fill: #1a1a19"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 144 151.2 
+L 403.2 151.2 
+L 403.2 57.6 
+L 144 57.6 
+z
+" style="fill: #1a1a19"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 144 61.854545 
+L 169.877778 61.854545 
+L 169.877778 76.428127 
+L 144 76.428127 
+z
+" clip-path="url(#p2145ecb438)" style="fill: #3987e5; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 144 85.360321 
+L 222.718217 85.360321 
+L 222.718217 99.933903 
+L 144 99.933903 
+z
+" clip-path="url(#p2145ecb438)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 144 108.866097 
+L 340.363636 108.866097 
+L 340.363636 123.439679 
+L 144 123.439679 
+z
+" clip-path="url(#p2145ecb438)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 144 132.371873 
+L 242.336375 132.371873 
+L 242.336375 146.945455 
+L 144 146.945455 
+z
+" clip-path="url(#p2145ecb438)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="matplotlib.axis_1"/>
+   <g id="matplotlib.axis_2">
+    <g id="ytick_1">
+     <g id="line2d_1"/>
+     <g id="text_1">
+      <text style="font-weight: 700; font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #f0efec" x="138" y="72.560281" transform="rotate(-0 138 72.560281)">rustmy</text>
+     </g>
+    </g>
+    <g id="ytick_2">
+     <g id="line2d_2"/>
+     <g id="text_2">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="138" y="96.066409" transform="rotate(-0 138 96.066409)">mysqlclient</text>
+     </g>
+    </g>
+    <g id="ytick_3">
+     <g id="line2d_3"/>
+     <g id="text_3">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="138" y="119.571833" transform="rotate(-0 138 119.571833)">PyMySQL</text>
+     </g>
+    </g>
+    <g id="ytick_4">
+     <g id="line2d_4"/>
+     <g id="text_4">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="138" y="143.077961" transform="rotate(-0 138 143.077961)">mysql-connector</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_7">
+    <path d="M 144 151.2 
+L 144 57.6 
+" style="fill: none; stroke: #3a3a37; stroke-width: 0.8; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="text_5">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="173.805051" y="71.349344" transform="rotate(-0 173.805051 71.349344)">41 ms</text>
+   </g>
+   <g id="text_6">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="226.64549" y="94.85512" transform="rotate(-0 226.64549 94.85512)">124 ms</text>
+   </g>
+   <g id="text_7">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="344.290909" y="118.360896" transform="rotate(-0 344.290909 118.360896)">308 ms</text>
+   </g>
+   <g id="text_8">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="246.263648" y="141.866672" transform="rotate(-0 246.263648 141.866672)">154 ms</text>
+   </g>
+   <g id="text_9">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="144" y="29.52" transform="rotate(-0 144 29.52)">Read rows (tuples), 100,000 rows</text>
+   </g>
+   <g id="text_10">
+    <text style="font-weight: 700; font-size: 10.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="144" y="51.048" transform="rotate(-0 144 51.048)">3.0× faster than mysqlclient</text>
+   </g>
+  </g>
+  <g id="axes_2">
+   <g id="patch_8">
+    <path d="M 547.2 151.2 
+L 806.4 151.2 
+L 806.4 57.6 
+L 547.2 57.6 
+z
+" style="fill: #1a1a19"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 547.2 61.854545 
+L 575.215212 61.854545 
+L 575.215212 76.428127 
+L 547.2 76.428127 
+z
+" clip-path="url(#pbeaeefc570)" style="fill: #3987e5; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 547.2 85.360321 
+L 627.641665 85.360321 
+L 627.641665 99.933903 
+L 547.2 99.933903 
+z
+" clip-path="url(#pbeaeefc570)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 547.2 108.866097 
+L 743.563636 108.866097 
+L 743.563636 123.439679 
+L 547.2 123.439679 
+z
+" clip-path="url(#pbeaeefc570)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_12">
+    <path d="M 547.2 132.371873 
+L 645.519855 132.371873 
+L 645.519855 146.945455 
+L 547.2 146.945455 
+z
+" clip-path="url(#pbeaeefc570)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="matplotlib.axis_3"/>
+   <g id="matplotlib.axis_4">
+    <g id="ytick_5">
+     <g id="line2d_5"/>
+     <g id="text_11">
+      <text style="font-weight: 700; font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #f0efec" x="541.2" y="72.560281" transform="rotate(-0 541.2 72.560281)">rustmy</text>
+     </g>
+    </g>
+    <g id="ytick_6">
+     <g id="line2d_6"/>
+     <g id="text_12">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="541.2" y="96.066409" transform="rotate(-0 541.2 96.066409)">mysqlclient</text>
+     </g>
+    </g>
+    <g id="ytick_7">
+     <g id="line2d_7"/>
+     <g id="text_13">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="541.2" y="119.571833" transform="rotate(-0 541.2 119.571833)">PyMySQL</text>
+     </g>
+    </g>
+    <g id="ytick_8">
+     <g id="line2d_8"/>
+     <g id="text_14">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="541.2" y="143.077961" transform="rotate(-0 541.2 143.077961)">mysql-connector</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_13">
+    <path d="M 547.2 151.2 
+L 547.2 57.6 
+" style="fill: none; stroke: #3a3a37; stroke-width: 0.8; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="579.142485" y="71.349344" transform="rotate(-0 579.142485 71.349344)">456 ms</text>
+   </g>
+   <g id="text_16">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="631.568938" y="94.85512" transform="rotate(-0 631.568938 94.85512)">1.31 s</text>
+   </g>
+   <g id="text_17">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="747.490909" y="118.360896" transform="rotate(-0 747.490909 118.360896)">3.19 s</text>
+   </g>
+   <g id="text_18">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="649.447127" y="141.866672" transform="rotate(-0 649.447127 141.866672)">1.60 s</text>
+   </g>
+   <g id="text_19">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="547.2" y="29.52" transform="rotate(-0 547.2 29.52)">Read rows (tuples), 1,000,000 rows</text>
+   </g>
+   <g id="text_20">
+    <text style="font-weight: 700; font-size: 10.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="547.2" y="51.048" transform="rotate(-0 547.2 51.048)">2.9× faster than mysqlclient</text>
+   </g>
+  </g>
+  <g id="axes_3">
+   <g id="patch_14">
+    <path d="M 144 306 
+L 403.2 306 
+L 403.2 212.4 
+L 144 212.4 
+z
+" style="fill: #1a1a19"/>
+   </g>
+   <g id="patch_15">
+    <path d="M 144 216.654545 
+L 174.074246 216.654545 
+L 174.074246 231.228127 
+L 144 231.228127 
+z
+" clip-path="url(#p52ed4ccf47)" style="fill: #3987e5; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_16">
+    <path d="M 144 240.160321 
+L 219.802411 240.160321 
+L 219.802411 254.733903 
+L 144 254.733903 
+z
+" clip-path="url(#p52ed4ccf47)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_17">
+    <path d="M 144 263.666097 
+L 340.363636 263.666097 
+L 340.363636 278.239679 
+L 144 278.239679 
+z
+" clip-path="url(#p52ed4ccf47)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_18">
+    <path d="M 144 287.171873 
+L 265.648456 287.171873 
+L 265.648456 301.745455 
+L 144 301.745455 
+z
+" clip-path="url(#p52ed4ccf47)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="matplotlib.axis_5"/>
+   <g id="matplotlib.axis_6">
+    <g id="ytick_9">
+     <g id="line2d_9"/>
+     <g id="text_21">
+      <text style="font-weight: 700; font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #f0efec" x="138" y="227.360281" transform="rotate(-0 138 227.360281)">rustmy</text>
+     </g>
+    </g>
+    <g id="ytick_10">
+     <g id="line2d_10"/>
+     <g id="text_22">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="138" y="250.866409" transform="rotate(-0 138 250.866409)">mysqlclient</text>
+     </g>
+    </g>
+    <g id="ytick_11">
+     <g id="line2d_11"/>
+     <g id="text_23">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="138" y="274.371833" transform="rotate(-0 138 274.371833)">PyMySQL</text>
+     </g>
+    </g>
+    <g id="ytick_12">
+     <g id="line2d_12"/>
+     <g id="text_24">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="138" y="297.877961" transform="rotate(-0 138 297.877961)">mysql-connector</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_19">
+    <path d="M 144 306 
+L 144 212.4 
+" style="fill: none; stroke: #3a3a37; stroke-width: 0.8; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="text_25">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="178.001519" y="226.149344" transform="rotate(-0 178.001519 226.149344)">52 ms</text>
+   </g>
+   <g id="text_26">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="223.729684" y="249.65512" transform="rotate(-0 223.729684 249.65512)">131 ms</text>
+   </g>
+   <g id="text_27">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="344.290909" y="273.160896" transform="rotate(-0 344.290909 273.160896)">340 ms</text>
+   </g>
+   <g id="text_28">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="269.575729" y="296.666672" transform="rotate(-0 269.575729 296.666672)">211 ms</text>
+   </g>
+   <g id="text_29">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="144" y="184.32" transform="rotate(-0 144 184.32)">Read rows (dicts), 100,000 rows</text>
+   </g>
+   <g id="text_30">
+    <text style="font-weight: 700; font-size: 10.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="144" y="205.848" transform="rotate(-0 144 205.848)">2.5× faster than mysqlclient</text>
+   </g>
+  </g>
+  <g id="axes_4">
+   <g id="patch_20">
+    <path d="M 547.2 306 
+L 806.4 306 
+L 806.4 212.4 
+L 547.2 212.4 
+z
+" style="fill: #1a1a19"/>
+   </g>
+   <g id="patch_21">
+    <path d="M 547.2 216.654545 
+L 576.962531 216.654545 
+L 576.962531 231.228127 
+L 547.2 231.228127 
+z
+" clip-path="url(#peb288817fa)" style="fill: #3987e5; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_22">
+    <path d="M 547.2 240.160321 
+L 624.816618 240.160321 
+L 624.816618 254.733903 
+L 547.2 254.733903 
+z
+" clip-path="url(#peb288817fa)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_23">
+    <path d="M 547.2 263.666097 
+L 743.563636 263.666097 
+L 743.563636 278.239679 
+L 547.2 278.239679 
+z
+" clip-path="url(#peb288817fa)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_24">
+    <path d="M 547.2 287.171873 
+L 666.660208 287.171873 
+L 666.660208 301.745455 
+L 547.2 301.745455 
+z
+" clip-path="url(#peb288817fa)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="matplotlib.axis_7"/>
+   <g id="matplotlib.axis_8">
+    <g id="ytick_13">
+     <g id="line2d_13"/>
+     <g id="text_31">
+      <text style="font-weight: 700; font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #f0efec" x="541.2" y="227.360281" transform="rotate(-0 541.2 227.360281)">rustmy</text>
+     </g>
+    </g>
+    <g id="ytick_14">
+     <g id="line2d_14"/>
+     <g id="text_32">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="541.2" y="250.866409" transform="rotate(-0 541.2 250.866409)">mysqlclient</text>
+     </g>
+    </g>
+    <g id="ytick_15">
+     <g id="line2d_15"/>
+     <g id="text_33">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="541.2" y="274.371833" transform="rotate(-0 541.2 274.371833)">PyMySQL</text>
+     </g>
+    </g>
+    <g id="ytick_16">
+     <g id="line2d_16"/>
+     <g id="text_34">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="541.2" y="297.877961" transform="rotate(-0 541.2 297.877961)">mysql-connector</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_25">
+    <path d="M 547.2 306 
+L 547.2 212.4 
+" style="fill: none; stroke: #3a3a37; stroke-width: 0.8; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="text_35">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="580.889803" y="226.149344" transform="rotate(-0 580.889803 226.149344)">534 ms</text>
+   </g>
+   <g id="text_36">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="628.743891" y="249.65512" transform="rotate(-0 628.743891 249.65512)">1.39 s</text>
+   </g>
+   <g id="text_37">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="747.490909" y="273.160896" transform="rotate(-0 747.490909 273.160896)">3.52 s</text>
+   </g>
+   <g id="text_38">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="670.58748" y="296.666672" transform="rotate(-0 670.58748 296.666672)">2.14 s</text>
+   </g>
+   <g id="text_39">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="547.2" y="184.32" transform="rotate(-0 547.2 184.32)">Read rows (dicts), 1,000,000 rows</text>
+   </g>
+   <g id="text_40">
+    <text style="font-weight: 700; font-size: 10.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="547.2" y="205.848" transform="rotate(-0 547.2 205.848)">2.6× faster than mysqlclient</text>
+   </g>
+  </g>
+  <g id="axes_5">
+   <g id="patch_26">
+    <path d="M 144 460.8 
+L 403.2 460.8 
+L 403.2 367.2 
+L 144 367.2 
+z
+" style="fill: #1a1a19"/>
+   </g>
+   <g id="patch_27">
+    <path d="M 144 371.454545 
+L 163.650465 371.454545 
+L 163.650465 386.028127 
+L 144 386.028127 
+z
+" clip-path="url(#pd123609681)" style="fill: #3987e5; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_28">
+    <path d="M 144 394.960321 
+L 206.577992 394.960321 
+L 206.577992 409.533903 
+L 144 409.533903 
+z
+" clip-path="url(#pd123609681)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_29">
+    <path d="M 144 418.466097 
+L 340.363636 418.466097 
+L 340.363636 433.039679 
+L 144 433.039679 
+z
+" clip-path="url(#pd123609681)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_30">
+    <path d="M 144 441.971873 
+L 255.038916 441.971873 
+L 255.038916 456.545455 
+L 144 456.545455 
+z
+" clip-path="url(#pd123609681)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="matplotlib.axis_9"/>
+   <g id="matplotlib.axis_10">
+    <g id="ytick_17">
+     <g id="line2d_17"/>
+     <g id="text_41">
+      <text style="font-weight: 700; font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #f0efec" x="138" y="382.160281" transform="rotate(-0 138 382.160281)">rustmy</text>
+     </g>
+    </g>
+    <g id="ytick_18">
+     <g id="line2d_18"/>
+     <g id="text_42">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="138" y="405.666409" transform="rotate(-0 138 405.666409)">mysqlclient</text>
+     </g>
+    </g>
+    <g id="ytick_19">
+     <g id="line2d_19"/>
+     <g id="text_43">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="138" y="429.171833" transform="rotate(-0 138 429.171833)">PyMySQL</text>
+     </g>
+    </g>
+    <g id="ytick_20">
+     <g id="line2d_20"/>
+     <g id="text_44">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="138" y="452.677961" transform="rotate(-0 138 452.677961)">mysql-connector</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_31">
+    <path d="M 144 460.8 
+L 144 367.2 
+" style="fill: none; stroke: #3a3a37; stroke-width: 0.8; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="text_45">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="167.577738" y="380.949344" transform="rotate(-0 167.577738 380.949344)">32 ms</text>
+   </g>
+   <g id="text_46">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="210.505265" y="404.45512" transform="rotate(-0 210.505265 404.45512)">102 ms</text>
+   </g>
+   <g id="text_47">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="344.290909" y="427.960896" transform="rotate(-0 344.290909 427.960896)">321 ms</text>
+   </g>
+   <g id="text_48">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="258.966189" y="451.466672" transform="rotate(-0 258.966189 451.466672)">182 ms</text>
+   </g>
+   <g id="text_49">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="144" y="339.12" transform="rotate(-0 144 339.12)">Stream rows, 100,000 rows</text>
+   </g>
+   <g id="text_50">
+    <text style="font-weight: 700; font-size: 10.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="144" y="360.648" transform="rotate(-0 144 360.648)">3.2× faster than mysqlclient</text>
+   </g>
+  </g>
+  <g id="axes_6">
+   <g id="patch_32">
+    <path d="M 547.2 460.8 
+L 806.4 460.8 
+L 806.4 367.2 
+L 547.2 367.2 
+z
+" style="fill: #1a1a19"/>
+   </g>
+   <g id="patch_33">
+    <path d="M 547.2 371.454545 
+L 563.539191 371.454545 
+L 563.539191 386.028127 
+L 547.2 386.028127 
+z
+" clip-path="url(#p7f2bf95ac6)" style="fill: #3987e5; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_34">
+    <path d="M 547.2 394.960321 
+L 610.827459 394.960321 
+L 610.827459 409.533903 
+L 547.2 409.533903 
+z
+" clip-path="url(#p7f2bf95ac6)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_35">
+    <path d="M 547.2 418.466097 
+L 743.563636 418.466097 
+L 743.563636 433.039679 
+L 547.2 433.039679 
+z
+" clip-path="url(#p7f2bf95ac6)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_36">
+    <path d="M 547.2 441.971873 
+L 657.556361 441.971873 
+L 657.556361 456.545455 
+L 547.2 456.545455 
+z
+" clip-path="url(#p7f2bf95ac6)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="matplotlib.axis_11"/>
+   <g id="matplotlib.axis_12">
+    <g id="ytick_21">
+     <g id="line2d_21"/>
+     <g id="text_51">
+      <text style="font-weight: 700; font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #f0efec" x="541.2" y="382.160281" transform="rotate(-0 541.2 382.160281)">rustmy</text>
+     </g>
+    </g>
+    <g id="ytick_22">
+     <g id="line2d_22"/>
+     <g id="text_52">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="541.2" y="405.666409" transform="rotate(-0 541.2 405.666409)">mysqlclient</text>
+     </g>
+    </g>
+    <g id="ytick_23">
+     <g id="line2d_23"/>
+     <g id="text_53">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="541.2" y="429.171833" transform="rotate(-0 541.2 429.171833)">PyMySQL</text>
+     </g>
+    </g>
+    <g id="ytick_24">
+     <g id="line2d_24"/>
+     <g id="text_54">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="541.2" y="452.677961" transform="rotate(-0 541.2 452.677961)">mysql-connector</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_37">
+    <path d="M 547.2 460.8 
+L 547.2 367.2 
+" style="fill: none; stroke: #3a3a37; stroke-width: 0.8; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="text_55">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="567.466463" y="380.949344" transform="rotate(-0 567.466463 380.949344)">268 ms</text>
+   </g>
+   <g id="text_56">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="614.754732" y="404.45512" transform="rotate(-0 614.754732 404.45512)">1.04 s</text>
+   </g>
+   <g id="text_57">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="747.490909" y="427.960896" transform="rotate(-0 747.490909 427.960896)">3.22 s</text>
+   </g>
+   <g id="text_58">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="661.483634" y="451.466672" transform="rotate(-0 661.483634 451.466672)">1.81 s</text>
+   </g>
+   <g id="text_59">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="547.2" y="339.12" transform="rotate(-0 547.2 339.12)">Stream rows, 1,000,000 rows</text>
+   </g>
+   <g id="text_60">
+    <text style="font-weight: 700; font-size: 10.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="547.2" y="360.648" transform="rotate(-0 547.2 360.648)">3.9× faster than mysqlclient</text>
+   </g>
+  </g>
+  <g id="axes_7">
+   <g id="patch_38">
+    <path d="M 144 615.6 
+L 403.2 615.6 
+L 403.2 522 
+L 144 522 
+z
+" style="fill: #1a1a19"/>
+   </g>
+   <g id="patch_39">
+    <path d="M 144 526.254545 
+L 206.155037 526.254545 
+L 206.155037 540.828127 
+L 144 540.828127 
+z
+" clip-path="url(#pd1f0c1cfd5)" style="fill: #3987e5; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_40">
+    <path d="M 144 549.760321 
+L 340.363636 549.760321 
+L 340.363636 564.333903 
+L 144 564.333903 
+z
+" clip-path="url(#pd1f0c1cfd5)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_41">
+    <path d="M 144 573.266097 
+L 262.224368 573.266097 
+L 262.224368 587.839679 
+L 144 587.839679 
+z
+" clip-path="url(#pd1f0c1cfd5)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_42">
+    <path d="M 144 596.771873 
+L 253.298985 596.771873 
+L 253.298985 611.345455 
+L 144 611.345455 
+z
+" clip-path="url(#pd1f0c1cfd5)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="matplotlib.axis_13"/>
+   <g id="matplotlib.axis_14">
+    <g id="ytick_25">
+     <g id="line2d_25"/>
+     <g id="text_61">
+      <text style="font-weight: 700; font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #f0efec" x="138" y="536.960281" transform="rotate(-0 138 536.960281)">rustmy</text>
+     </g>
+    </g>
+    <g id="ytick_26">
+     <g id="line2d_26"/>
+     <g id="text_62">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="138" y="560.466409" transform="rotate(-0 138 560.466409)">mysqlclient</text>
+     </g>
+    </g>
+    <g id="ytick_27">
+     <g id="line2d_27"/>
+     <g id="text_63">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="138" y="583.971833" transform="rotate(-0 138 583.971833)">PyMySQL</text>
+     </g>
+    </g>
+    <g id="ytick_28">
+     <g id="line2d_28"/>
+     <g id="text_64">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="138" y="607.477961" transform="rotate(-0 138 607.477961)">mysql-connector</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_43">
+    <path d="M 144 615.6 
+L 144 522 
+" style="fill: none; stroke: #3a3a37; stroke-width: 0.8; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="text_65">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="210.082309" y="535.749344" transform="rotate(-0 210.082309 535.749344)">336 ms</text>
+   </g>
+   <g id="text_66">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="344.290909" y="559.25512" transform="rotate(-0 344.290909 559.25512)">1.06 s</text>
+   </g>
+   <g id="text_67">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="266.151641" y="582.760896" transform="rotate(-0 266.151641 582.760896)">638 ms</text>
+   </g>
+   <g id="text_68">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="257.226258" y="606.266672" transform="rotate(-0 257.226258 606.266672)">590 ms</text>
+   </g>
+   <g id="text_69">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="144" y="493.92" transform="rotate(-0 144 493.92)">Insert rows (executemany), 100,000 rows</text>
+   </g>
+   <g id="text_70">
+    <text style="font-weight: 700; font-size: 10.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="144" y="515.448" transform="rotate(-0 144 515.448)">3.2× faster than mysqlclient</text>
+   </g>
+  </g>
+  <g id="axes_8">
+   <g id="patch_44">
+    <path d="M 547.2 615.6 
+L 806.4 615.6 
+L 806.4 522 
+L 547.2 522 
+z
+" style="fill: #1a1a19"/>
+   </g>
+   <g id="patch_45">
+    <path d="M 547.2 526.254545 
+L 608.44806 526.254545 
+L 608.44806 540.828127 
+L 547.2 540.828127 
+z
+" clip-path="url(#p2c98d76850)" style="fill: #3987e5; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_46">
+    <path d="M 547.2 549.760321 
+L 743.563636 549.760321 
+L 743.563636 564.333903 
+L 547.2 564.333903 
+z
+" clip-path="url(#p2c98d76850)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_47">
+    <path d="M 547.2 573.266097 
+L 657.367041 573.266097 
+L 657.367041 587.839679 
+L 547.2 587.839679 
+z
+" clip-path="url(#p2c98d76850)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_48">
+    <path d="M 547.2 596.771873 
+L 645.40476 596.771873 
+L 645.40476 611.345455 
+L 547.2 611.345455 
+z
+" clip-path="url(#p2c98d76850)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
+   </g>
+   <g id="matplotlib.axis_15"/>
+   <g id="matplotlib.axis_16">
+    <g id="ytick_29">
+     <g id="line2d_29"/>
+     <g id="text_71">
+      <text style="font-weight: 700; font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #f0efec" x="541.2" y="536.960281" transform="rotate(-0 541.2 536.960281)">rustmy</text>
+     </g>
+    </g>
+    <g id="ytick_30">
+     <g id="line2d_30"/>
+     <g id="text_72">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="541.2" y="560.466409" transform="rotate(-0 541.2 560.466409)">mysqlclient</text>
+     </g>
+    </g>
+    <g id="ytick_31">
+     <g id="line2d_31"/>
+     <g id="text_73">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="541.2" y="583.971833" transform="rotate(-0 541.2 583.971833)">PyMySQL</text>
+     </g>
+    </g>
+    <g id="ytick_32">
+     <g id="line2d_32"/>
+     <g id="text_74">
+      <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #c3c2b7" x="541.2" y="607.477961" transform="rotate(-0 541.2 607.477961)">mysql-connector</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_49">
+    <path d="M 547.2 615.6 
+L 547.2 522 
+" style="fill: none; stroke: #3a3a37; stroke-width: 0.8; stroke-linejoin: miter; stroke-linecap: square"/>
+   </g>
+   <g id="text_75">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="612.375332" y="535.749344" transform="rotate(-0 612.375332 535.749344)">3.67 s</text>
+   </g>
+   <g id="text_76">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="747.490909" y="559.25512" transform="rotate(-0 747.490909 559.25512)">11.77 s</text>
+   </g>
+   <g id="text_77">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="661.294314" y="582.760896" transform="rotate(-0 661.294314 582.760896)">6.60 s</text>
+   </g>
+   <g id="text_78">
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="649.332033" y="606.266672" transform="rotate(-0 649.332033 606.266672)">5.89 s</text>
+   </g>
+   <g id="text_79">
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="547.2" y="493.92" transform="rotate(-0 547.2 493.92)">Insert rows (executemany), 1,000,000 rows</text>
+   </g>
+   <g id="text_80">
+    <text style="font-weight: 700; font-size: 10.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="547.2" y="515.448" transform="rotate(-0 547.2 515.448)">3.2× faster than mysqlclient</text>
+   </g>
+  </g>
+  <g id="text_81">
+   <text style="font-size: 7.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="8.208" y="636.154242" transform="rotate(-0 8.208 636.154242)">Time, lower is better · CPython 3.14.3, MySQL 8.4.13, Darwin arm64, plain TCP, best of several runs · benches/README.md</text>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="p2145ecb438">
+   <rect x="144" y="57.6" width="259.2" height="93.6"/>
+  </clipPath>
+  <clipPath id="pbeaeefc570">
+   <rect x="547.2" y="57.6" width="259.2" height="93.6"/>
+  </clipPath>
+  <clipPath id="p52ed4ccf47">
+   <rect x="144" y="212.4" width="259.2" height="93.6"/>
+  </clipPath>
+  <clipPath id="peb288817fa">
+   <rect x="547.2" y="212.4" width="259.2" height="93.6"/>
+  </clipPath>
+  <clipPath id="pd123609681">
+   <rect x="144" y="367.2" width="259.2" height="93.6"/>
+  </clipPath>
+  <clipPath id="p7f2bf95ac6">
+   <rect x="547.2" y="367.2" width="259.2" height="93.6"/>
+  </clipPath>
+  <clipPath id="pd1f0c1cfd5">
+   <rect x="144" y="522" width="259.2" height="93.6"/>
+  </clipPath>
+  <clipPath id="p2c98d76850">
+   <rect x="547.2" y="522" width="259.2" height="93.6"/>
+  </clipPath>
+ </defs>
+</svg>

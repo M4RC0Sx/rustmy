@@ -1,0 +1,98 @@
+name: Bug report
+description: Something behaves differently from what you expect.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. If it is a security
+        problem (SQL injection, TLS verification, authentication, memory
+        safety), please do not open an issue: report it privately as
+        [SECURITY.md](https://github.com/M4RC0Sx/rustmy/blob/master/SECURITY.md) explains.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Code that reproduces it
+      description: >
+        As small as you can make it, with the table definition if it matters.
+        Leave out passwords and host names.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Traceback or output
+      render: text
+  - type: input
+    id: rustmy-version
+    attributes:
+      label: rustmy version
+      description: "`python -c \"import rustmy; print(rustmy.__version__)\"`"
+      placeholder: "1.2.0"
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: "`python -VV`; say if it is a free-threaded build (3.14t, 3.15t)."
+      placeholder: "3.13.2 (main, ...) [Clang 16.0.0]"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: "Ubuntu 24.04 x86_64, macOS 15 arm64, Windows 11 x64, Alpine 3.22 aarch64..."
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How rustmy was installed
+      options:
+        - Wheel from PyPI (pip, uv, poetry...)
+        - Built from the source distribution
+        - From a git checkout
+    validations:
+      required: true
+  - type: input
+    id: server
+    attributes:
+      label: Server and version
+      description: "`SELECT VERSION()`"
+      placeholder: "MySQL 8.4.6, MariaDB 11.4.8, Amazon RDS for MySQL 8.0.42..."
+    validations:
+      required: true
+  - type: textarea
+    id: connection
+    attributes:
+      label: Connection options
+      description: >
+        The arguments given to `connect()` or the URL query (without the
+        password): character set, `ssl_mode`, `compress`, the cursor class,
+        `conv=`, authentication method...
+      render: python
+  - type: input
+    id: framework
+    attributes:
+      label: Framework, if any
+      placeholder: "SQLAlchemy 2.0.44, Django 5.2.8, pandas 2.3..."
+  - type: dropdown
+    id: other-drivers
+    attributes:
+      label: Does the same code work with another driver?
+      options:
+        - Not tried
+        - Yes, with mysqlclient
+        - Yes, with PyMySQL
+        - Yes, with mysql-connector-python
+        - No, it fails with other drivers too
