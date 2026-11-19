@@ -251,9 +251,12 @@ cleartext over TLS or Unix sockets, and with RSA-OAEP over plain TCP: the key
 is requested from the server when needed, as PyMySQL does, or pinned with
 `server_public_key`. A key is accepted only right after the client asked for
 it, never with a pinned one (`requests_key` in `conn.rs`;
-`crates/proto/tests/auth.rs` plays the man in the middle). A logical payload
-may be 64 KiB until authentication succeeds and 1 GiB after, checked from each
-header before reading (`packet.rs`).
+`crates/proto/tests/auth.rs` plays the man in the middle). MariaDB's `parsec`
+derives its key with as many PBKDF2 rounds as the server asks for, bounded
+as MariaDB Connector/C bounds them: what fits in `connect_timeout`
+(`parsec_max_factor`). A logical payload may be 64 KiB until authentication
+succeeds and 1 GiB after, checked from each header before reading
+(`packet.rs`). `Opts`'s `Debug` output hides the password.
 
 **Character sets** (`crates/pydriver/src/charset.rs`, ids in
 `crates/proto/src/charset.rs`). The handshake requests the server's own
@@ -357,8 +360,9 @@ serve Django's schema editor and always return `str`. Error 1690 raises
 into `IntegrityError`. Option files (`read_default_file`/`read_default_group`,
 `python/rustmy/_option_files.py`) follow `my_print_defaults`: explicit
 arguments win, `[client]` and the group in file order, `!include`/
-`!includedir`, no `.mylogin.cnf`. Fetch methods return tuples, `()` when
-exhausted.
+`!includedir`, no `.mylogin.cnf`, and files anyone can write to are ignored
+with a warning (outside Windows), as `my_print_defaults` does. Fetch methods
+return tuples, `()` when exhausted.
 
 **SQLAlchemy**: `rustmy/dialect.py` holds `RustmyMySQLDialect` and
 `RustmyMariaDBDialect` (`mysql+rustmy`, `mariadb+rustmy`, through entry
