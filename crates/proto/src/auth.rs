@@ -1,5 +1,7 @@
 //! Authentication plugins.
 
+use std::time::Duration;
+
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
@@ -118,25 +120,54 @@ fn sign_ed25519(password: &[u8], nonce: &[u8]) -> [u8; 64] {
     raw_sign::<Sha512>(&secret, nonce, &public).to_bytes()
 }
 
-/// Largest PBKDF2 iteration count accepted from a server: MariaDB's own
-/// maximum (`parsec_iterations`), so a hostile server cannot make the client
-/// spin on a huge count.
-#[cfg(not(feature = "fuzzing"))]
-const PARSEC_MAX_ITERATIONS: u32 = 1 << 30;
+/// PBKDF2-HMAC-SHA512 rounds per millisecond assumed when bounding parsec's
+/// iteration count by the connect timeout: MariaDB Connector/C's figure, so
+/// both clients accept the same servers.
+const PARSEC_ROUNDS_PER_MS: f64 = 262_144.0 / 225.0;
+/// Connect timeout assumed for that bound when none is set (Connector/C's).
+const PARSEC_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Largest iteration factor at all: 1024 << 20 = 2^30 iterations, MariaDB's
+/// own maximum (`parsec_iterations`).
+const PARSEC_MAX_FACTOR: u8 = 20;
 /// Fuzzing explores the same code paths with a cheap ceiling.
 #[cfg(feature = "fuzzing")]
-const PARSEC_MAX_ITERATIONS: u32 = 1 << 12;
+const PARSEC_FUZZING_MAX_FACTOR: u8 = 2;
+
+/// Largest parsec iteration factor (`1024 << factor` PBKDF2 rounds) the
+/// client accepts: what fits in `connect_timeout` (10 s when unset), as
+/// MariaDB Connector/C decides it. The server picks the count, so without a
+/// bound a hostile one could keep the client's CPU busy for minutes, out of
+/// reach of any network timeout; a real server asking for more than this
+/// would not get an answer within the timeout anyway.
+pub(crate) fn parsec_max_factor(connect_timeout: Option<Duration>) -> u8 {
+    let millis = connect_timeout
+        .unwrap_or(PARSEC_DEFAULT_TIMEOUT)
+        .as_secs_f64()
+        * 1000.0;
+    let rounds = PARSEC_ROUNDS_PER_MS * millis;
+    let mut factor = 0u8;
+    let mut doubled = 2048.0;
+    while factor < PARSEC_MAX_FACTOR && rounds >= doubled {
+        factor += 1;
+        doubled *= 2.0;
+    }
+    #[cfg(feature = "fuzzing")]
+    let factor = factor.min(PARSEC_FUZZING_MAX_FACTOR);
+    factor
+}
 
 /// MariaDB `parsec` response to the server's "ext-salt" message:
 /// `client_nonce (32) ++ Ed25519 signature (64)` of
 /// `server_nonce ++ client_nonce`, signed with the RFC 8032 key whose seed is
 /// `PBKDF2-HMAC-SHA512(password, salt, 1024 << factor, 32 bytes)`.
 ///
-/// `ext_salt` is `'P' ++ factor (1 byte) ++ salt`.
+/// `ext_salt` is `'P' ++ factor (1 byte) ++ salt`; a factor over
+/// `max_factor` (see [`parsec_max_factor`]) is refused before any work.
 pub(crate) fn parsec_response(
     password: &[u8],
     server_nonce: &[u8],
     ext_salt: &[u8],
+    max_factor: u8,
 ) -> Result<Vec<u8>> {
     let [b'P', factor, salt @ ..] = ext_salt else {
         return Err(Error::protocol("malformed parsec salt message"));
@@ -144,9 +175,14 @@ pub(crate) fn parsec_response(
     if salt.is_empty() || server_nonce.len() != 32 {
         return Err(Error::protocol("malformed parsec handshake"));
     }
+    if *factor > max_factor {
+        return Err(Error::protocol(format!(
+            "the server asks for 1024 << {factor} parsec iterations, more than \
+             connect_timeout allows (1024 << {max_factor}); raise connect_timeout"
+        )));
+    }
     let iterations = 1024u32
         .checked_shl(u32::from(*factor))
-        .filter(|&n| n <= PARSEC_MAX_ITERATIONS)
         .ok_or_else(|| Error::protocol(format!("parsec iteration factor {factor} out of range")))?;
     let mut seed = [0u8; 32];
     pbkdf2::pbkdf2_hmac::<Sha512>(password, salt, iterations, &mut seed);
@@ -301,7 +337,7 @@ mod tests {
         let salt = b"0123456789abcdefgh";
         let mut ext_salt = vec![b'P', 0];
         ext_salt.extend_from_slice(salt);
-        let response = super::parsec_response(b"secret", &server_nonce, &ext_salt).unwrap();
+        let response = super::parsec_response(b"secret", &server_nonce, &ext_salt, 13).unwrap();
         assert_eq!(response.len(), 96);
         let (client_nonce, signature) = response.split_at(32);
 
@@ -318,11 +354,28 @@ mod tests {
         let nonce = [0u8; 32];
         for bad in [&b""[..], b"X\x00salt", b"P\x00", b"P\x15salt", b"P\xffsalt"] {
             assert!(
-                super::parsec_response(b"pw", &nonce, bad).is_err(),
+                super::parsec_response(b"pw", &nonce, bad, 20).is_err(),
                 "{bad:?}"
             );
         }
-        assert!(super::parsec_response(b"pw", &[0u8; 20], b"P\x00salt").is_err());
+        assert!(super::parsec_response(b"pw", &[0u8; 20], b"P\x00salt", 13).is_err());
+        // A factor over the bound is refused at once, without deriving.
+        let err = super::parsec_response(b"pw", &nonce, b"P\x0esalt", 13).unwrap_err();
+        assert!(err.to_string().contains("connect_timeout"), "{err}");
+    }
+
+    /// Connector/C's bound: floor(log2(rounds in the timeout / 1024)).
+    #[test]
+    fn parsec_iterations_are_bounded_by_the_connect_timeout() {
+        use std::time::Duration;
+
+        use super::parsec_max_factor;
+        assert_eq!(parsec_max_factor(None), 13);
+        assert_eq!(parsec_max_factor(Some(Duration::from_secs(10))), 13);
+        assert_eq!(parsec_max_factor(Some(Duration::from_secs(15))), 14);
+        assert_eq!(parsec_max_factor(Some(Duration::from_millis(1))), 0);
+        assert_eq!(parsec_max_factor(Some(Duration::ZERO)), 0);
+        assert_eq!(parsec_max_factor(Some(Duration::from_secs(100_000))), 20);
     }
 
     #[test]

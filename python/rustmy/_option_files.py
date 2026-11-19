@@ -16,6 +16,9 @@ libmysqlclient through mysqlclient):
   current directory, as in the client library); ``!includedir DIR`` reads
   its ``*.cnf`` files (and ``*.ini`` on Windows) in name order. A missing
   include stops reading the file that names it, with a warning.
+- Outside Windows, a file anyone may write to is ignored, with a warning,
+  included files too: whoever can edit it could otherwise set
+  ``init-command``, turn TLS off or open ``LOAD DATA LOCAL INFILE``.
 - ``#`` starts a comment anywhere outside quotes. A value wholly enclosed
   in ``'`` or ``"`` loses them (``"a" b`` is kept as written). The escapes
   ``\\b \\t \\n \\r \\s \\\\ \\' \\"`` apply, quoted or not; any other
@@ -30,6 +33,7 @@ MySQL only) is not read.
 from __future__ import annotations
 
 import os
+import stat
 import sys
 import warnings
 
@@ -87,6 +91,9 @@ def _read_file(
 ) -> bool:
     """Read ``path`` into ``options``; ``False`` if it does not exist."""
     try:
+        if _writable_by_anyone(path):
+            _warn(f"{path} is ignored: anyone can write to it")
+            return True
         text = path.read_text(encoding="utf-8", errors="surrogateescape")
     except FileNotFoundError:
         return False
@@ -108,6 +115,14 @@ def _read_file(
         name, sep, value = line.partition("=")
         options[name.strip().lower().replace("_", "-")] = _value(value) if sep else ""
     return True
+
+
+def _writable_by_anyone(path: Path) -> bool:
+    """Whether others (not only the owner and group) may write ``path``, the
+    files MySQL's client library ignores. Never on Windows, as there."""
+    if sys.platform == "win32":
+        return False
+    return bool(path.stat().st_mode & stat.S_IWOTH)
 
 
 def _directive(

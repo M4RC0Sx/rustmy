@@ -1,6 +1,7 @@
 //! A blocking connection: transport, handshake, authentication and commands.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io;
@@ -19,6 +20,7 @@ use crate::auth::AuthPlugin;
 use crate::auth::cleartext_password;
 use crate::auth::encrypt_password;
 use crate::auth::parse_public_key;
+use crate::auth::parsec_max_factor;
 use crate::auth::parsec_response;
 use crate::auth::trim_nonce;
 use crate::binary::Execute;
@@ -88,8 +90,8 @@ const LOCAL_INFILE_CHUNK: usize = 16 * 1024;
 /// fit.
 pub const DEFAULT_STATEMENT_CACHE: usize = 32;
 
-/// Connection parameters.
-#[derive(Debug, Clone)]
+/// Connection parameters. Their `Debug` output never shows the password.
+#[derive(Clone)]
 pub struct Opts {
     pub host: String,
     pub port: u16,
@@ -127,6 +129,52 @@ pub struct Opts {
     /// file, resolved too, is inside the directory; any other is refused
     /// with [`Error::LocalInfile`] before touching the disk.
     pub local_infile_dir: Option<PathBuf>,
+}
+
+impl fmt::Debug for Opts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Destructured so that a new field cannot be left out silently.
+        let Self {
+            host,
+            port,
+            unix_socket,
+            user,
+            password,
+            database,
+            connect_timeout,
+            read_timeout,
+            write_timeout,
+            client_flag,
+            charset,
+            tls,
+            server_public_key,
+            statement_cache,
+            compress,
+            local_infile_dir,
+        } = self;
+        let password = if password.is_empty() { "" } else { "<hidden>" };
+        f.debug_struct("Opts")
+            .field("host", host)
+            .field("port", port)
+            .field("unix_socket", unix_socket)
+            .field("user", &String::from_utf8_lossy(user))
+            .field("password", &password)
+            .field(
+                "database",
+                &database.as_deref().map(String::from_utf8_lossy),
+            )
+            .field("connect_timeout", connect_timeout)
+            .field("read_timeout", read_timeout)
+            .field("write_timeout", write_timeout)
+            .field("client_flag", client_flag)
+            .field("charset", charset)
+            .field("tls", tls)
+            .field("server_public_key", server_public_key)
+            .field("statement_cache", statement_cache)
+            .field("compress", compress)
+            .field("local_infile_dir", local_infile_dir)
+            .finish()
+    }
 }
 
 impl Default for Opts {
@@ -491,6 +539,8 @@ pub struct Conn {
     greeting_nonce: Vec<u8>,
     /// Pinned RSA key (`Opts::server_public_key`), also for `COM_CHANGE_USER`.
     pinned_key: Option<rsa::PublicKey>,
+    /// Largest parsec iteration factor accepted, from the connect timeout.
+    parsec_max_factor: u8,
     /// Session collation sent in the handshake, also for `COM_CHANGE_USER`.
     collation: u8,
     /// The server's default collation, from its greeting.
@@ -603,6 +653,7 @@ impl Conn {
                 .as_deref()
                 .map(load_public_key)
                 .transpose()?,
+            parsec_max_factor: parsec_max_factor(opts.connect_timeout),
             collation,
             server_collation: greeting.collation,
             buf,
@@ -746,7 +797,9 @@ impl Conn {
                             }
                             encrypt_password(password, &nonce, &parse_public_key(pem)?)?
                         }
-                        (AuthPlugin::Parsec, salt) => parsec_response(password, &nonce, salt)?,
+                        (AuthPlugin::Parsec, salt) => {
+                            parsec_response(password, &nonce, salt, self.parsec_max_factor)?
+                        }
                         (AuthPlugin::Native | AuthPlugin::Ed25519, _) => {
                             return Err(Error::protocol(
                                 "unexpected AuthMoreData for this authentication plugin",
@@ -756,7 +809,7 @@ impl Conn {
                 }
                 // parsec's salt message may also arrive without the 0x01 prefix.
                 Some(b'P') if plugin == AuthPlugin::Parsec => {
-                    parsec_response(password, &nonce, &self.buf)?
+                    parsec_response(password, &nonce, &self.buf, self.parsec_max_factor)?
                 }
                 _ => return Err(Error::protocol("unexpected packet during authentication")),
             };
@@ -1609,5 +1662,27 @@ impl Conn {
     #[must_use]
     pub fn server_charset(&self) -> Option<&'static str> {
         crate::charset::charset_of(self.server_collation)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Opts;
+
+    #[test]
+    fn debug_output_hides_the_password() {
+        let opts = Opts {
+            user: b"app".to_vec(),
+            password: "s3cret-p4ss".to_owned(),
+            database: Some(b"shop".to_vec()),
+            ..Opts::default()
+        };
+        let shown = format!("{opts:?}");
+        assert!(!shown.contains("s3cret-p4ss"), "{shown}");
+        assert!(shown.contains("password: \"<hidden>\""), "{shown}");
+        assert!(shown.contains("user: \"app\""), "{shown}");
+        assert!(shown.contains("database: Some(\"shop\")"), "{shown}");
+        let shown = format!("{:?}", Opts::default());
+        assert!(shown.contains("password: \"\""), "{shown}");
     }
 }

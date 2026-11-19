@@ -323,7 +323,9 @@ conn = rustmy.connect(read_default_file="~/.my.cnf", read_default_group="shop")
 The `[client]` group and the one you name are read (with `!include` and
 `!includedir`), and arguments passed to `connect()` win over the file.
 `read_default_group` alone reads the default files (`/etc/my.cnf`,
-`~/.my.cnf`…). Login paths (`.mylogin.cnf`) are not read.
+`~/.my.cnf`…). Login paths (`.mylogin.cnf`) are not read. As in the `mysql`
+client, a file anyone can write to is ignored with a warning (outside
+Windows).
 
 ### Queries and parameters
 
