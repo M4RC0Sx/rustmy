@@ -1,5 +1,7 @@
 """PEP 249 module surface (no server needed)."""
 
+from typing import Any
+
 import pytest
 
 import rustmy
@@ -63,7 +65,21 @@ def test_connection_refused_is_operational_error_2003() -> None:
     assert info.value.args[0] == 2003
 
 
-@pytest.mark.parametrize("timeout", [0, -1.0, float("nan")])
+@pytest.mark.parametrize("timeout", [-1.0, float("nan")])
 def test_invalid_timeout_is_rejected(timeout: float) -> None:
     with pytest.raises(ValueError, match="positive"):
         rustmy.connect(host="127.0.0.1", port=1, connect_timeout=timeout)
+
+
+@pytest.mark.parametrize("name", ["read_timeout", "write_timeout"])
+def test_zero_read_and_write_timeouts_are_rejected(name: str) -> None:
+    timeout: dict[str, Any] = {name: 0}
+    with pytest.raises(ValueError, match="positive"):
+        rustmy.connect(host="127.0.0.1", port=1, **timeout)
+
+
+def test_a_zero_connect_timeout_waits_forever() -> None:
+    # As in MySQL's clients: 0 turns the limit off, it is not an error.
+    with pytest.raises(rustmy.OperationalError) as info:
+        rustmy.connect(host="127.0.0.1", port=1, connect_timeout=0)
+    assert info.value.args[0] == 2003

@@ -3,6 +3,11 @@ THIRD-PARTY LICENSES
 rustmy's wheels contain the following Rust crates, compiled in. Their licenses
 follow, grouped by license; each lists the crates that use it.
 
+The Rust standard library (std, core, alloc and the crates they depend on,
+https://github.com/rust-lang/rust) is compiled in as well. It is copyright
+the Rust Project Developers and licensed under the MIT license or the Apache
+License 2.0, at your option; both texts are below.
+
 ================================================================================
 Apache License 2.0 (Apache-2.0)
 --------------------------------------------------------------------------------
@@ -1774,6 +1779,7 @@ Used by:
 - rustls 0.23.46 (https://github.com/rustls/rustls)
 - security-framework-sys 2.17.0 (https://github.com/kornelski/rust-security-framework)
 - security-framework 3.7.0 (https://github.com/kornelski/rust-security-framework)
+- socket2 0.6.5 (https://github.com/rust-lang/socket2)
 
                               Apache License
                         Version 2.0, January 2004
@@ -1998,7 +2004,7 @@ Used by:
 - pkcs1 0.8.0 (https://github.com/RustCrypto/formats)
 - pkcs8 0.11.0 (https://github.com/RustCrypto/formats)
 - sha1 0.11.0 (https://github.com/RustCrypto/hashes)
-- sha2 0.11.0 (https://github.com/RustCrypto/hashes)
+- sha2 0.11.1 (https://github.com/RustCrypto/hashes)
 - signature 3.0.0 (https://github.com/RustCrypto/traits)
 - spki 0.8.1 (https://github.com/RustCrypto/formats)
 

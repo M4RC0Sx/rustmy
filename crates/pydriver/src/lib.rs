@@ -24,6 +24,7 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(connection::literal, m)?)?;
     m.add_function(wrap_pyfunction!(connection::escape_string, m)?)?;
     m.add_function(wrap_pyfunction!(connection::interpolate, m)?)?;
+    m.add_function(wrap_pyfunction!(connection::names_clause, m)?)?;
     errors::register(m)?;
     Ok(())
 }

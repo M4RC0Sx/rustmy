@@ -26,6 +26,7 @@ rustls-pki-types = { version = "1.16", features = ["std"] }
 rustls-platform-verifier = "0.7"
 sha1 = "0.11"
 sha2 = "0.11"
+socket2 = "0.6"
 thiserror = "2"
 zstd = { version = "0.14", default-features = false }
 
@@ -35,3 +36,5 @@ workspace = true
 [dev-dependencies]
 getrandom = { version = "0.4", features = ["sys_rng"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+# The keepalive getters, to test what connections set.
+socket2 = { version = "0.6", features = ["all"] }

@@ -7,6 +7,8 @@ checked against mysqlclient on that library.
 
 from __future__ import annotations
 
+import sys
+
 from typing import TYPE_CHECKING
 
 import pytest
@@ -49,6 +51,8 @@ VALUE_CASES = [
 
 def write(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
+    # Whatever the umask: a file anyone may write to would be ignored.
+    path.chmod(0o644)
     return path
 
 
@@ -132,6 +136,25 @@ def test_missing_include_stops_the_file(tmp_path: Path) -> None:
         assert _option_files.read(cnf, None) == {"user": "u"}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_files_anyone_can_write_are_ignored(tmp_path: Path) -> None:
+    """As my_print_defaults (MySQL 8.4): the file is skipped with a warning,
+    and a file including it goes on; writable by the group is fine."""
+    open_file = write(tmp_path / "open.cnf", "[client]\nuser = intruder\n")
+    open_file.chmod(0o666)
+    with pytest.warns(RuntimeWarning, match="anyone can write"):
+        assert _option_files.read(open_file, None) == {}
+    cnf = write(
+        tmp_path / "my.cnf",
+        f"[client]\nhost = main\n!include {open_file}\nport = 1\n",
+    )
+    cnf.chmod(0o644)
+    with pytest.warns(RuntimeWarning, match="anyone can write"):
+        assert _option_files.read(cnf, None) == {"host": "main", "port": "1"}
+    open_file.chmod(0o664)
+    assert _option_files.read(open_file, None) == {"user": "intruder"}
+
+
 def test_include_loop_is_cut(tmp_path: Path) -> None:
     cnf = tmp_path / "my.cnf"
     write(cnf, f"[client]\nuser = u\n!include {cnf}\n")
@@ -193,6 +216,28 @@ def test_compression_options(
     options: dict[str, str], expected: dict[str, object]
 ) -> None:
     assert _option_files.connect_args(options) == expected
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        ({"get-server-public-key": ""}, True),
+        ({"get-server-public-key": "1"}, True),
+        ({"get-server-public-key": "0"}, False),
+        ({"get-server-public-key": "OFF"}, False),
+        ({"skip-get-server-public-key": ""}, False),
+        ({"disable-get-server-public-key": ""}, False),
+        ({"enable-get-server-public-key": ""}, True),
+    ],
+)
+def test_get_server_public_key_option(
+    options: dict[str, str], *, expected: bool
+) -> None:
+    assert _option_files.connect_args(options) == {"get_server_public_key": expected}
+
+
+def test_unknown_skip_options_are_ignored() -> None:
+    assert _option_files.connect_args({"skip-ssl": "", "skip-compress": ""}) == {}
 
 
 # Against the servers.

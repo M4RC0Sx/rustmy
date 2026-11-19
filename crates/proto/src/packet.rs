@@ -19,6 +19,36 @@ use crate::error::Result;
 
 const HEADER_LEN: usize = 4;
 const READ_BUFFER_CAPACITY: usize = 64 * 1024;
+/// Buffers grown beyond this by a large packet are released once it has
+/// been handled, so an idle pooled connection does not keep megabytes.
+/// Uncompressed payloads this large are not staged at all: they go from the
+/// caller's buffer straight to the stream.
+pub(crate) const KEEP_CAPACITY: usize = 1 << 20;
+
+/// Drops a buffer a large packet grew, once it is no longer needed.
+pub(crate) fn release(buf: &mut Vec<u8>) {
+    if buf.capacity() > KEEP_CAPACITY {
+        *buf = Vec::new();
+    }
+}
+
+/// The packets of the payload `head ++ body`, each as its part of `head`
+/// and its part of `body`, without joining them. A payload of exactly `k`
+/// full packets is followed by an empty one, so the server knows it ended.
+fn packets<'a>(head: &'a [u8], body: &'a [u8]) -> impl Iterator<Item = (&'a [u8], &'a [u8])> {
+    let total = head.len() + body.len();
+    (0..=total / MAX_PACKET_PAYLOAD).map(move |i| {
+        let start = i * MAX_PACKET_PAYLOAD;
+        let end = total.min(start + MAX_PACKET_PAYLOAD);
+        let in_head = head
+            .get(start.min(head.len())..end.min(head.len()))
+            .unwrap_or_default();
+        let in_body = body
+            .get(start.saturating_sub(head.len())..end.saturating_sub(head.len()))
+            .unwrap_or_default();
+        (in_head, in_body)
+    })
+}
 
 /// Largest logical payload accepted until authentication succeeds. The
 /// greeting, auth switches, RSA keys and OK/ERR packets are all far smaller,
@@ -219,6 +249,7 @@ impl<S: Read + Write> PacketStream<S> {
             });
         }
         let result = encoded.and_then(|()| self.send_framed(&buf));
+        release(&mut buf);
         self.write_buf = buf;
         result
     }
@@ -233,39 +264,45 @@ impl<S: Read + Write> PacketStream<S> {
     }
 
     /// Sends `head ++ body` as one logical payload without concatenating
-    /// them first in the common single-packet case.
+    /// them.
     fn write_parts(&mut self, head: &[u8], body: &[u8]) -> Result<()> {
+        if self.compressed.is_none() && head.len() + body.len() >= KEEP_CAPACITY {
+            return self.write_direct(head, body);
+        }
         let mut buf = std::mem::take(&mut self.write_buf);
         buf.clear();
         let result = self
             .encode_parts(&mut buf, head, body)
             .and_then(|()| self.send(&buf));
+        release(&mut buf);
         self.write_buf = buf;
         result
+    }
+
+    /// Writes a large payload packet by packet, header and parts, with no
+    /// copy (uncompressed connections only).
+    fn write_direct(&mut self, head: &[u8], body: &[u8]) -> Result<()> {
+        for (in_head, in_body) in packets(head, body) {
+            let header = self.next_header(in_head.len() + in_body.len())?;
+            let stream = self.inner.get_mut();
+            stream.write_all(&header)?;
+            stream.write_all(in_head)?;
+            stream.write_all(in_body)?;
+        }
+        Ok(self.inner.get_mut().flush()?)
     }
 
     /// Appends `head ++ body` to `buf` as packets of the current sequence.
     fn encode_parts(&mut self, buf: &mut Vec<u8>, head: &[u8], body: &[u8]) -> Result<()> {
         let total = head.len() + body.len();
-        if total < MAX_PACKET_PAYLOAD {
-            self.push_header(buf, total)?;
-            buf.extend_from_slice(head);
-            buf.extend_from_slice(body);
-            return Ok(());
-        }
-        let payload = [head, body].concat();
         buf.reserve(total + HEADER_LEN * (total / MAX_PACKET_PAYLOAD + 1));
-        let mut chunks = payload.chunks(MAX_PACKET_PAYLOAD);
-        loop {
-            let chunk = chunks.next().unwrap_or_default();
-            self.push_header(buf, chunk.len())?;
-            buf.extend_from_slice(chunk);
-            // A full chunk must be followed by another packet, possibly
-            // empty, so the server knows the payload continues.
-            if chunk.len() < MAX_PACKET_PAYLOAD {
-                return Ok(());
-            }
+        for (in_head, in_body) in packets(head, body) {
+            let header = self.next_header(in_head.len() + in_body.len())?;
+            buf.extend_from_slice(&header);
+            buf.extend_from_slice(in_head);
+            buf.extend_from_slice(in_body);
         }
+        Ok(())
     }
 
     /// Sends packets, wrapping them in compressed ones if need be.
@@ -274,8 +311,11 @@ impl<S: Read + Write> PacketStream<S> {
             None => self.send_framed(buf),
             Some(compressed) => {
                 let stream = self.inner.get_mut();
-                let bytes = compressed.encode(buf);
-                Ok(stream.write_all(bytes).and_then(|()| stream.flush())?)
+                let sent = stream
+                    .write_all(compressed.encode(buf))
+                    .and_then(|()| stream.flush());
+                compressed.release_output();
+                Ok(sent?)
             }
         }
     }
@@ -286,15 +326,16 @@ impl<S: Read + Write> PacketStream<S> {
         Ok(stream.write_all(bytes).and_then(|()| stream.flush())?)
     }
 
-    fn push_header(&mut self, buf: &mut Vec<u8>, len: usize) -> Result<()> {
+    /// The header of the next packet, carrying `len` bytes.
+    fn next_header(&mut self, len: usize) -> Result<[u8; HEADER_LEN]> {
         let len = u32::try_from(len)
             .ok()
             .filter(|&l| l as usize <= MAX_PACKET_PAYLOAD)
             .ok_or_else(|| Error::protocol("packet chunk too large"))?;
         let [l0, l1, l2, _] = len.to_le_bytes();
-        buf.extend_from_slice(&[l0, l1, l2, self.seq]);
+        let header = [l0, l1, l2, self.seq];
         self.seq = self.seq.wrapping_add(1);
-        Ok(())
+        Ok(header)
     }
 }
 
@@ -305,6 +346,7 @@ mod tests {
     use std::io::Write;
 
     use super::HANDSHAKE_PAYLOAD_LIMIT;
+    use super::KEEP_CAPACITY;
     use super::PAYLOAD_LIMIT;
     use super::PacketStream;
     use crate::MAX_PACKET_PAYLOAD;
@@ -484,6 +526,67 @@ mod tests {
         assert_eq!(out[6..10], [0xFF, 0xFF, 0xFF, 0]);
         assert_eq!(out[second..second + 4], [1, 0, 0, 1]);
         assert_eq!(out[second + 5..], [2, 0, 0, 0, 0x03, b'B']);
+    }
+
+    /// The packets of `payload`, framed one by one: the reference both
+    /// write paths (staged and direct) must match byte for byte.
+    fn framed(payload: &[u8], first_seq: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut seq = first_seq;
+        let mut chunks = payload.chunks(MAX_PACKET_PAYLOAD).peekable();
+        while let Some(chunk) = chunks.next() {
+            let len = u32::try_from(chunk.len()).unwrap().to_le_bytes();
+            out.extend_from_slice(&[len[0], len[1], len[2], seq]);
+            out.extend_from_slice(chunk);
+            seq = seq.wrapping_add(1);
+            if chunks.peek().is_none() && chunk.len() == MAX_PACKET_PAYLOAD {
+                out.extend_from_slice(&[0, 0, 0, seq]);
+            }
+        }
+        if payload.is_empty() {
+            out.extend_from_slice(&[0, 0, 0, seq]);
+        }
+        out
+    }
+
+    #[test]
+    fn large_commands_are_framed_alike_on_both_paths() {
+        // Around the size where writes stop being staged and around the
+        // packet boundaries; the command byte shifts every chunk by one.
+        for total in [
+            KEEP_CAPACITY - 1,
+            KEEP_CAPACITY,
+            MAX_PACKET_PAYLOAD - 1,
+            MAX_PACKET_PAYLOAD,
+            MAX_PACKET_PAYLOAD + 1,
+            2 * MAX_PACKET_PAYLOAD,
+            2 * MAX_PACKET_PAYLOAD + 5,
+        ] {
+            let body: Vec<u8> = (0..total - 1)
+                .map(|i| u8::try_from(i % 251).unwrap())
+                .collect();
+            let mut ps = reader(Vec::new());
+            ps.write_command(0x03, &body).unwrap();
+            assert!(ps.write_buf.capacity() <= KEEP_CAPACITY, "{total}");
+            let mut payload = vec![0x03];
+            payload.extend_from_slice(&body);
+            assert!(
+                ps.inner.into_inner().output == framed(&payload, 0),
+                "{total} bytes framed differently"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_writes_do_not_keep_a_large_buffer() {
+        let mut ps = reader(Vec::new());
+        let big = vec![b'x'; 2 * KEEP_CAPACITY];
+        let mut replies = Vec::new();
+        ps.write_commands(0x03, [&big[..], b"B"], &mut replies)
+            .unwrap();
+        assert!(ps.write_buf.capacity() <= KEEP_CAPACITY);
+        ps.write_packet(b"small").unwrap();
+        assert!(ps.write_buf.capacity() > 0);
     }
 
     #[test]

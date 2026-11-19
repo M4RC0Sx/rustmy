@@ -106,6 +106,14 @@ def test_url_arguments_use_rustmy_names() -> None:
     }
 
 
+@pytest.mark.parametrize(("value", "expected"), [("false", False), ("1", True)])
+def test_get_server_public_key_from_the_url(value: str, *, expected: bool) -> None:
+    dialect = sa.create_engine("mysql+rustmy://").dialect
+    url = sa.make_url(f"mysql+rustmy://u@h/db?get_server_public_key={value}")
+    _, kwargs = dialect.create_connect_args(url)
+    assert kwargs["get_server_public_key"] is expected
+
+
 # Sessions ----------------------------------------------------------------------
 
 

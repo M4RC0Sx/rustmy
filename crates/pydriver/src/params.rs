@@ -70,6 +70,18 @@ pub(crate) enum Args<'py> {
 
 impl<'py> Args<'py> {
     pub(crate) fn from_py(args: &Bound<'py, PyAny>) -> Self {
+        // Exact tuples, lists and dicts first: telling any other object
+        // from a `Mapping` runs `isinstance` through `ABCMeta` in Python,
+        // on every execute and every executemany row.
+        if let Ok(tuple) = args.cast_exact::<PyTuple>() {
+            return Self::Positional(tuple.iter().collect());
+        }
+        if let Ok(list) = args.cast_exact::<PyList>() {
+            return Self::Positional(list.iter().collect());
+        }
+        if args.is_exact_instance_of::<PyDict>() {
+            return Self::Named(args.clone());
+        }
         if args.is_instance_of::<PyDict>() || args.cast::<PyMapping>().is_ok() {
             return Self::Named(args.clone());
         }

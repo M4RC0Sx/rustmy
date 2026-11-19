@@ -134,6 +134,58 @@ def test_sql_mode_survives_reset_and_change_user(server: Server) -> None:
         assert _sql_mode(conn) == set(mode.split(","))
 
 
+def _set_statements(conn: rustmy.Connection) -> int:
+    cursor = conn.cursor()
+    cursor.execute("SHOW SESSION STATUS LIKE 'Com_set_option'")
+    row = cursor.fetchone()
+    assert row is not None
+    return int(row[1])
+
+
+def _settings(conn: rustmy.Connection) -> tuple[Any, ...]:
+    cursor = conn.cursor()
+    cursor.execute("SELECT @@collation_connection, @@sql_mode, @@autocommit")
+    return cursor.fetchone() or ()
+
+
+@pytest.mark.parametrize("autocommit", [False, True])
+def test_session_settings_go_in_one_statement(
+    server: Server, *, autocommit: bool
+) -> None:
+    # Each statement is a round trip: the collation, sql_mode and autocommit
+    # (when it differs from the server's) share one SET.
+    expected = ("latin1_bin", "ANSI_QUOTES", int(autocommit))
+    with server.connect(
+        charset="latin1",
+        collation="latin1_bin",
+        sql_mode="ANSI_QUOTES",
+        autocommit=autocommit,
+    ) as conn:
+        assert _set_statements(conn) == 1
+        assert _settings(conn) == expected
+        assert conn.get_autocommit() is autocommit
+        conn.reset_connection()
+        assert _settings(conn) == expected
+        conn.change_user("rustmy", "rustmy", "rustmy_test")
+        assert _settings(conn) == expected
+
+
+def test_init_command_runs_between_the_settings_and_autocommit(
+    server: Server,
+) -> None:
+    # init_command sees the session's sql_mode, and autocommit=False wins
+    # over an init_command that turns it on.
+    with server.connect(
+        sql_mode="ANSI_QUOTES",
+        init_command="SET @mode = @@sql_mode, autocommit = 1",
+    ) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT @mode, @@autocommit")
+        assert cursor.fetchone() == ("ANSI_QUOTES", 0)
+        assert _set_statements(conn) == 3
+        assert not conn.get_autocommit()
+
+
 # conv: decoders -----------------------------------------------------------------
 
 

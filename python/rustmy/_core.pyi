@@ -156,6 +156,7 @@ def connect(
     ssl_cert: str | PathLike[str] | None = None,
     ssl_key: str | PathLike[str] | None = None,
     server_public_key: str | PathLike[str] | None = None,
+    get_server_public_key: bool = True,
     binary_prefix: bool = True,
     statement_cache_size: int = 32,
     compress: str | None = None,
@@ -164,6 +165,7 @@ def connect(
     local_infile_dir: str | PathLike[str] | None = None,
 ) -> Connection: ...
 def literal(value: object, no_backslash_escapes: bool = False) -> str: ...
+def names_clause(charset: str, collation: str | None = None) -> str: ...
 def escape_string(value: str, no_backslash_escapes: bool = False) -> str: ...
 def interpolate(
     query: str,

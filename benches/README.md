@@ -1294,3 +1294,135 @@ three rounds, ms:
 
 16 KiB: within 1% of the best locally and 5% faster than 64 KiB with zstd,
 the configuration meant for slow links.
+
+## Connecting: TLS configuration and session statements (2026-11-19, Python 3.10)
+
+`connect.py` opens and closes 1,000 connections per driver, one after the
+other, with each driver's defaults (`autocommit` off, utf8mb4), plain, with
+TLS and no verification (`preferred`, the default of all three) and
+verifying the certificate against the test CA (`verify_identity`); best of
+five. It also prints the statements each driver sends while connecting, from
+the server's general log.
+
+```sh
+docker compose --profile bench up -d --wait mysql mariadb toxiproxy
+uv run --no-sync python benches/connect.py --repeat 5 \
+    --json benches/results/connect-before-py310.json        # before the change
+uv run --no-sync python benches/connect.py --repeat 5 \
+    --json benches/results/connect-after-py310.json \
+    --before benches/results/connect-before-py310.json      # after it
+uv run --no-sync python benches/report.py --section connect-mysql \
+    benches/results/connect-after-py310.json
+# the same with --port 13307 and connect-mariadb-*.json for MariaDB
+```
+
+Before this change rustmy built its rustls configuration on every
+connection: a new crypto provider, the CA file read and parsed, the
+verifier (or the operating system's trust store) set up again, and an empty
+TLS session cache. It is now built once per process for each set of TLS
+options and kept while its files are unchanged, and the connections that
+share it resume TLS sessions where the server issues tickets (MySQL does,
+MariaDB does not). The tables give the time of all 1,000 connections.
+
+MySQL 8.4:
+
+<!-- results:connect-mysql:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/connect-mysql-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/connect-mysql-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-19T16:24:36+00:00
+
+| Configuration | disabled | preferred | verify_identity | vs mysqlclient (disabled) | vs mysqlclient (preferred) | vs mysqlclient (verify_identity) |
+|---|--:|--:|--:|--:|--:|--:|
+| rustmy | **399.3 ms** | **685.5 ms** | **680.2 ms** | 1.19x | 18.66x | 10.72x |
+| rustmy before | 402.0 ms | 1415.8 ms | 1592.8 ms | 1.19x | 9.03x | 4.58x |
+| mysqlclient | 476.6 ms | 12791.0 ms | 7292.9 ms | 1.00x | 1.00x | 1.00x |
+| PyMySQL | 539.0 ms | 9314.9 ms | 3220.7 ms | 0.88x | 1.37x | 2.26x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:connect-mysql:end -->
+
+MariaDB 11.4:
+
+<!-- results:connect-mariadb:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/connect-mariadb-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/connect-mariadb-light.svg">
+</picture>
+
+**CPython 3.10.19** · 11.4.13-MariaDB-ubu2404 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-19T16:34:58+00:00
+
+| Configuration | disabled | preferred | verify_identity | vs mysqlclient (disabled) | vs mysqlclient (preferred) | vs mysqlclient (verify_identity) |
+|---|--:|--:|--:|--:|--:|--:|
+| rustmy | 343.0 ms | **626.9 ms** | **625.6 ms** | 1.25x | 17.86x | 7.42x |
+| rustmy before | **338.8 ms** | 1467.4 ms | 1472.0 ms | 1.27x | 7.63x | 3.15x |
+| mysqlclient | 430.4 ms | 11195.3 ms | 4641.5 ms | 1.00x | 1.00x | 1.00x |
+| PyMySQL | 475.0 ms | 8654.7 ms | 1774.8 ms | 0.91x | 1.29x | 2.62x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:connect-mariadb:end -->
+
+With TLS a connection now costs 0.63–0.69 ms instead of 1.42–1.59 ms, about
+as much on MariaDB, which never resumes a session, as on MySQL: nearly all
+of the gain is not rebuilding the configuration. Plain TCP is unchanged
+(0.34–0.40 ms, ahead of mysqlclient). mysqlclient and PyMySQL take 3–13 ms
+with TLS on this machine.
+
+Statements sent while connecting, the same on both servers:
+
+| Driver | Statements |
+|---|---|
+| rustmy | `SET autocommit = 0` |
+| mysqlclient | `SET NAMES utf8mb4; set autocommit=0` |
+| PyMySQL | `SET NAMES utf8mb4; SET AUTOCOMMIT = 0` |
+
+rustmy never needed `SET NAMES` here (both test servers default to
+utf8mb4), but did whenever the server's default character set was another,
+such as MariaDB 10.11 and 11.4 out of the box (latin1): the handshake
+already sets the character set, exactly as `SET NAMES` would on all nine
+servers (`test_the_handshake_sets_the_character_set`), so it is now sent
+only for gb18030, which MariaDB lacks. An explicit collation, `sql_mode`
+and `autocommit` share one `SET` instead of one round trip each.
+
+## Large values and parameter classification (2026-11-19, Python 3.10)
+
+`large_values.py` inserts one 64 MiB BLOB and reads it back, each
+configuration in a fresh process, and reports what stays allocated once the
+connection sits idle, as a pooled connection would. Two runs before and two
+after this change, on MySQL 8.4:
+
+```sh
+docker compose up -d --wait mysql
+uv run --no-sync python benches/large_values.py \
+    --json benches/results/large-values-after-py310.json
+```
+
+| Configuration | held, before | held, after | peak RSS, before | peak RSS, after | insert, before | insert, after |
+|---|--:|--:|--:|--:|--:|--:|
+| rustmy | 66 MiB | **0 MiB** | 312–408 MiB | 212–228 MiB | 925–995 ms | 857–1005 ms |
+| rustmy prepared | 64 MiB | **0 MiB** | 370–402 MiB | 243–338 MiB | 593–596 ms | 600–608 ms |
+| rustmy zlib | 82–93 MiB | 8–16 MiB | 361–372 MiB | 339–347 MiB | 1974–2021 ms | 1995–2007 ms |
+| rustmy zstd | 88–94 MiB | 23 MiB | 394–427 MiB | 373 MiB | 972–1045 ms | 985 ms |
+| mysqlclient | 64–128 MiB | 64 MiB | 382 MiB | 366–382 MiB | 1463–1466 ms | 1395–1482 ms |
+
+Before, a connection kept the buffer its largest statement grew for as long
+as it lived: an idle pooled connection held the 64 MiB (libmysqlclient keeps
+its network buffer the same way). Now buffers a packet grew past 1 MiB are
+released as soon as the operation that needed them ends, compressed ones
+included, and an uncompressed statement of 1 MiB or more goes from its own
+buffer straight to the socket, packet by packet, instead of being copied
+into the write buffer first (and, past 16 MiB, joined to its command byte
+before that). Times do not change beyond the noise of a 64 MiB insert. The
+8–23 MiB still counted on compressed connections is not held by rustmy:
+macOS's allocator keeps freed blocks of that size cached (`leaks` finds
+4 MB live besides the value, and no leak, after 25 compressed rounds).
+
+`execute()` parameters are now classified by exact type first (tuple, list,
+dict), so ordinary calls no longer ask Python whether the object is a
+`Mapping`, which runs `ABCMeta.__instancecheck__`: `cursor.mogrify("SELECT
+%s", args)` 200,000 times, best of seven, went from 338 to 279 ns per call
+with a tuple and from 344 to 293 ns with a list (dicts, other mappings and
+single values unchanged). CodSpeed's `test_mogrify` and `test_executemany`
+follow it in CI.

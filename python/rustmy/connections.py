@@ -40,6 +40,12 @@ if TYPE_CHECKING:
 # Server status flags (see the protocol's SERVER_STATUS_* values).
 _STATUS_AUTOCOMMIT = 1 << 1
 _STATUS_NO_BACKSLASH_ESCAPES = 1 << 9
+#: Character sets whose handshake collation id some supported server does
+#: not know (MariaDB has no gb18030): it would keep its own default without
+#: an error. Every other character set the handshake sets exactly as
+#: ``SET NAMES`` would, on all supported servers
+#: (``test_charsets.py::test_the_handshake_sets_the_character_set``).
+_HANDSHAKE_MAY_IGNORE = frozenset({"gb18030"})
 
 PathArg: TypeAlias = "str | PathLike[str]"
 
@@ -68,6 +74,20 @@ def _with_option_file(
         elif name in given and given[name] is None:
             merged[name] = value
     return merged
+
+
+#: Seconds ``connect()`` waits by default for the server to accept and
+#: authenticate the connection.
+_DEFAULT_CONNECT_TIMEOUT = 15.0
+
+
+def _connect_timeout(seconds: float | None) -> float | None:
+    """``connect(connect_timeout=…)`` as the core takes it: the default
+    when not given, and ``None`` (no limit) for ``0``.
+    """
+    if seconds is None:
+        return _DEFAULT_CONNECT_TIMEOUT
+    return None if seconds == 0 else seconds
 
 
 def _compression(compress: object) -> str | None:
@@ -132,6 +152,7 @@ class Connection:
         ssl_key: PathArg | None = None,
         ssl: Mapping[str, object] | bool | None = None,
         server_public_key: PathArg | None = None,
+        get_server_public_key: bool | None = None,
         binary_prefix: bool = True,
         statement_cache_size: int = 32,
         compress: bool | str = False,
@@ -156,10 +177,19 @@ class Connection:
         ``user``, ``password``, ``database``, ``socket``,
         ``default-character-set``, ``init-command``, ``connect-timeout``,
         ``ssl-mode``, ``ssl-ca``, ``ssl-cert``, ``ssl-key``,
-        ``server-public-key-path``, ``multi-statements``,
+        ``server-public-key-path``, ``get-server-public-key``,
+        ``multi-statements``,
         ``return-found-rows``, ``compress``, ``compression-algorithms``,
         ``zstd-compression-level``, ``local-infile`` and
         ``load-data-local-dir``; other options are ignored.
+
+        ``connect_timeout`` (seconds, default 15) bounds opening the
+        connection and every read and write until authentication ends, so a
+        server that accepts the connection but never answers fails too; ``0``
+        waits forever. ``read_timeout`` and ``write_timeout`` (no default)
+        apply from then on. TCP connections send keepalive probes after 60
+        seconds idle, so a connection a firewall or load balancer dropped
+        while it sat in a pool fails within minutes instead of hanging.
 
         ``charset`` is the session's character set (default ``utf8mb4``;
         ``utf8`` means ``utf8mb4``): queries are encoded and text results
@@ -167,7 +197,8 @@ class Connection:
         Without ``collation`` the session uses the server's default collation
         for it (what its tables use, so comparisons with user variables
         work), set in the handshake at no extra cost; with ``collation``,
-        ``SET NAMES … COLLATE …`` runs after connecting.
+        ``SET NAMES … COLLATE …`` runs after connecting, in the same
+        statement as ``sql_mode`` and ``autocommit``.
 
         ``multi_statements=True`` allows several statements separated by
         ``;`` in one ``execute`` (off by default: it lets an injected string
@@ -215,7 +246,9 @@ class Connection:
         Prepared statements (:class:`~rustmy.cursors.PreparedCursor`) are
         prepared once per connection: the last ``statement_cache_size`` stay
         prepared on the server, which allows 16,382 across all its
-        connections by default (``max_prepared_stmt_count``).
+        connections by default (``max_prepared_stmt_count``); when it is
+        full (error 1461), the least recently used one is closed and the
+        statement prepared again, once.
 
         TLS: ``ssl_mode`` is one of ``disabled``, ``preferred`` (default),
         ``required`` (encrypted, server not verified), ``verify_ca`` and
@@ -231,6 +264,10 @@ class Connection:
         with the server's public key, which is requested from the server as
         PyMySQL does. ``server_public_key`` (a PEM file) pins the key
         instead, so a man in the middle cannot substitute its own.
+        ``get_server_public_key=False`` never asks for it, as libmysqlclient
+        does by default: those accounts then need TLS, a Unix socket or a
+        pinned key, and fail with :class:`~rustmy.err.OperationalError` 2061
+        otherwise.
         """
         if passwd is not None:
             password = passwd
@@ -251,6 +288,7 @@ class Connection:
                     "connect_timeout": connect_timeout,
                     "init_command": init_command,
                     "server_public_key": server_public_key,
+                    "get_server_public_key": get_server_public_key,
                     "multi_statements": multi_statements,
                     "client_flag": client_flag,
                     "compress": compress,
@@ -276,6 +314,7 @@ class Connection:
             connect_timeout = args["connect_timeout"]
             init_command = args["init_command"]
             server_public_key = args["server_public_key"]
+            get_server_public_key = args["get_server_public_key"]
             multi_statements = args["multi_statements"]
             client_flag = args["client_flag"]
             compress, zstd_level = args["compress"], args["zstd_level"]
@@ -300,7 +339,7 @@ class Connection:
             password="" if password is None else password,
             database=database,
             unix_socket=unix_socket,
-            connect_timeout=connect_timeout,
+            connect_timeout=_connect_timeout(connect_timeout),
             read_timeout=read_timeout,
             write_timeout=write_timeout,
             client_flag=client_flag
@@ -312,6 +351,9 @@ class Connection:
             ssl_key=tls.key,
             server_public_key=(
                 None if server_public_key is None else os.fspath(server_public_key)
+            ),
+            get_server_public_key=(
+                get_server_public_key is None or bool(get_server_public_key)
             ),
             binary_prefix=binary_prefix,
             statement_cache_size=statement_cache_size,
@@ -332,38 +374,55 @@ class Connection:
             )
         # The handshake asks for the character set (with the server's
         # default collation for it). SET NAMES follows for an explicit
-        # collation, after set_character_set(), and for any character set
-        # other than the server's own: a server silently ignores a collation
-        # id it does not know (MariaDB has no gb18030) and keeps its
-        # default, so only SET NAMES turns that into an error.
+        # collation, after set_character_set(), and for a character set some
+        # supported server does not know: it silently ignores the collation
+        # id and keeps its default, so only SET NAMES turns that into an
+        # error.
         self._collation = collation
         self._set_names = collation is not None
         self._sql_mode = sql_mode
         self._init_command = init_command
         self._autocommit_setting = autocommit
         try:
-            self._init_session()
+            self._init_session(connecting=True)
         except BaseException:
             self._conn.close()
             raise
 
-    def _init_session(self) -> None:
-        """Apply the per-session settings chosen at connect time.
+    def _init_session(self, *, connecting: bool = False) -> None:
+        """Apply the per-session settings chosen at connect time, in as few
+        statements as possible (each one is a round trip).
 
-        A character set other than the server's own is set again after a
-        reset too: MySQL's reset returns the session to the server's default
+        After a reset, a character set other than the server's own is set
+        again: MySQL's reset returns the session to the server's default
         character set rather than the one negotiated at connect time
         (MariaDB keeps it).
         """
         conn = self._conn
-        if self._set_names or conn.charset != conn.server_charset:
-            conn.set_character_set(conn.charset, self._collation)
+        settings: list[str] = []
+        params: list[object] = []
+        if self._set_names or (
+            conn.charset != conn.server_charset
+            and (not connecting or conn.charset in _HANDSHAKE_MAY_IGNORE)
+        ):
+            settings.append(_core.names_clause(conn.charset, self._collation))
         if self._sql_mode is not None:
-            self._conn.execute("SET sql_mode = %s", (self._sql_mode,))
+            settings.append("sql_mode = %s")
+            params.append(self._sql_mode)
+        autocommit = self._autocommit_setting
+        if (
+            self._init_command is None
+            and autocommit is not None
+            and self.get_autocommit() != autocommit
+        ):
+            settings.append("autocommit = 1" if autocommit else "autocommit = 0")
+            autocommit = None
+        if settings:
+            conn.execute("SET " + ", ".join(settings), tuple(params) or None)
         if self._init_command is not None:
             self._query(self._init_command)
-        if self._autocommit_setting is not None:
-            self.autocommit(self._autocommit_setting)
+        if autocommit is not None:
+            self.autocommit(autocommit)
 
     def _query(self, sql: str) -> QueryResult:
         return self._conn.query(sql)

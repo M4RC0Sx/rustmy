@@ -16,6 +16,9 @@ libmysqlclient through mysqlclient):
   current directory, as in the client library); ``!includedir DIR`` reads
   its ``*.cnf`` files (and ``*.ini`` on Windows) in name order. A missing
   include stops reading the file that names it, with a warning.
+- Outside Windows, a file anyone may write to is ignored, with a warning,
+  included files too: whoever can edit it could otherwise set
+  ``init-command``, turn TLS off or open ``LOAD DATA LOCAL INFILE``.
 - ``#`` starts a comment anywhere outside quotes. A value wholly enclosed
   in ``'`` or ``"`` loses them (``"a" b`` is kept as written). The escapes
   ``\\b \\t \\n \\r \\s \\\\ \\' \\"`` apply, quoted or not; any other
@@ -30,6 +33,7 @@ MySQL only) is not read.
 from __future__ import annotations
 
 import os
+import stat
 import sys
 import warnings
 
@@ -87,6 +91,9 @@ def _read_file(
 ) -> bool:
     """Read ``path`` into ``options``; ``False`` if it does not exist."""
     try:
+        if _writable_by_anyone(path):
+            _warn(f"{path} is ignored: anyone can write to it")
+            return True
         text = path.read_text(encoding="utf-8", errors="surrogateescape")
     except FileNotFoundError:
         return False
@@ -108,6 +115,14 @@ def _read_file(
         name, sep, value = line.partition("=")
         options[name.strip().lower().replace("_", "-")] = _value(value) if sep else ""
     return True
+
+
+def _writable_by_anyone(path: Path) -> bool:
+    """Whether others (not only the owner and group) may write ``path``, the
+    files MySQL's client library ignores. Never on Windows, as there."""
+    if sys.platform == "win32":
+        return False
+    return bool(path.stat().st_mode & stat.S_IWOTH)
 
 
 def _directive(
@@ -217,7 +232,27 @@ _FLAG_OPTIONS = {
     "compress": "compress",
     "local-infile": "local_infile",
 }
+#: Switches that are on unless the file turns them off: ``name``,
+#: ``name=0``, ``skip-name`` or ``disable-name``, as MySQL's clients read
+#: boolean options. Unlike flags, the file can turn them off.
+_SWITCH_OPTIONS = {
+    "get-server-public-key": "get_server_public_key",
+}
+_SWITCH_PREFIXES = {"skip-": False, "disable-": False, "enable-": True}
 _FALSE = {"0", "false", "off", "no"}
+
+
+def _switch(name: str, value: str) -> tuple[str, bool] | None:
+    """The ``connect()`` argument and value a switch option sets, if
+    ``name`` is one.
+    """
+    on = value.lower() not in _FALSE
+    for prefix, sets in _SWITCH_PREFIXES.items():
+        if name.startswith(prefix) and name[len(prefix) :] in _SWITCH_OPTIONS:
+            return _SWITCH_OPTIONS[name[len(prefix) :]], on is sets
+    if name in _SWITCH_OPTIONS:
+        return _SWITCH_OPTIONS[name], on
+    return None
 
 
 def connect_args(options: dict[str, str]) -> dict[str, object]:
@@ -236,6 +271,8 @@ def connect_args(options: dict[str, str]) -> dict[str, object]:
                 raise ValueError(msg) from None
         elif name in _FLAG_OPTIONS:
             args[_FLAG_OPTIONS[name]] = value.lower() not in _FALSE
+        elif switch := _switch(name, value):
+            args[switch[0]] = switch[1]
         elif name == "compression-algorithms" and value:
             # A list the server picks from; zstd falls back to zlib here too.
             algorithms = {a.strip().lower() for a in value.split(",")}

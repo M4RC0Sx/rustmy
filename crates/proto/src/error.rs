@@ -42,6 +42,11 @@ pub enum Error {
     #[error("result set discarded: another command ran before all its rows were read")]
     ResultDiscarded,
 
+    /// Authentication cannot go on as configured (the server's messages
+    /// come as [`Error::Server`]).
+    #[error("authentication failed: {0}")]
+    Auth(String),
+
     /// A valid server request that this client does not implement yet.
     #[error("unsupported: {0}")]
     Unsupported(String),

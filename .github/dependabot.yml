@@ -40,6 +40,12 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    ignore:
+      # 10+ needs conventional-changelog-writer 9, and
+      # @semantic-release/release-notes-generator 14 still loads 8: the release
+      # notes would fail to render. Lift once it moves on.
+      - dependency-name: conventional-changelog-conventionalcommits
+        versions: [">=10"]
     groups:
       release-tooling:
         update-types: [minor, patch]
@@ -54,6 +60,10 @@ updates:
     commit-message:
       prefix: ci
       include: scope
+    ignore:
+      # Pinned to branches (stable, nightly, 1.88), not releases: Dependabot
+      # would move all three to the stable branch's commit. Updated by hand.
+      - dependency-name: dtolnay/rust-toolchain
     groups:
       actions:
         update-types: [minor, patch]

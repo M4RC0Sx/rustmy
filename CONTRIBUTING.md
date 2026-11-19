@@ -49,7 +49,8 @@ as [SECURITY.md](SECURITY.md) explains.
   declares the version dynamic and maturin copies Cargo's into the wheel.
   `develop` never receives those commits back.
 - Releases: merging `develop` into `master` plans the version, builds and
-  smoke-tests every wheel (8 platforms, every supported CPython) and the sdist,
+  smoke-tests every wheel (8 platforms, every supported CPython, built with
+  the maturin of `uv.lock`, `scripts/locked_version.py`) and the sdist,
   attests them, verifies the attestations, tags, and publishes to PyPI through
   trusted publishing after the maintainer approves the `pypi` environment. A
   pull request into `master` rehearses all of it without publishing.
@@ -225,7 +226,12 @@ in a tight loop while the server sends the next (network and conversion
 overlap; reading everything first was ~1.4x slower), with no intermediate row
 or value types. `date`/`datetime`/`timedelta` are built directly; `Decimal`
 and JSON go through a cached Python class; dict rows are built in Rust with
-the keys created once per result (`convert::Converter`).
+the keys created once per result (`convert::Converter`). Parameters are told
+apart by exact type first (`Args::from_py`): asking whether any object is a
+`Mapping` runs Python code. A connection keeps no buffer a large packet grew
+past 1 MiB once the operation ends (`release` in `packet.rs`, compressed
+buffers included), and uncompressed payloads that large are written from
+the caller's buffer, packet by packet, without staging.
 
 **Buffered cursors** (`Connection::buffered` with a `Session`,
 `crates/pydriver/src/connection.rs`) keep the connection locked for the whole
@@ -241,27 +247,47 @@ connection's `generation`; a `ResultStream` compares its own on every fetch,
 so a cursor whose rows were discarded raises instead of returning a truncated
 result (and the discarding command warns, pointing at the caller).
 
+**Transport.** `connect_timeout` (15 s unless given, set in
+`connections.py`) bounds opening the socket and every read and write until
+authentication ends; `read_timeout`/`write_timeout` replace it then
+(`Conn::connect`; `crates/proto/tests/timeouts.rs` plays a server that never
+answers). TCP sockets get `TCP_NODELAY` and keepalive through `socket2`
+(probes after 60 s idle, every 10 s where the platform allows setting it).
+
 **TLS and authentication.** TLS through `rustls`; `ssl_mode` is disabled /
 preferred (default) / required / verify_ca / verify_identity. With `ssl_ca`,
 verification uses only that file (as PyMySQL does); verify modes without it
 use the operating system's trust store (`rustls-platform-verifier`). `ssl={...}`
-dicts are accepted for compatibility (`ssl={}` means `required`).
+dicts are accepted for compatibility (`ssl={}` means `required`). The rustls
+configuration is built once per process for each set of TLS options and kept
+while its files are unchanged (`client_config` in `tls.rs` compares size,
+times and inode), so connections skip rereading them and resume TLS
+sessions.
 `caching_sha2_password` and `sha256_password` do full authentication in
 cleartext over TLS or Unix sockets, and with RSA-OAEP over plain TCP: the key
 is requested from the server when needed, as PyMySQL does, or pinned with
-`server_public_key`. A key is accepted only right after the client asked for
+`server_public_key`; `get_server_public_key=False` never requests it and
+fails with `Error::Auth` (2061) instead, as libmysqlclient does by default. A key is accepted only right after the client asked for
 it, never with a pinned one (`requests_key` in `conn.rs`;
-`crates/proto/tests/auth.rs` plays the man in the middle). A logical payload
-may be 64 KiB until authentication succeeds and 1 GiB after, checked from each
-header before reading (`packet.rs`).
+`crates/proto/tests/auth.rs` plays the man in the middle). MariaDB's `parsec`
+derives its key with as many PBKDF2 rounds as the server asks for, bounded
+as MariaDB Connector/C bounds them: what fits in `connect_timeout`
+(`parsec_max_factor`). A logical payload may be 64 KiB until authentication
+succeeds and 1 GiB after, checked from each header before reading
+(`packet.rs`). `Opts`'s `Debug` output hides the password.
 
 **Character sets** (`crates/pydriver/src/charset.rs`, ids in
 `crates/proto/src/charset.rs`). The handshake requests the server's own
 default collation when the connection's character set is the server's, else
-the character set's default and then `SET NAMES` (a server silently ignores a
-collation id it does not know: MariaDB has no gb18030). `collation=` and
+the character set's default, which leaves the session as `SET NAMES` would on
+all nine servers (`test_the_handshake_sets_the_character_set`). The
+exception is a character set some server lacks: it silently ignores a
+collation id it does not know (MariaDB has no gb18030), so `SET NAMES`
+follows (`_HANDSHAKE_MAY_IGNORE` in `connections.py`). `collation=` and
 `set_character_set()` use `SET NAMES`, reapplied after `reset_connection` and
-`change_user`. Queries are built in the connection's character set, escaping
+`change_user`. The session settings of `connect()` (`SET NAMES`, `sql_mode`,
+`autocommit`) go in a single `SET`, before `init_command` (which then
+precedes `autocommit`). Queries are built in the connection's character set, escaping
 text before encoding it; `bytes` go as `X'…'` in multi-byte legacy character
 sets. User and database names go in the connection's character set, the
 password always as UTF-8. **The server's definition of each character set wins
@@ -307,7 +333,9 @@ stay out of the pipeline.
 `cursor(prepared=True)`, SQLAlchemy `?cursorclass=PreparedCursor`). `proto`
 has `Conn::prepare`/`execute`/`close_statement` and a per-connection LRU
 (`connect(statement_cache_size=32)`, cleared by `reset_connection` and
-`change_user`; re-prepares once on error 1615); `binary.rs` holds the typed
+`change_user`; re-prepares once on error 1615, and on 1461, the server's
+`max_prepared_stmt_count`, closes its least recently used statement and
+prepares once more); `binary.rs` holds the typed
 parameters and the binary value decoders. The binary path of `Converter` must
 give **the same objects as text** (`tests/test_prepared.py` checks it with
 hypothesis per column type; `FLOAT` is rounded to 6 significant digits, as the
@@ -316,7 +344,11 @@ others go as text, so DDL and introspection behave as libraries expect. A
 statement the server cannot prepare raises (1295, no silent fallback); a
 `conv=` encoder or a sequence parameter raises `NotSupportedError`.
 `executemany` turns `INSERT … VALUES` into multi-row prepared statements with
-a fixed row count and pipelines the rest. Not for Django's default cursor,
+a fixed row count and pipelines the rest. The last batch is a statement of
+its own row count: splitting it into powers of two prepares far fewer
+statements across calls but costs a round trip per piece, and measured
+slower in every case (1.3x locally, up to 2.9x with 1 ms of latency), so it
+stays one statement. Not for Django's default cursor,
 whose SQL uses `->> %s`, `_binary %s` and parameters in DDL.
 
 **Compression** (`compress=True|"zlib"|"zstd"`, `zstd_level=3`;
@@ -357,8 +389,9 @@ serve Django's schema editor and always return `str`. Error 1690 raises
 into `IntegrityError`. Option files (`read_default_file`/`read_default_group`,
 `python/rustmy/_option_files.py`) follow `my_print_defaults`: explicit
 arguments win, `[client]` and the group in file order, `!include`/
-`!includedir`, no `.mylogin.cnf`. Fetch methods return tuples, `()` when
-exhausted.
+`!includedir`, no `.mylogin.cnf`, and files anyone can write to are ignored
+with a warning (outside Windows), as `my_print_defaults` does. Fetch methods
+return tuples, `()` when exhausted.
 
 **SQLAlchemy**: `rustmy/dialect.py` holds `RustmyMySQLDialect` and
 `RustmyMariaDBDialect` (`mysql+rustmy`, `mariadb+rustmy`, through entry
