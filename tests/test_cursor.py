@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING
+from typing import NamedTuple
 
 import pytest
 
@@ -10,6 +14,9 @@ import rustmy
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from collections.abc import Sequence
+
     from tests.conftest import Server
 
 
@@ -80,6 +87,78 @@ def test_executemany(cursor: rustmy.Cursor) -> None:
 def test_named_parameters(cursor: rustmy.Cursor) -> None:
     cursor.execute("SELECT %(a)s, %(b)s, %(a)s", {"a": 1, "b": "two"})
     assert cursor.fetchone() == (1, "two", 1)
+
+
+class _Row(NamedTuple):
+    a: int
+    b: str
+
+
+class _Tuple(tuple):  # type: ignore[type-arg]
+    __slots__ = ()
+
+
+class _List(list):  # type: ignore[type-arg]
+    pass
+
+
+class _Dict(dict):  # type: ignore[type-arg]
+    pass
+
+
+class _Mapping(Mapping[str, object]):
+    def __init__(self, items: dict[str, object]) -> None:
+        self._items = items
+
+    def __getitem__(self, key: str) -> object:
+        return self._items[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        (1, "x"),
+        [1, "x"],
+        _Row(1, "x"),
+        _Tuple((1, "x")),
+        _List([1, "x"]),
+    ],
+    ids=["tuple", "list", "namedtuple", "tuple-subclass", "list-subclass"],
+)
+def test_sequences_fill_positional_placeholders(
+    cursor: rustmy.Cursor, args: Sequence[object]
+) -> None:
+    assert cursor.mogrify("SELECT %s, %s", args) == "SELECT 1, 'x'"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"a": 1, "b": "x"},
+        _Dict(a=1, b="x"),
+        OrderedDict(a=1, b="x"),
+        MappingProxyType({"a": 1, "b": "x"}),
+        _Mapping({"a": 1, "b": "x"}),
+    ],
+    ids=["dict", "dict-subclass", "ordereddict", "mappingproxy", "mapping"],
+)
+def test_mappings_fill_named_placeholders(
+    cursor: rustmy.Cursor, args: Mapping[str, object]
+) -> None:
+    assert cursor.mogrify("SELECT %(a)s, %(b)s", args) == "SELECT 1, 'x'"
+
+
+@pytest.mark.parametrize("value", [1, "x", b"x"], ids=repr)
+def test_a_single_value_is_one_parameter(cursor: rustmy.Cursor, value: object) -> None:
+    # Not a sequence: a str or bytes is one value, not one per character.
+    expected = {1: "1", "x": "'x'", b"x": "_binary'x'"}
+    assert cursor.mogrify("SELECT %s", value) == f"SELECT {expected[value]}"
 
 
 def test_percent_is_literal_without_args(cursor: rustmy.Cursor) -> None:
