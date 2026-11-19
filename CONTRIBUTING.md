@@ -245,7 +245,11 @@ result (and the discarding command warns, pointing at the caller).
 preferred (default) / required / verify_ca / verify_identity. With `ssl_ca`,
 verification uses only that file (as PyMySQL does); verify modes without it
 use the operating system's trust store (`rustls-platform-verifier`). `ssl={...}`
-dicts are accepted for compatibility (`ssl={}` means `required`).
+dicts are accepted for compatibility (`ssl={}` means `required`). The rustls
+configuration is built once per process for each set of TLS options and kept
+while its files are unchanged (`client_config` in `tls.rs` compares size,
+times and inode), so connections skip rereading them and resume TLS
+sessions.
 `caching_sha2_password` and `sha256_password` do full authentication in
 cleartext over TLS or Unix sockets, and with RSA-OAEP over plain TCP: the key
 is requested from the server when needed, as PyMySQL does, or pinned with
@@ -261,10 +265,15 @@ succeeds and 1 GiB after, checked from each header before reading
 **Character sets** (`crates/pydriver/src/charset.rs`, ids in
 `crates/proto/src/charset.rs`). The handshake requests the server's own
 default collation when the connection's character set is the server's, else
-the character set's default and then `SET NAMES` (a server silently ignores a
-collation id it does not know: MariaDB has no gb18030). `collation=` and
+the character set's default, which leaves the session as `SET NAMES` would on
+all nine servers (`test_the_handshake_sets_the_character_set`). The
+exception is a character set some server lacks: it silently ignores a
+collation id it does not know (MariaDB has no gb18030), so `SET NAMES`
+follows (`_HANDSHAKE_MAY_IGNORE` in `connections.py`). `collation=` and
 `set_character_set()` use `SET NAMES`, reapplied after `reset_connection` and
-`change_user`. Queries are built in the connection's character set, escaping
+`change_user`. The session settings of `connect()` (`SET NAMES`, `sql_mode`,
+`autocommit`) go in a single `SET`, before `init_command` (which then
+precedes `autocommit`). Queries are built in the connection's character set, escaping
 text before encoding it; `bytes` go as `X'…'` in multi-byte legacy character
 sets. User and database names go in the connection's character set, the
 password always as UTF-8. **The server's definition of each character set wins

@@ -1215,21 +1215,7 @@ impl Connection {
         collation: Option<&str>,
     ) -> PyResult<()> {
         let codec = Codec::new(py, charset)?;
-        let mut sql = format!("SET NAMES {}", codec.name());
-        if let Some(collation) = collation {
-            let valid = !collation.is_empty()
-                && collation
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_');
-            if !valid {
-                return Err(ProgrammingError::new_err((
-                    0,
-                    format!("invalid collation name {collation:?}"),
-                )));
-            }
-            sql.push_str(" COLLATE ");
-            sql.push_str(collation);
-        }
+        let sql = format!("SET {}", names_clause(codec.name(), collation)?);
         self.with_conn(py, |conn| conn.query(sql.as_bytes()))?;
         *self.codec.lock().unwrap_or_else(PoisonError::into_inner) = codec;
         Ok(())
@@ -1317,6 +1303,32 @@ impl Connection {
     #[getter]
     fn has_more_results(&self) -> PyResult<bool> {
         self.peek(Conn::has_more_results)
+    }
+}
+
+/// `NAMES <charset>`, with `COLLATE <collation>` when given: the clause of
+/// a `SET` statement switching the session's character set. Both names are
+/// spliced into SQL, so only letters, digits and underscores are accepted.
+#[pyfunction]
+#[pyo3(signature = (charset, collation = None))]
+pub(crate) fn names_clause(charset: &str, collation: Option<&str>) -> PyResult<String> {
+    let mut clause = format!("NAMES {}", sql_name("character set", charset)?);
+    if let Some(collation) = collation {
+        clause.push_str(" COLLATE ");
+        clause.push_str(sql_name("collation", collation)?);
+    }
+    Ok(clause)
+}
+
+fn sql_name<'a>(what: &str, name: &'a str) -> PyResult<&'a str> {
+    let valid = !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if valid {
+        Ok(name)
+    } else {
+        Err(ProgrammingError::new_err((
+            0,
+            format!("invalid {what} name {name:?}"),
+        )))
     }
 }
 

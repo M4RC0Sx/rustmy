@@ -12,9 +12,14 @@
 //! operating system's trust store.
 
 use std::fmt;
+use std::fs;
+use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
+use std::time::SystemTime;
 
 use rustls::ClientConfig;
 use rustls::DigitallySignedStruct;
@@ -88,8 +93,94 @@ pub(crate) fn tls_error(err: impl fmt::Display) -> Error {
     Error::Tls(err.to_string())
 }
 
-/// Builds the rustls configuration for `opts`.
+/// Configurations built so far, the most recently used last. Building one
+/// reads the PEM files and, to verify without `ca`, loads the operating
+/// system's trust store; connections sharing one also resume TLS sessions
+/// (rustls keeps them in the configuration).
+static CONFIGS: Mutex<Vec<(ConfigKey, Arc<ClientConfig>)>> = Mutex::new(Vec::new());
+/// Distinct configurations kept; a process usually needs one or two.
+const CACHED_CONFIGS: usize = 8;
+
+/// What a configuration is built from: the options and the state of each
+/// file they name, so a file replaced or rewritten on disk (a renewed
+/// certificate) gives a new configuration.
+#[derive(PartialEq, Eq)]
+struct ConfigKey {
+    opts: TlsOpts,
+    files: [Option<FileStamp>; 3],
+}
+
+#[derive(PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    /// Device, inode and status change time (seconds, nanoseconds).
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+impl FileStamp {
+    fn of(path: &Path) -> io::Result<Self> {
+        let meta = fs::metadata(path)?;
+        Ok(Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            #[cfg(unix)]
+            identity: {
+                use std::os::unix::fs::MetadataExt as _;
+                (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec())
+            },
+        })
+    }
+}
+
+impl ConfigKey {
+    /// `None` when a file cannot be read: building the configuration then
+    /// reports why (or does not need it), and nothing is cached.
+    fn of(opts: &TlsOpts) -> Option<Self> {
+        let stamp = |path: &Option<PathBuf>| path.as_deref().map(FileStamp::of).transpose();
+        Some(Self {
+            opts: opts.clone(),
+            files: [
+                stamp(&opts.ca).ok()?,
+                stamp(&opts.cert).ok()?,
+                stamp(&opts.key).ok()?,
+            ],
+        })
+    }
+}
+
+/// The rustls configuration for `opts`, built once per process while its
+/// files stay the same.
 pub(crate) fn client_config(opts: &TlsOpts) -> Result<Arc<ClientConfig>> {
+    let Some(key) = ConfigKey::of(opts) else {
+        return build_config(opts);
+    };
+    let cached = |cache: &mut Vec<(ConfigKey, Arc<ClientConfig>)>| {
+        let at = cache.iter().position(|(k, _)| *k == key)?;
+        let entry = cache.remove(at);
+        let config = Arc::clone(&entry.1);
+        cache.push(entry);
+        Some(config)
+    };
+    if let Some(config) = cached(&mut CONFIGS.lock().unwrap_or_else(PoisonError::into_inner)) {
+        return Ok(config);
+    }
+    // Built without the lock: loading the system's trust store is slow.
+    let config = build_config(opts)?;
+    let mut cache = CONFIGS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(built) = cached(&mut cache) {
+        // Another thread built it meanwhile.
+        return Ok(built);
+    }
+    if cache.len() >= CACHED_CONFIGS {
+        cache.remove(0);
+    }
+    cache.push((key, Arc::clone(&config)));
+    Ok(config)
+}
+
+fn build_config(opts: &TlsOpts) -> Result<Arc<ClientConfig>> {
     let provider = Arc::new(ring::default_provider());
     let verifier = verifier(opts, &provider)?;
     let builder = ClientConfig::builder_with_provider(provider)
@@ -282,6 +373,7 @@ impl ServerCertVerifier for AnyHostName {
 mod tests {
     use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use rcgen::BasicConstraints;
     use rcgen::CertificateParams;
@@ -333,7 +425,7 @@ mod tests {
             ca: Some(ca.to_path_buf()),
             ..TlsOpts::default()
         };
-        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
         verifier(&opts, &provider)
             .unwrap()
             .verify_server_cert(
@@ -413,6 +505,35 @@ mod tests {
         };
         let err = client_config(&opts).unwrap_err().to_string();
         assert!(err.contains("/nonexistent/ca.pem"), "{err}");
+    }
+
+    #[test]
+    fn configurations_are_built_once_per_options_and_files() {
+        let f = fixture("cache");
+        let opts = TlsOpts {
+            mode: SslMode::VerifyIdentity,
+            ca: Some(f.ca_path.clone()),
+            ..TlsOpts::default()
+        };
+        let first = client_config(&opts).unwrap();
+        assert!(Arc::ptr_eq(&first, &client_config(&opts).unwrap()));
+        let other_mode = TlsOpts {
+            mode: SslMode::VerifyCa,
+            ..opts.clone()
+        };
+        assert!(!Arc::ptr_eq(&first, &client_config(&other_mode).unwrap()));
+
+        // A renewed CA file gives a new configuration.
+        let renewed = fixture("cache-renewed");
+        std::fs::copy(&renewed.ca_path, &f.ca_path).unwrap();
+        let second = client_config(&opts).unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&second, &client_config(&opts).unwrap()));
+
+        // A file that disappears is reported, not served from the cache.
+        std::fs::remove_file(&f.ca_path).unwrap();
+        let err = client_config(&opts).unwrap_err().to_string();
+        assert!(err.contains(&*f.ca_path.to_string_lossy()), "{err}");
     }
 
     #[test]
