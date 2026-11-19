@@ -76,6 +76,20 @@ def _with_option_file(
     return merged
 
 
+#: Seconds ``connect()`` waits by default for the server to accept and
+#: authenticate the connection.
+_DEFAULT_CONNECT_TIMEOUT = 15.0
+
+
+def _connect_timeout(seconds: float | None) -> float | None:
+    """``connect(connect_timeout=…)`` as the core takes it: the default
+    when not given, and ``None`` (no limit) for ``0``.
+    """
+    if seconds is None:
+        return _DEFAULT_CONNECT_TIMEOUT
+    return None if seconds == 0 else seconds
+
+
 def _compression(compress: object) -> str | None:
     """``connect(compress=…)`` as the algorithm to ask for."""
     if isinstance(compress, str):
@@ -138,6 +152,7 @@ class Connection:
         ssl_key: PathArg | None = None,
         ssl: Mapping[str, object] | bool | None = None,
         server_public_key: PathArg | None = None,
+        get_server_public_key: bool | None = None,
         binary_prefix: bool = True,
         statement_cache_size: int = 32,
         compress: bool | str = False,
@@ -162,10 +177,19 @@ class Connection:
         ``user``, ``password``, ``database``, ``socket``,
         ``default-character-set``, ``init-command``, ``connect-timeout``,
         ``ssl-mode``, ``ssl-ca``, ``ssl-cert``, ``ssl-key``,
-        ``server-public-key-path``, ``multi-statements``,
+        ``server-public-key-path``, ``get-server-public-key``,
+        ``multi-statements``,
         ``return-found-rows``, ``compress``, ``compression-algorithms``,
         ``zstd-compression-level``, ``local-infile`` and
         ``load-data-local-dir``; other options are ignored.
+
+        ``connect_timeout`` (seconds, default 15) bounds opening the
+        connection and every read and write until authentication ends, so a
+        server that accepts the connection but never answers fails too; ``0``
+        waits forever. ``read_timeout`` and ``write_timeout`` (no default)
+        apply from then on. TCP connections send keepalive probes after 60
+        seconds idle, so a connection a firewall or load balancer dropped
+        while it sat in a pool fails within minutes instead of hanging.
 
         ``charset`` is the session's character set (default ``utf8mb4``;
         ``utf8`` means ``utf8mb4``): queries are encoded and text results
@@ -222,7 +246,9 @@ class Connection:
         Prepared statements (:class:`~rustmy.cursors.PreparedCursor`) are
         prepared once per connection: the last ``statement_cache_size`` stay
         prepared on the server, which allows 16,382 across all its
-        connections by default (``max_prepared_stmt_count``).
+        connections by default (``max_prepared_stmt_count``); when it is
+        full (error 1461), the least recently used one is closed and the
+        statement prepared again, once.
 
         TLS: ``ssl_mode`` is one of ``disabled``, ``preferred`` (default),
         ``required`` (encrypted, server not verified), ``verify_ca`` and
@@ -238,6 +264,10 @@ class Connection:
         with the server's public key, which is requested from the server as
         PyMySQL does. ``server_public_key`` (a PEM file) pins the key
         instead, so a man in the middle cannot substitute its own.
+        ``get_server_public_key=False`` never asks for it, as libmysqlclient
+        does by default: those accounts then need TLS, a Unix socket or a
+        pinned key, and fail with :class:`~rustmy.err.OperationalError` 2061
+        otherwise.
         """
         if passwd is not None:
             password = passwd
@@ -258,6 +288,7 @@ class Connection:
                     "connect_timeout": connect_timeout,
                     "init_command": init_command,
                     "server_public_key": server_public_key,
+                    "get_server_public_key": get_server_public_key,
                     "multi_statements": multi_statements,
                     "client_flag": client_flag,
                     "compress": compress,
@@ -283,6 +314,7 @@ class Connection:
             connect_timeout = args["connect_timeout"]
             init_command = args["init_command"]
             server_public_key = args["server_public_key"]
+            get_server_public_key = args["get_server_public_key"]
             multi_statements = args["multi_statements"]
             client_flag = args["client_flag"]
             compress, zstd_level = args["compress"], args["zstd_level"]
@@ -307,7 +339,7 @@ class Connection:
             password="" if password is None else password,
             database=database,
             unix_socket=unix_socket,
-            connect_timeout=connect_timeout,
+            connect_timeout=_connect_timeout(connect_timeout),
             read_timeout=read_timeout,
             write_timeout=write_timeout,
             client_flag=client_flag
@@ -319,6 +351,9 @@ class Connection:
             ssl_key=tls.key,
             server_public_key=(
                 None if server_public_key is None else os.fspath(server_public_key)
+            ),
+            get_server_public_key=(
+                get_server_public_key is None or bool(get_server_public_key)
             ),
             binary_prefix=binary_prefix,
             statement_cache_size=statement_cache_size,

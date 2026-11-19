@@ -120,6 +120,63 @@ def test_unreadable_public_key_file_is_interface_error(
         _plain_login(mysql, user, "fresh-pw", server_public_key=tmp_path / "x.pem")
 
 
+@pytest.mark.parametrize("plugin", PLUGINS)
+def test_without_key_requests_plain_tcp_fails(
+    mysql: Server, create_user: Callable[[str], str], plugin: str
+) -> None:
+    user = create_user(plugin)
+    with pytest.raises(rustmy.OperationalError, match=plugin) as info:
+        _plain_login(mysql, user, "fresh-pw", get_server_public_key=False)
+    assert info.value.args[0] == 2061
+
+
+@pytest.mark.parametrize("plugin", PLUGINS)
+def test_without_key_requests_a_pinned_key_or_tls_works(
+    mysql: Server,
+    create_user: Callable[[str], str],
+    server_public_key: Path,
+    plugin: str,
+) -> None:
+    user = create_user(plugin)
+    with _plain_login(
+        mysql,
+        user,
+        "fresh-pw",
+        server_public_key=server_public_key,
+        get_server_public_key=False,
+    ):
+        pass
+    with mysql.connect(
+        user=user,
+        password="fresh-pw",
+        database=None,
+        ssl_mode="required",
+        get_server_public_key=False,
+    ) as conn:
+        assert conn.tls
+
+
+def test_get_server_public_key_from_an_option_file(
+    mysql: Server, create_user: Callable[[str], str], tmp_path: Path
+) -> None:
+    user = create_user("caching_sha2_password")
+    options = tmp_path / "my.cnf"
+    options.write_text("[client]\nskip-get-server-public-key\n")
+    options.chmod(0o644)
+    with pytest.raises(rustmy.OperationalError) as info:
+        _plain_login(mysql, user, "fresh-pw", read_default_file=options)
+    assert info.value.args[0] == 2061
+    # An argument wins over the file.
+    with _plain_login(
+        mysql,
+        user,
+        "fresh-pw",
+        read_default_file=options,
+        get_server_public_key=True,
+    ):
+        pass
+
+
 @pytest.fixture
 def mariadb(server: Server) -> Server:
     if server.name != "mariadb":

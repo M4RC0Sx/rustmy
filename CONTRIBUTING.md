@@ -246,6 +246,13 @@ connection's `generation`; a `ResultStream` compares its own on every fetch,
 so a cursor whose rows were discarded raises instead of returning a truncated
 result (and the discarding command warns, pointing at the caller).
 
+**Transport.** `connect_timeout` (15 s unless given, set in
+`connections.py`) bounds opening the socket and every read and write until
+authentication ends; `read_timeout`/`write_timeout` replace it then
+(`Conn::connect`; `crates/proto/tests/timeouts.rs` plays a server that never
+answers). TCP sockets get `TCP_NODELAY` and keepalive through `socket2`
+(probes after 60 s idle, every 10 s where the platform allows setting it).
+
 **TLS and authentication.** TLS through `rustls`; `ssl_mode` is disabled /
 preferred (default) / required / verify_ca / verify_identity. With `ssl_ca`,
 verification uses only that file (as PyMySQL does); verify modes without it
@@ -258,7 +265,8 @@ sessions.
 `caching_sha2_password` and `sha256_password` do full authentication in
 cleartext over TLS or Unix sockets, and with RSA-OAEP over plain TCP: the key
 is requested from the server when needed, as PyMySQL does, or pinned with
-`server_public_key`. A key is accepted only right after the client asked for
+`server_public_key`; `get_server_public_key=False` never requests it and
+fails with `Error::Auth` (2061) instead, as libmysqlclient does by default. A key is accepted only right after the client asked for
 it, never with a pinned one (`requests_key` in `conn.rs`;
 `crates/proto/tests/auth.rs` plays the man in the middle). MariaDB's `parsec`
 derives its key with as many PBKDF2 rounds as the server asks for, bounded
@@ -324,7 +332,9 @@ stay out of the pipeline.
 `cursor(prepared=True)`, SQLAlchemy `?cursorclass=PreparedCursor`). `proto`
 has `Conn::prepare`/`execute`/`close_statement` and a per-connection LRU
 (`connect(statement_cache_size=32)`, cleared by `reset_connection` and
-`change_user`; re-prepares once on error 1615); `binary.rs` holds the typed
+`change_user`; re-prepares once on error 1615, and on 1461, the server's
+`max_prepared_stmt_count`, closes its least recently used statement and
+prepares once more); `binary.rs` holds the typed
 parameters and the binary value decoders. The binary path of `Converter` must
 give **the same objects as text** (`tests/test_prepared.py` checks it with
 hypothesis per column type; `FLOAT` is rounded to 6 significant digits, as the
@@ -333,7 +343,11 @@ others go as text, so DDL and introspection behave as libraries expect. A
 statement the server cannot prepare raises (1295, no silent fallback); a
 `conv=` encoder or a sequence parameter raises `NotSupportedError`.
 `executemany` turns `INSERT … VALUES` into multi-row prepared statements with
-a fixed row count and pipelines the rest. Not for Django's default cursor,
+a fixed row count and pipelines the rest. The last batch is a statement of
+its own row count: splitting it into powers of two prepares far fewer
+statements across calls but costs a round trip per piece, and measured
+slower in every case (1.3x locally, up to 2.9x with 1 ms of latency), so it
+stays one statement. Not for Django's default cursor,
 whose SQL uses `->> %s`, `_binary %s` and parameters in DDL.
 
 **Compression** (`compress=True|"zlib"|"zstd"`, `zstd_level=3`;

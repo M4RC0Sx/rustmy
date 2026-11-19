@@ -232,7 +232,27 @@ _FLAG_OPTIONS = {
     "compress": "compress",
     "local-infile": "local_infile",
 }
+#: Switches that are on unless the file turns them off: ``name``,
+#: ``name=0``, ``skip-name`` or ``disable-name``, as MySQL's clients read
+#: boolean options. Unlike flags, the file can turn them off.
+_SWITCH_OPTIONS = {
+    "get-server-public-key": "get_server_public_key",
+}
+_SWITCH_PREFIXES = {"skip-": False, "disable-": False, "enable-": True}
 _FALSE = {"0", "false", "off", "no"}
+
+
+def _switch(name: str, value: str) -> tuple[str, bool] | None:
+    """The ``connect()`` argument and value a switch option sets, if
+    ``name`` is one.
+    """
+    on = value.lower() not in _FALSE
+    for prefix, sets in _SWITCH_PREFIXES.items():
+        if name.startswith(prefix) and name[len(prefix) :] in _SWITCH_OPTIONS:
+            return _SWITCH_OPTIONS[name[len(prefix) :]], on is sets
+    if name in _SWITCH_OPTIONS:
+        return _SWITCH_OPTIONS[name], on
+    return None
 
 
 def connect_args(options: dict[str, str]) -> dict[str, object]:
@@ -251,6 +271,8 @@ def connect_args(options: dict[str, str]) -> dict[str, object]:
                 raise ValueError(msg) from None
         elif name in _FLAG_OPTIONS:
             args[_FLAG_OPTIONS[name]] = value.lower() not in _FALSE
+        elif switch := _switch(name, value):
+            args[switch[0]] = switch[1]
         elif name == "compression-algorithms" and value:
             # A list the server picks from; zstd falls back to zlib here too.
             algorithms = {a.strip().lower() for a in value.split(",")}

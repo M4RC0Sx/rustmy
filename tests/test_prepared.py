@@ -29,6 +29,7 @@ from rustmy.cursors import SSCursor
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from collections.abc import Iterator
 
     from tests.conftest import Server
@@ -212,6 +213,62 @@ def _status(conn: rustmy.Connection, name: str) -> int:
     row = cursor.fetchone()
     assert row is not None
     return int(row[1])
+
+
+@pytest.fixture
+def statement_room(server: Server) -> Iterator[Callable[[int], None]]:
+    """Sets the server's ``max_prepared_stmt_count`` to the statements
+    prepared now plus the given room; restored afterwards."""
+    with server.connect(user="root", database=None, autocommit=True) as root:
+        cursor = root.cursor()
+        cursor.execute("SELECT @@GLOBAL.max_prepared_stmt_count")
+        (before,) = cursor.fetchone() or (None,)
+
+        def leave(room: int) -> None:
+            cursor.execute("SHOW GLOBAL STATUS LIKE 'Prepared_stmt_count'")
+            (_, prepared) = cursor.fetchone() or ("", 0)
+            cursor.execute(
+                "SET GLOBAL max_prepared_stmt_count = %s", (int(prepared) + room,)
+            )
+
+        try:
+            yield leave
+        finally:
+            cursor.execute("SET GLOBAL max_prepared_stmt_count = %s", (before,))
+
+
+def test_a_full_server_frees_a_cached_statement(
+    server: Server, statement_room: Callable[[int], None]
+) -> None:
+    with server.connect() as conn:
+        cursor = conn.cursor(prepared=True)
+        cursor.execute("SELECT %s", (1,))
+        cursor.execute("SELECT %s, %s", (1, 2))
+        statement_room(0)
+        # Error 1461 on preparing: the least recently used one is closed
+        # and the statement prepared again.
+        closes = _status(conn, "Com_stmt_close")
+        cursor.execute("SELECT %s, %s, %s", (1, 2, 3))
+        assert cursor.fetchall() == ((1, 2, 3),)
+        assert _status(conn, "Com_stmt_close") - closes == 1
+        cursor.execute("SELECT %s, %s", (4, 5))  # still cached
+        assert cursor.fetchall() == ((4, 5),)
+        assert _status(conn, "Com_stmt_close") - closes == 1
+
+
+def test_a_full_server_with_nothing_cached_raises(
+    server: Server, statement_room: Callable[[int], None]
+) -> None:
+    with server.connect() as conn:
+        statement_room(0)
+        with pytest.raises(rustmy.DatabaseError) as info:
+            conn.cursor(prepared=True).execute("SELECT %s", (1,))
+        assert info.value.args[0] == 1461
+        # The connection carries on.
+        statement_room(1)
+        cursor = conn.cursor(prepared=True)
+        cursor.execute("SELECT %s", (1,))
+        assert cursor.fetchall() == ((1,),)
 
 
 def test_statements_are_prepared_once_and_evicted(server: Server) -> None:
