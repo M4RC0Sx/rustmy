@@ -3,6 +3,11 @@ THIRD-PARTY LICENSES
 rustmy's wheels contain the following Rust crates, compiled in. Their licenses
 follow, grouped by license; each lists the crates that use it.
 
+The Rust standard library (std, core, alloc and the crates they depend on,
+https://github.com/rust-lang/rust) is compiled in as well. It is copyright
+the Rust Project Developers and licensed under the MIT license or the Apache
+License 2.0, at your option; both texts are below.
+
 ================================================================================
 Apache License 2.0 (Apache-2.0)
 --------------------------------------------------------------------------------

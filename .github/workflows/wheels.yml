@@ -19,10 +19,12 @@ on:
       - Cargo.lock
       - crates/*/Cargo.toml
       - pyproject.toml
+      - uv.lock
       - about.toml
       - about.hbs
       - THIRD-PARTY-LICENSES
       - scripts/set_version.py
+      - scripts/locked_version.py
       - scripts/smoke_test.py
       - scripts/smoke_wheels.sh
   workflow_dispatch:
@@ -91,8 +93,14 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: echo "INTERPRETERS=$PLATFORM_PYTHONS" >> "$GITHUB_ENV"
+      # The maturin of uv.lock (development's, kept current by Dependabot)
+      # builds the release too, not whichever is latest that day.
+      - name: Maturin version
+        shell: bash
+        run: echo "MATURIN_VERSION=$(uv run --no-project scripts/locked_version.py maturin)" >> "$GITHUB_ENV"
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
+          maturin-version: v${{ env.MATURIN_VERSION }}
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
           args: --release --locked --out dist --interpreter ${{ env.INTERPRETERS }}
@@ -129,8 +137,14 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: uv run --no-project scripts/set_version.py "$VERSION"
+      # The maturin of uv.lock (development's, kept current by Dependabot)
+      # builds the release too, not whichever is latest that day.
+      - name: Maturin version
+        shell: bash
+        run: echo "MATURIN_VERSION=$(uv run --no-project scripts/locked_version.py maturin)" >> "$GITHUB_ENV"
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
+          maturin-version: v${{ env.MATURIN_VERSION }}
           command: sdist
           args: --out dist
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2

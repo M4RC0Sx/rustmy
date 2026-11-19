@@ -49,7 +49,8 @@ as [SECURITY.md](SECURITY.md) explains.
   declares the version dynamic and maturin copies Cargo's into the wheel.
   `develop` never receives those commits back.
 - Releases: merging `develop` into `master` plans the version, builds and
-  smoke-tests every wheel (8 platforms, every supported CPython) and the sdist,
+  smoke-tests every wheel (8 platforms, every supported CPython, built with
+  the maturin of `uv.lock`, `scripts/locked_version.py`) and the sdist,
   attests them, verifies the attestations, tags, and publishes to PyPI through
   trusted publishing after the maintainer approves the `pypi` environment. A
   pull request into `master` rehearses all of it without publishing.
