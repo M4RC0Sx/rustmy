@@ -1,0 +1,32 @@
+name: Audit
+
+# Weekly (and on demand): RustSec advisories for every crate in Cargo.lock.
+# CI checks them on every push and pull request, but a new advisory against a
+# release already published would otherwise wait for the next one.
+on:
+  schedule:
+    - cron: "0 5 * * 1" # Mondays 05:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    strategy:
+      fail-fast: false
+      matrix:
+        # master, what users have, and develop, where fixes land. (Scheduled
+        # runs start from master, so each branch is checked out by name.)
+        branch: [develop, master]
+    name: RustSec advisories (${{ matrix.branch }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.branch }}
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
+        with:
+          command: check
+          command-arguments: advisories

@@ -31,14 +31,18 @@ jobs:
     outputs:
       version: ${{ steps.next.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
           cache: npm
-      - run: npm ci
+      # No install scripts: the release tooling needs none, and the release
+      # job below runs it with a token that can push.
+      - run: npm ci --ignore-scripts
+      - run: npm audit signatures
       - name: Next version
         id: next
         env:
@@ -64,6 +68,12 @@ jobs:
   build:
     needs: plan
     if: needs.plan.outputs.version != ''
+    # wheels.yml attests what it builds for a release (see there).
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     uses: ./.github/workflows/wheels.yml
     with:
       version: ${{ needs.plan.outputs.version }}
@@ -74,6 +84,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write # release commit, tag and GitHub release
+      attestations: read # provenance check of the wheels
       issues: write # comments on the issues a release fixes
       pull-requests: write # and on the pull requests it ships
     steps:
@@ -82,25 +93,38 @@ jobs:
       - name: Release token
         id: app-token
         if: vars.RELEASE_APP_CLIENT_ID != ''
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token || github.token }}
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
           cache: npm
-      - uses: astral-sh/setup-uv@v10.3.3
-      - run: npm ci
-      - uses: actions/download-artifact@v8
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: npm ci --ignore-scripts
+      - run: npm audit signatures
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: wheels-*
           merge-multiple: true
           path: dist
+      # Every file must be exactly what the build jobs attested: nothing else
+      # in this run (an action, a cache) replaced it in between. Checked
+      # before anything is tagged, and again before publishing.
+      - name: Verify provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for file in dist/*; do
+            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/wheels.yml" >/dev/null
+          done
+          echo "$(ls dist | wc -l) files verified"
       - name: Release
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
@@ -114,18 +138,31 @@ jobs:
     needs: release
     runs-on: ubuntu-24.04
     # Trusted publishing: PyPI accepts this workflow's OIDC token for this
-    # environment (configured once on PyPI); no reviewers, no stored secret.
+    # environment (configured once on PyPI); no stored secret. The environment
+    # requires the maintainer's approval, so nothing reaches PyPI unattended
+    # (the GitHub release is already out by then).
     environment:
       name: pypi
       url: https://pypi.org/project/rustmy/
     permissions:
       id-token: write
+      attestations: read
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: wheels-*
           merge-multiple: true
           path: dist
-      - uses: pypa/gh-action-pypi-publish@v1.14.3
+      # No checkout here (the job stays minimal): gh verifies each file.
+      - name: Verify provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for file in dist/*; do
+            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/wheels.yml" >/dev/null
+          done
+          echo "$(ls dist | wc -l) files verified"
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: dist
