@@ -30,7 +30,7 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
-      - uses: dtolnay/rust-toolchain@6a52aad76a94a5fbc50d567bb5be24419801c1fb # nightly
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # nightly
       # cargo-fuzz has no @<tool> shortcut tag in install-action (that ref is
       # a stale branch that installs nothing): name it as a tool instead.
       - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
