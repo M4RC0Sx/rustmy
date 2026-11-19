@@ -2,6 +2,31 @@
 
 All notable changes to rustmy are documented in this file. Versions follow [Semantic Versioning](https://semver.org) and entries come from [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.2.0](https://github.com/M4RC0Sx/rustmy/compare/v1.1.0...v1.2.0) (2026-11-19)
+
+### Features
+
+* compressed protocol with zlib and zstd (compress=) ([#32](https://github.com/M4RC0Sx/rustmy/issues/32)) ([5b89ed4](https://github.com/M4RC0Sx/rustmy/commit/5b89ed46efd0ea9168c929f983116c66a28fced7))
+* LOAD DATA LOCAL INFILE restricted to local_infile_dir ([#33](https://github.com/M4RC0Sx/rustmy/issues/33)) ([5013767](https://github.com/M4RC0Sx/rustmy/commit/501376738780a1b152592f0775e8059efdbe553a))
+* prepared statements through PreparedCursor and the binary protocol ([#31](https://github.com/M4RC0Sx/rustmy/issues/31)) ([cd2d75c](https://github.com/M4RC0Sx/rustmy/commit/cd2d75ced3ada51aaa76e8130c09c0bbea5080fa))
+
+### Bug Fixes
+
+* accept an RSA key only when requested, cap payload sizes, harden LOCAL INFILE checks ([#36](https://github.com/M4RC0Sx/rustmy/issues/36)) ([5354508](https://github.com/M4RC0Sx/rustmy/commit/5354508f5ba765c08e2b3e306d398b77af9cbddd))
+
+### Performance Improvements
+
+* recover the row reading and interpolation cost of prepared statements ([#34](https://github.com/M4RC0Sx/rustmy/issues/34)) ([7ce0802](https://github.com/M4RC0Sx/rustmy/commit/7ce080286068d3a7660ee23c45344d01067bfde4))
+
+### Continuous Integration
+
+* pin actions by commit, attest release artifacts, Dependabot and weekly advisories ([#37](https://github.com/M4RC0Sx/rustmy/issues/37)) ([87de56b](https://github.com/M4RC0Sx/rustmy/commit/87de56b58eb8389cb84a49111027ca0827d9e365))
+* stamp the release version under bash on Windows too ([1d5084c](https://github.com/M4RC0Sx/rustmy/commit/1d5084c2000f75cbe7cb6a4a31b2845c8a2fdb7c))
+
+### Miscellaneous Chores
+
+* issue and PR templates, Codecov coverage, leak check, showcase benchmarks and README rework ([#35](https://github.com/M4RC0Sx/rustmy/issues/35)) ([8ead10b](https://github.com/M4RC0Sx/rustmy/commit/8ead10b04c5a268809b630a324095c48fa8adb81))
+
 ## [1.1.0](https://github.com/M4RC0Sx/rustmy/compare/v1.0.1...v1.1.0) (2026-11-17)
 
 ### Features

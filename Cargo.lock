@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "rustmy-proto"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "ed25519-dalek",
  "flate2",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "rustmy-pydriver"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "pyo3",
  "rustmy-proto",
