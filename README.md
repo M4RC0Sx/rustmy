@@ -788,6 +788,9 @@ downloaded:
 gh attestation verify rustmy-*.whl --repo M4RC0Sx/rustmy
 ```
 
+To work on rustmy itself, [CONTRIBUTING.md](CONTRIBUTING.md) covers the
+setup, the test servers and suites, and the design behind the code.
+
 ## Built with
 
 - [PyO3](https://github.com/PyO3/pyo3) and [maturin](https://github.com/PyO3/maturin): Rust bindings and packaging for Python.
