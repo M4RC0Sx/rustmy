@@ -280,6 +280,47 @@ fn refuses_symbolic_links_out_of_the_directory() {
 }
 
 #[test]
+fn refuses_directories() {
+    let dir = TempDir::new();
+    let sub = dir.0.join("sub");
+    fs::create_dir(&sub).unwrap();
+    let name = sub.to_str().unwrap().to_owned();
+    let sql = format!("LOAD DATA LOCAL INFILE '{name}' INTO TABLE t");
+    let (port, server) = serve(move |peer| {
+        peer.query();
+        assert_eq!(peer.request(name.as_bytes()), b"");
+    });
+    let mut conn = connect(port, Some(&dir.0));
+    let reason = rejected(conn.query(sql.as_bytes()));
+    assert!(reason.contains("not a regular file"), "{reason}");
+    server.join().unwrap();
+}
+
+/// Opening a FIFO would block until something writes to it, with the
+/// connection held: it is refused without being opened.
+#[cfg(unix)]
+#[test]
+fn refuses_fifos_without_opening_them() {
+    let dir = TempDir::new();
+    let fifo = dir.0.join("fifo.csv");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success(), "mkfifo failed");
+    let name = fifo.to_str().unwrap().to_owned();
+    let sql = format!("LOAD DATA LOCAL INFILE '{name}' INTO TABLE t");
+    let (port, server) = serve(move |peer| {
+        peer.query();
+        assert_eq!(peer.request(name.as_bytes()), b"");
+    });
+    let mut conn = connect(port, Some(&dir.0));
+    let reason = rejected(conn.query(sql.as_bytes()));
+    assert!(reason.contains("not a regular file"), "{reason}");
+    server.join().unwrap();
+}
+
+#[test]
 fn refuses_everything_when_disabled() {
     let dir = TempDir::new();
     let path = dir.file("data.csv", b"1\n");
