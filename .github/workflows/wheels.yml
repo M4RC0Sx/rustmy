@@ -68,6 +68,9 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Stamp the release version
         if: inputs.version != ''
+        # bash on Windows too: PowerShell reads environment variables as
+        # $env:VERSION, and its $VERSION is an empty variable of its own.
+        shell: bash
         env:
           VERSION: ${{ inputs.version }}
         run: uv run --no-project scripts/set_version.py "$VERSION"
@@ -120,6 +123,9 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Stamp the release version
         if: inputs.version != ''
+        # bash on Windows too: PowerShell reads environment variables as
+        # $env:VERSION, and its $VERSION is an empty variable of its own.
+        shell: bash
         env:
           VERSION: ${{ inputs.version }}
         run: uv run --no-project scripts/set_version.py "$VERSION"
