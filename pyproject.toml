@@ -82,7 +82,10 @@ dev = [
 # mysqlclient needs libmysqlclient + pkg-config to build, so it stays out of
 # the default sync: `uv sync --group bench`.
 bench = [
+    # Only to compare with in benches/showcase.py; never shipped.
+    "django>=5.2",
     "matplotlib>=3.10",
+    "mysql-connector-python>=9.4",
     "mysqlclient>=2.2",
     "pytest-benchmark>=5.1",
 ]
@@ -207,7 +210,10 @@ exclude = ['^tests/dbapi20\.py$']  # see the tests.dbapi20 override below
 [[tool.mypy.overrides]]
 # Benchmark-only dependencies (bench group, absent from the dev env); the
 # reference drivers ship no type information either.
-module = ["MySQLdb", "MySQLdb.*", "pymysql", "pymysql.*", "matplotlib", "matplotlib.*"]
+module = [
+    "MySQLdb", "MySQLdb.*", "pymysql", "pymysql.*", "matplotlib", "matplotlib.*",
+    "mysql", "mysql.*", "django", "django.*",
+]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

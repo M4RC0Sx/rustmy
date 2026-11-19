@@ -37,3 +37,5 @@ htmlcov/
 # Release tooling (npm ci)
 node_modules/
 .release-version
+
+lcov.info

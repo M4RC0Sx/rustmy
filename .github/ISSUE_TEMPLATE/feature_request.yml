@@ -1,0 +1,22 @@
+name: Feature request
+description: Something rustmy does not do yet.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The problem or use case, rather than a solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: >
+        How it could look in rustmy. If another driver (mysqlclient, PyMySQL,
+        mysql-connector-python) already offers it, say how it works there.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you have tried

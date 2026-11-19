@@ -9,6 +9,35 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "asgiref"
+version = "3.12.1"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version < '3.11'",
+]
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e6/26/3b59f2bdae5f640389becb1f673cded775287f5fc4f816309d9ca9a3f93d/asgiref-3.12.1.tar.gz", hash = "sha256:59dcb51c272ad209d59bed5708a64a333083e86017d7fcdd67498eeab7784340", size = 42378, upload-time = "2026-07-14T09:56:18.087Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/1b/54f4ad77cd8a584fa70746c47df988e002cf1ee1eba43364d46f87803647/asgiref-3.12.1-py3-none-any.whl", hash = "sha256:fe386d1c2bff7259ea95929266d12a8cf9a8b5a1c2598402967d8792e7a7c094", size = 25478, upload-time = "2026-07-14T09:56:16.926Z" },
+]
+
+[[package]]
+name = "asgiref"
+version = "3.13.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.15'",
+    "python_full_version >= '3.12' and python_full_version < '3.15'",
+    "python_full_version == '3.11.*'",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6b/90/f5fce14e95fccf53b58e8e2c47cd84d40d105d64073ae1ac75166db150e0/asgiref-3.13.0.tar.gz", hash = "sha256:034cc8cbf72d00553b4be256703ac545120b4e50af13b49dec99da899aeeecb4", size = 52941, upload-time = "2026-10-23T08:13:14.715Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/b0/ec211e1f7966247cb6469158d856bac9aa4c2fe13621bd6a352e4f850453/asgiref-3.13.0-py3-none-any.whl", hash = "sha256:f9596a2434512686473d50f96ff6207fbba49ae1a785dfac614df4aeb085674d", size = 27593, upload-time = "2026-10-23T08:13:13.394Z" },
+]
+
+[[package]]
 name = "ast-serialize"
 version = "0.13.1"
 source = { registry = "https://pypi.org/simple" }
@@ -956,6 +985,43 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a9/95/a3dbbb5028f35eafb79008e7522a75244477d2838f38cbb722248dabc2a8/cycler-0.12.1.tar.gz", hash = "sha256:88bb128f02ba341da8ef447245a9e138fae777f6a23943da4540077d3601eb1c", size = 7615, upload-time = "2023-10-07T05:32:18.335Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e7/05/c19819d5e3d95294a6f5947fb9b9629efb316b96de511b418c53d245aae6/cycler-0.12.1-py3-none-any.whl", hash = "sha256:85cef7cff222d8644161529808465972e51340599459b8ac3ccbac5a854e0d30", size = 8321, upload-time = "2023-10-07T05:32:16.783Z" },
+]
+
+[[package]]
+name = "django"
+version = "5.2.19"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version == '3.11.*'",
+    "python_full_version < '3.11'",
+]
+dependencies = [
+    { name = "asgiref", version = "3.12.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version != '3.11.*'" },
+    { name = "asgiref", version = "3.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "sqlparse" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/02/29/a487a108caa76430c8b616aa90a6d09cf431306112c14093e6f0a7454e17/django-5.2.19.tar.gz", hash = "sha256:ad03d8abc51dbff95ebf34b27123cf0c26a3b62db7ba0cd520783686362533d1", size = 10969285, upload-time = "2026-11-03T15:22:09.468Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3c/fb/65b4e897d1268288a46457493d9aec6541be8be08e0093a93cc101c03ab2/django-5.2.19-py3-none-any.whl", hash = "sha256:5965d974a5218a2b68a11dd1276434707f23886525c23f0598eccedaf4f4ca00", size = 8319631, upload-time = "2026-11-03T15:22:03.67Z" },
+]
+
+[[package]]
+name = "django"
+version = "6.1.3"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.15'",
+    "python_full_version >= '3.12' and python_full_version < '3.15'",
+]
+dependencies = [
+    { name = "asgiref", version = "3.13.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "sqlparse" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/55/79/49a609ea76ec51404b482932e33f1e6858946b920232c11b11a25bea3032/django-6.1.3.tar.gz", hash = "sha256:b5d2d9e35295065d13b1927b3f19a59bd119f737aa6299def14ccca1ae3c8c0d", size = 11306257, upload-time = "2026-11-03T15:21:26.142Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/77/f2/adbe0352c6673f7b608724be5f69962c80ba1d06f8ed60fa4bfbec258b08/django-6.1.3-py3-none-any.whl", hash = "sha256:a0530e3fdac55d34ccc5893c36f6c57d7a7083064f3d414537e51473648b3290", size = 8424610, upload-time = "2026-11-03T15:21:19.64Z" },
 ]
 
 [[package]]
@@ -1976,6 +2042,34 @@ wheels = [
 ]
 
 [[package]]
+name = "mysql-connector-python"
+version = "26.10.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/21/a8/655982dc4208de67801442da33604e0c09ee6997aea27fc1d55a605ba8a0/mysql_connector_python-26.10.0.tar.gz", hash = "sha256:cdc02299905b6bc335de396246e751e7c568c8cf61f3abc38c7fec8b0b0c4580", size = 12258481, upload-time = "2026-10-22T11:40:25.453Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/66/9b2bd00cdbd8ca052701e43c1cc94bd1c48241d795d08b3aa99130985269/mysql_connector_python-26.10.0-cp310-cp310-macosx_14_0_arm64.whl", hash = "sha256:af96f4fd35570e804fc896a741ab4645ae1f949173952106fec6b287f9ecb52d", size = 20004272, upload-time = "2026-10-22T11:38:54.157Z" },
+    { url = "https://files.pythonhosted.org/packages/51/d0/f1739da96d280559e23c5870fec08e00598b84e82f97a975344b6137acb9/mysql_connector_python-26.10.0-cp310-cp310-manylinux_2_28_aarch64.whl", hash = "sha256:a7c9faae4b05968fa3657c081a9c9e9cbac42b9e24be0864cc0c6d3fc666a7ad", size = 21720308, upload-time = "2026-10-22T11:38:56.315Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/33/3724bd5182a2edb0a34626266f0d0c6d23a444768085cd49c923fdc61f91/mysql_connector_python-26.10.0-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:8e0c27da9159a716232e375e147c80f35e5b993db4d31e657dfa690434637fea", size = 21532261, upload-time = "2026-10-22T11:38:58.777Z" },
+    { url = "https://files.pythonhosted.org/packages/10/05/94aa51892889f42695194a9f08ce65a028ca2e00b6c0c11db023184305de/mysql_connector_python-26.10.0-cp310-cp310-win_amd64.whl", hash = "sha256:b7f5d5b68700d4f7306c13e8a1548c59e65c5cada2f98bdefbbf91a696fcf2c9", size = 17684463, upload-time = "2026-10-22T11:39:01.097Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/4d/a3cd2507bc14d5e36e9bcf88f18bcdc62d4b5e53bf23631feca02e7202d4/mysql_connector_python-26.10.0-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:d21cf597fdf1bfbecf22f10d41d12971aa10e7fda0463ad8f0ffdf9336140432", size = 20004250, upload-time = "2026-10-22T11:39:03.504Z" },
+    { url = "https://files.pythonhosted.org/packages/d7/ab/c3fbd904f6d2c28e99193aec834590dce4d62bf25615854b351168442350/mysql_connector_python-26.10.0-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:cec173a1ba34469a9bacc5994c3f8999b8f2990fad916dc1674a3a87c9798edd", size = 21729646, upload-time = "2026-10-22T11:39:05.783Z" },
+    { url = "https://files.pythonhosted.org/packages/53/bd/a399290c3f1e01afe958f39c13b0841619b365fbd14a7b30070fa6bb99a0/mysql_connector_python-26.10.0-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:d82d235beb404cbc3b32c90ec8d5bb42e734dd84ffc8e15fdacbe141608c7d9e", size = 21541585, upload-time = "2026-10-22T11:39:07.998Z" },
+    { url = "https://files.pythonhosted.org/packages/87/e3/24c3238041c3458fda7081fc919b12d997f919250c184b62efa47817900a/mysql_connector_python-26.10.0-cp311-cp311-win_amd64.whl", hash = "sha256:89e3a16f644a64666b90f611a94d6764691caa621c30ac553eb3a06e727b5d16", size = 17683806, upload-time = "2026-10-22T11:39:10.009Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/8f/3cf34956b295f53ac355745d3c9c3e75cfafbae2ea113a2eb2f28a730a89/mysql_connector_python-26.10.0-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:4fb5bf238a89451a2695bd43fc9db6baaac824c125b0252dc1843edff6fc590e", size = 20008038, upload-time = "2026-10-22T11:39:12.169Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/34/67f9a711f9579a22da2d24c6da0a67c84feb1d16c659416b14c997ef91fd/mysql_connector_python-26.10.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:4c2cba134b4820a2fe236ae612c09c183ac8a417e423532d97f3d1d13b0eea1a", size = 21730856, upload-time = "2026-10-22T11:39:14.479Z" },
+    { url = "https://files.pythonhosted.org/packages/40/62/7f8065288c4269b1b92c8d8b78c0333dc254bdb597a6feff18f86391ea27/mysql_connector_python-26.10.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:2f6d6e37eb1d2d5e47054d84eb5ceeb02d3d960d87fac549acece3dda4caa504", size = 21543145, upload-time = "2026-10-22T11:39:16.697Z" },
+    { url = "https://files.pythonhosted.org/packages/80/ba/af82d2ad511140004ab474fc7bc012d468ce8d35fb45613ca850c38f9972/mysql_connector_python-26.10.0-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:385b7906baec66c0aa4bf2bf2663cd8745f32a7b7878b54fe80bc53784638ca2", size = 20008154, upload-time = "2026-10-22T11:39:18.948Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/05/a291fb5915ebadc2ca06bd84caa780325fe0a73bb6d2cb053ea4c3dde9ac/mysql_connector_python-26.10.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:c80d447825417010b50c5fa67a9917fc4b2be2a4bc70bfdb052c3459dd0ab3dc", size = 21730986, upload-time = "2026-10-22T11:39:21.024Z" },
+    { url = "https://files.pythonhosted.org/packages/da/62/9f428735c4f37e65a80647af156120ceb8fe243010bf7c7ac077ef23c0cc/mysql_connector_python-26.10.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:97371eb3bd3372c7b658a3a5fb91919d3fab100115ba346ee6708fcf08c1d150", size = 21542976, upload-time = "2026-10-22T11:39:23.621Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/7e/fcffa03780a5c51427cf70b419eac9e687e467074d470423ecd9a1279ae7/mysql_connector_python-26.10.0-cp313-cp313-win_amd64.whl", hash = "sha256:d8656aef64f2d1609ef933ec16730c0ef72da9bdfda5a484d50e2fab3ec6ce45", size = 17684752, upload-time = "2026-10-22T11:39:25.58Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/54/140d488e72dcc5caecec10826f5a2717fa8054d294584ed4307d675a0e6e/mysql_connector_python-26.10.0-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:cacbbdeb9f159c55621651b0b0468c2a8c627cd4e598fbb012bfacf883bb734b", size = 20008121, upload-time = "2026-10-22T11:39:27.522Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/b9/55b0634077e23ceeeb2433a3dd44999ac6703abbe384cb01c57c9564a93d/mysql_connector_python-26.10.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:8d196364b8f39076a23b3e6ccf3c33e16b1bc53e028aa64778e5b3a0369f8a0f", size = 21732531, upload-time = "2026-10-22T11:39:29.906Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/17/9ae0959cfb06cb97a718e4c39b78404d264a254c1b11045bc98c6790f9c2/mysql_connector_python-26.10.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:4e586dd1b2906363a490c23c60e95857e0aa075f7b7bf7eed7d92afa7efba122", size = 21544085, upload-time = "2026-10-22T11:39:31.895Z" },
+    { url = "https://files.pythonhosted.org/packages/06/25/8c29f8a70e7788ca8d9cb45bb8d1247b0fed5fdbbc2b656c74db1460cd90/mysql_connector_python-26.10.0-cp314-cp314-win_amd64.whl", hash = "sha256:40dc3091b1785058be861afdd8860d838bcca8cebfa85ed42de31cc079cab536", size = 18210178, upload-time = "2026-10-22T11:39:34.209Z" },
+    { url = "https://files.pythonhosted.org/packages/91/24/7b2f91476ae6c182f69854dd8d12c51c2e11c5b887b8f85b48b1c9394159/mysql_connector_python-26.10.0-py2.py3-none-any.whl", hash = "sha256:85643c8a38b7d089ed30b270d842b96a2529354eebea4aa4d8e4755a630487e8", size = 480854, upload-time = "2026-10-22T11:39:36.248Z" },
+]
+
+[[package]]
 name = "mysqlclient"
 version = "2.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2782,8 +2876,11 @@ sqlalchemy = [
 
 [package.dev-dependencies]
 bench = [
+    { name = "django", version = "5.2.19", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "django", version = "6.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "matplotlib", version = "3.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "mysql-connector-python" },
     { name = "mysqlclient" },
     { name = "pytest-benchmark" },
 ]
@@ -2814,7 +2911,9 @@ provides-extras = ["sqlalchemy"]
 
 [package.metadata.requires-dev]
 bench = [
+    { name = "django", specifier = ">=5.2" },
     { name = "matplotlib", specifier = ">=3.10" },
+    { name = "mysql-connector-python", specifier = ">=9.4" },
     { name = "mysqlclient", specifier = ">=2.2" },
     { name = "pytest-benchmark", specifier = ">=5.1" },
 ]
@@ -2996,6 +3095,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/16/9e/b86c9b7e02bb3142d6bf464262b3cf617522561515cebae298be35bd6f97/sqlalchemy-2.1.9-cp315-cp315t-win_amd64.whl", hash = "sha256:65b8257c62c6151f8c5f03680fe6e470153a94c92196e9e5d00be3f1510edae3", size = 2521333, upload-time = "2026-11-16T21:19:57.177Z" },
     { url = "https://files.pythonhosted.org/packages/8f/13/a7dd1788974530f5e402656d310e32b97606b684d82dbc57c885c97f518b/sqlalchemy-2.1.9-cp315-cp315t-win_arm64.whl", hash = "sha256:c7d8e10c1f9b82c21be141a21f3fb94469eec820d946c14544e0734de42e7614", size = 2443055, upload-time = "2026-11-16T21:53:43.918Z" },
     { url = "https://files.pythonhosted.org/packages/7a/ee/9926603a1f7e88b41bc0d1e068e889fc84981553fb4e6037426d6b174da3/sqlalchemy-2.1.9-py3-none-any.whl", hash = "sha256:449fed5c2caa3b278cc57499d09db001fb3f28dc7f18affc48142aee4dcc0cdf", size = 2071860, upload-time = "2026-11-16T21:16:28.413Z" },
+]
+
+[[package]]
+name = "sqlparse"
+version = "0.6.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7e/e0/361c764ea58cc1a75f7b4b424a74b08449db8bfa5e9199c7275999fdd1b9/sqlparse-0.6.1.tar.gz", hash = "sha256:ca722573f848ff2d30e40ea30f53a104b7dea7635ea9285891263eb2c58fb6e7", size = 182236, upload-time = "2026-11-01T18:06:45.951Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/ff/2fee788e82e75be8f210c65c5d103bf44c880e3769c884652a4cd911b8ba/sqlparse-0.6.1-py3-none-any.whl", hash = "sha256:3be5a72d04c873d690d7c6dedd33d6fae2ef82759881ceec02fc2efd0cba564f", size = 51200, upload-time = "2026-11-01T18:06:47.434Z" },
 ]
 
 [[package]]
