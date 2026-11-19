@@ -156,6 +156,7 @@ def connect(
     ssl_cert: str | PathLike[str] | None = None,
     ssl_key: str | PathLike[str] | None = None,
     server_public_key: str | PathLike[str] | None = None,
+    get_server_public_key: bool = True,
     binary_prefix: bool = True,
     statement_cache_size: int = 32,
     compress: str | None = None,

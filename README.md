@@ -311,7 +311,9 @@ conn.close()
 ```
 
 `unix_socket="/run/mysqld/mysqld.sock"` connects through a socket instead.
-`autocommit` is off by default, as PEP 249 asks: call `conn.commit()` to keep
+`connect_timeout` (15 seconds unless given; `0` waits forever) covers the
+whole connection, authentication included, so a server that accepts it but
+never answers fails too. `autocommit` is off by default, as PEP 249 asks: call `conn.commit()` to keep
 your changes, or pass `autocommit=True`.
 
 Settings can also come from a MySQL option file, as with the `mysql` client:
@@ -411,7 +413,11 @@ with conn.cursor(prepared=True) as cursor:
   without placeholders has nothing to bind and runs as a `Cursor` runs it.
 - The last `statement_cache_size` statements (32 by default, a `connect()`
   argument) stay prepared on the server, which allows 16,382 across all its
-  connections by default (`max_prepared_stmt_count`).
+  connections by default (`max_prepared_stmt_count`): 32 per connection fits
+  about 500 connections. When that limit is reached (error 1461), rustmy
+  closes the connection's least recently used statement and prepares again,
+  once; with many more connections, lower `statement_cache_size` or raise
+  the server's limit.
 - `executemany` batches `INSERT … VALUES` into multi-row prepared statements
   and pipelines everything else, as `Cursor` does.
 - Parameters are values only: a sequence for `IN %s`, or a type with a
@@ -649,10 +655,14 @@ their own connections.
   someone who can intercept the connection and pretend to be the server.
   Across any network you do not control, use `ssl_mode="verify_identity"`
   (the system's CAs, or `ssl_ca=` for a private one).
-- **Set timeouts.** `connect_timeout`, `read_timeout` and `write_timeout`
-  (seconds, fractions allowed) are off by default, as in mysqlclient; without
-  them, a connection silently dropped by a firewall or load balancer can block
-  a read for minutes.
+- **Set timeouts.** `connect_timeout` is 15 seconds by default;
+  `read_timeout` and `write_timeout` (seconds, fractions allowed) are off by
+  default, as in mysqlclient, so a slow query is never cut short. TCP
+  keepalive probes start after 60 seconds idle: a pooled connection that a
+  firewall or load balancer dropped fails within a few minutes instead of
+  blocking a read for as long as the operating system retries, and the
+  probes keep idle connections from being dropped in the first place. Set
+  `read_timeout` to bound any single read.
 - **Pool connections.** rustmy has no pool of its own: use SQLAlchemy's
   (`pool_pre_ping=True`, and `pool_recycle` below the server's
   `wait_timeout`) or Django's `CONN_MAX_AGE` with `CONN_HEALTH_CHECKS`. Each
@@ -704,6 +714,12 @@ def product(product_id: int) -> dict[str, object]:
   any MySQL client. Pinning the server's RSA key with
   `server_public_key="server-key.pem"` closes that path over plain TCP: the
   password is then only ever encrypted with that key.
+  `get_server_public_key=False` (also `get-server-public-key=0` in an option
+  file, or `?get_server_public_key=false` in a SQLAlchemy URL) never asks the
+  server for its key, as libmysqlclient does by default: those accounts then
+  connect only over TLS, a Unix socket or with a pinned key, and fail with
+  `OperationalError` 2061 otherwise. It is on by default, as in PyMySQL, so
+  that they work over plain TCP.
 - Please report vulnerabilities privately, as [SECURITY.md](SECURITY.md)
   explains.
 

@@ -16,6 +16,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use socket2::SockRef;
+use socket2::TcpKeepalive;
+
 use crate::auth::AuthPlugin;
 use crate::auth::cleartext_password;
 use crate::auth::encrypt_password;
@@ -79,6 +82,18 @@ const SHA256_REQUEST_PUBLIC_KEY: u8 = 0x01;
 
 /// The server could not re-prepare a statement after a schema change.
 const ER_NEED_REPREPARE: u16 = 1615;
+/// The server holds `max_prepared_stmt_count` statements across all its
+/// connections.
+const ER_MAX_PREPARED_STMT_COUNT_REACHED: u16 = 1461;
+
+/// Idle time before TCP sends the first keepalive probe, and time between
+/// probes (where the platform lets us set it). A connection idle in a pool
+/// behind a NAT or a load balancer that dropped it fails once the probes go
+/// unanswered (about 2.5 minutes with Linux's 9 probes), instead of hanging
+/// the next read for as long as the operating system's retransmissions
+/// last; the probes also keep such middleboxes from dropping it.
+const KEEPALIVE_TIME: Duration = Duration::from_secs(60);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Bytes of a local file sent per packet (`LOAD DATA LOCAL INFILE`). Measured
 /// from 4 to 64 KiB (benches/README.md): flat on a local link, while over a
@@ -106,6 +121,10 @@ pub struct Opts {
     pub password: String,
     /// Default database, in the session's character set.
     pub database: Option<Vec<u8>>,
+    /// Bounds opening the TCP connection and every read and write until
+    /// authentication ends (a server that accepts the connection but never
+    /// greets fails too); after that, `read_timeout` and `write_timeout`
+    /// apply.
     pub connect_timeout: Option<Duration>,
     pub read_timeout: Option<Duration>,
     pub write_timeout: Option<Duration>,
@@ -119,6 +138,10 @@ pub struct Opts {
     /// PEM file with the server's RSA public key, used to encrypt the
     /// password over plain TCP instead of asking the server for its key.
     pub server_public_key: Option<PathBuf>,
+    /// Whether to ask the server for its RSA public key when the password
+    /// must be encrypted and no key is pinned. Off, such accounts fail over
+    /// plain TCP instead of trusting a key whoever answers sends.
+    pub get_server_public_key: bool,
     /// Prepared statements kept per connection ([`Conn::execute_cached`]).
     pub statement_cache: usize,
     /// Compressed protocol, if the server offers it: zstd falls back to
@@ -149,6 +172,7 @@ impl fmt::Debug for Opts {
             charset,
             tls,
             server_public_key,
+            get_server_public_key,
             statement_cache,
             compress,
             local_infile_dir,
@@ -171,6 +195,7 @@ impl fmt::Debug for Opts {
             .field("charset", charset)
             .field("tls", tls)
             .field("server_public_key", server_public_key)
+            .field("get_server_public_key", get_server_public_key)
             .field("statement_cache", statement_cache)
             .field("compress", compress)
             .field("local_infile_dir", local_infile_dir)
@@ -194,6 +219,7 @@ impl Default for Opts {
             charset: "utf8mb4".to_owned(),
             tls: TlsOpts::default(),
             server_public_key: None,
+            get_server_public_key: true,
             statement_cache: DEFAULT_STATEMENT_CACHE,
             compress: None,
             local_infile_dir: None,
@@ -217,10 +243,7 @@ impl Stream {
     fn connect(opts: &Opts) -> Result<Self> {
         #[cfg(unix)]
         if let Some(path) = &opts.unix_socket {
-            let stream = UnixStream::connect(path)?;
-            stream.set_read_timeout(opts.read_timeout)?;
-            stream.set_write_timeout(opts.write_timeout)?;
-            return Ok(Self::Unix(stream));
+            return Ok(Self::Unix(UnixStream::connect(path)?));
         }
         #[cfg(not(unix))]
         if opts.unix_socket.is_some() {
@@ -237,8 +260,7 @@ impl Stream {
                 Ok(stream) => {
                     // Requests are small and latency-bound: never batch them.
                     stream.set_nodelay(true)?;
-                    stream.set_read_timeout(opts.read_timeout)?;
-                    stream.set_write_timeout(opts.write_timeout)?;
+                    SockRef::from(&stream).set_tcp_keepalive(&keepalive())?;
                     return Ok(Self::Tcp(stream));
                 }
                 Err(err) => last_err = Some(err),
@@ -249,6 +271,27 @@ impl Stream {
                 io::Error::new(io::ErrorKind::NotFound, "host resolved to no address")
             })
             .into())
+    }
+
+    /// Sets the socket's read and write timeouts (`None` waits forever).
+    fn set_timeouts(&self, read: Option<Duration>, write: Option<Duration>) -> io::Result<()> {
+        match self {
+            Self::Tcp(s) => {
+                s.set_read_timeout(read)?;
+                s.set_write_timeout(write)
+            }
+            #[cfg(unix)]
+            Self::Unix(s) => {
+                s.set_read_timeout(read)?;
+                s.set_write_timeout(write)
+            }
+            Self::Tls(s) => {
+                s.sock.set_read_timeout(read)?;
+                s.sock.set_write_timeout(write)
+            }
+            #[cfg(feature = "fuzzing")]
+            Self::Mock(_) => Ok(()),
+        }
     }
 
     /// Whether the transport is already confidential, which allows sending
@@ -331,6 +374,32 @@ impl Write for Stream {
     }
 }
 
+/// TCP keepalive settings ([`KEEPALIVE_TIME`]).
+fn keepalive() -> TcpKeepalive {
+    let keepalive = TcpKeepalive::new().with_time(KEEPALIVE_TIME);
+    #[cfg(any(
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "netbsd",
+        target_os = "windows",
+    ))]
+    let keepalive = keepalive.with_interval(KEEPALIVE_INTERVAL);
+    keepalive
+}
+
+/// The error for a password that would have to be encrypted with a key
+/// the server sends, when [`Opts::get_server_public_key`] forbids asking.
+fn key_request_refused(plugin: AuthPlugin) -> Error {
+    Error::Auth(format!(
+        "{} needs the server's RSA public key to send the password without TLS; \
+         pin it with server_public_key, use TLS, or allow get_server_public_key",
+        String::from_utf8_lossy(plugin.name()),
+    ))
+}
+
 /// First authentication payload for `plugin`.
 fn first_response(
     plugin: AuthPlugin,
@@ -338,6 +407,7 @@ fn first_response(
     nonce: &[u8],
     secure: bool,
     pinned_key: Option<&rsa::PublicKey>,
+    get_server_public_key: bool,
 ) -> Result<Vec<u8>> {
     if plugin != AuthPlugin::Sha256 {
         return Ok(plugin.scramble(password, nonce));
@@ -349,8 +419,10 @@ fn first_response(
         Ok(cleartext_password(password))
     } else if let Some(key) = pinned_key {
         encrypt_password(password, nonce, key)
-    } else {
+    } else if get_server_public_key {
         Ok(vec![SHA256_REQUEST_PUBLIC_KEY])
+    } else {
+        Err(key_request_refused(plugin))
     }
 }
 
@@ -469,6 +541,11 @@ impl StatementCache {
         if self.entries.len() < self.capacity {
             return None;
         }
+        self.evict_oldest()
+    }
+
+    /// Forgets the least recently used statement and returns its id.
+    fn evict_oldest(&mut self) -> Option<u32> {
         let oldest = self
             .entries
             .iter()
@@ -482,6 +559,10 @@ impl StatementCache {
     fn insert(&mut self, sql: Vec<u8>, statement: Statement) {
         self.clock += 1;
         self.entries.insert(sql, (statement, self.clock));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     /// Forgets every statement: the server has closed them.
@@ -540,6 +621,8 @@ pub struct Conn {
     greeting_nonce: Vec<u8>,
     /// Pinned RSA key (`Opts::server_public_key`), also for `COM_CHANGE_USER`.
     pinned_key: Option<rsa::PublicKey>,
+    /// [`Opts::get_server_public_key`], also for `COM_CHANGE_USER`.
+    get_server_public_key: bool,
     /// Largest parsec iteration factor accepted, from the connect timeout.
     parsec_max_factor: u8,
     /// Session collation sent in the handshake, also for `COM_CHANGE_USER`.
@@ -577,7 +660,18 @@ impl Conn {
     pub fn connect(opts: &Opts) -> Result<Self> {
         // Settings first: a bad one fails before anything goes on the wire.
         let local_infile_dir = local_infile_dir(opts)?;
-        Self::handshake(Stream::connect(opts)?, opts, local_infile_dir)
+        let transport = Stream::connect(opts)?;
+        // Until authentication ends, `connect_timeout` bounds every read and
+        // write: a server that accepts but never greets must not hang us.
+        transport.set_timeouts(
+            opts.connect_timeout.or(opts.read_timeout),
+            opts.connect_timeout.or(opts.write_timeout),
+        )?;
+        let conn = Self::handshake(transport, opts, local_infile_dir)?;
+        conn.stream
+            .get_ref()
+            .set_timeouts(opts.read_timeout, opts.write_timeout)?;
+        Ok(conn)
     }
 
     /// Handshake and authentication over an already open transport.
@@ -654,6 +748,7 @@ impl Conn {
                 .as_deref()
                 .map(load_public_key)
                 .transpose()?,
+            get_server_public_key: opts.get_server_public_key,
             parsec_max_factor: parsec_max_factor(opts.connect_timeout),
             collation,
             server_collation: greeting.collation,
@@ -733,7 +828,14 @@ impl Conn {
 
     fn first_response(&self, plugin: AuthPlugin, password: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
         let secure = self.stream.get_ref().is_secure();
-        first_response(plugin, password, nonce, secure, self.pinned_key.as_ref())
+        first_response(
+            plugin,
+            password,
+            nonce,
+            secure,
+            self.pinned_key.as_ref(),
+            self.get_server_public_key,
+        )
     }
 
     /// Runs the server-driven part of authentication (auth switches and
@@ -784,8 +886,10 @@ impl Conn {
                                 cleartext_password(password)
                             } else if let Some(key) = &self.pinned_key {
                                 encrypt_password(password, &nonce, key)?
-                            } else {
+                            } else if self.get_server_public_key {
                                 vec![CACHING_SHA2_REQUEST_PUBLIC_KEY]
+                            } else {
+                                return Err(key_request_refused(plugin));
                             }
                         }
                         // The public key we asked for; never one we did not
@@ -987,7 +1091,21 @@ impl Conn {
             if let Some(oldest) = self.statements.evict() {
                 self.close_statement(oldest)?;
             }
-            let statement = self.prepare(sql)?;
+            let statement = match self.prepare(sql) {
+                // The server's statements are all taken, some by this
+                // connection's cache: free the least recently used one and
+                // try once more.
+                Err(Error::Server {
+                    code: ER_MAX_PREPARED_STMT_COUNT_REACHED,
+                    ..
+                }) if !self.statements.is_empty() => {
+                    if let Some(oldest) = self.statements.evict_oldest() {
+                        self.close_statement(oldest)?;
+                    }
+                    self.prepare(sql)?
+                }
+                other => other?,
+            };
             let found = (statement.id, statement.params);
             self.statements.insert(sql.to_vec(), statement);
             found
@@ -1671,7 +1789,62 @@ impl Conn {
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+
+    use socket2::SockRef;
+
     use super::Opts;
+    use super::Statement;
+    use super::StatementCache;
+    use super::Stream;
+
+    #[test]
+    fn tcp_connections_send_keepalive_probes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let opts = Opts {
+            host: "127.0.0.1".to_owned(),
+            port: listener.local_addr().unwrap().port(),
+            ..Opts::default()
+        };
+        let Stream::Tcp(stream) = Stream::connect(&opts).unwrap() else {
+            panic!("expected a TCP stream");
+        };
+        let socket = SockRef::from(&stream);
+        assert!(socket.keepalive().unwrap());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            assert_eq!(socket.tcp_keepalive_time().unwrap(), super::KEEPALIVE_TIME);
+            assert_eq!(
+                socket.tcp_keepalive_interval().unwrap(),
+                super::KEEPALIVE_INTERVAL
+            );
+        }
+    }
+
+    fn statement(id: u32) -> Statement {
+        Statement {
+            id,
+            params: 0,
+            columns: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_cache_frees_its_least_recently_used_statement_on_demand() {
+        let mut cache = StatementCache::new(32);
+        assert_eq!(cache.evict_oldest(), None);
+        cache.insert(b"a".to_vec(), statement(1));
+        cache.insert(b"b".to_vec(), statement(2));
+        cache.insert(b"c".to_vec(), statement(3));
+        // Not full: nothing to make room for.
+        assert_eq!(cache.evict(), None);
+        assert!(cache.get(b"a").is_some());
+        assert_eq!(cache.evict_oldest(), Some(2));
+        assert_eq!(cache.evict_oldest(), Some(3));
+        assert!(!cache.is_empty());
+        assert_eq!(cache.evict_oldest(), Some(1));
+        assert!(cache.is_empty());
+    }
 
     #[test]
     fn debug_output_hides_the_password() {

@@ -110,6 +110,15 @@ impl Peer {
 /// Greets with `caching_sha2_password`, reads the handshake response and
 /// runs `script`; returns what `Conn::connect` gave.
 fn exchange(pinned: bool, script: impl FnOnce(&mut Peer) + Send + 'static) -> Result<Conn, Error> {
+    exchange_with(pinned, true, script)
+}
+
+/// [`exchange`], with `get_server_public_key` set to `get_key`.
+fn exchange_with(
+    pinned: bool,
+    get_key: bool,
+    script: impl FnOnce(&mut Peer) + Send + 'static,
+) -> Result<Conn, Error> {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = thread::spawn(move || {
@@ -153,6 +162,7 @@ fn exchange(pinned: bool, script: impl FnOnce(&mut Peer) + Send + 'static) -> Re
             ..TlsOpts::default()
         },
         server_public_key: key_file.clone(),
+        get_server_public_key: get_key,
         ..Opts::default()
     });
     if let Some(path) = key_file {
@@ -242,6 +252,60 @@ fn sha256_password_takes_the_key_it_requested() {
         peer.more_data(PINNED_KEY.as_bytes());
         let encrypted = peer.read().expect("the encrypted password");
         assert_eq!(encrypted.len(), ENCRYPTED_LEN);
+        peer.write(OK);
+    })
+    .unwrap();
+}
+
+/// With `get_server_public_key` off, the client must hang up instead of
+/// asking for a key, and say why.
+fn assert_key_not_requested(result: Result<Conn, Error>, plugin: &str) {
+    match result {
+        Err(Error::Auth(message)) => {
+            assert!(message.contains(plugin), "{message}");
+            assert!(message.contains("get_server_public_key"), "{message}");
+        }
+        other => panic!("expected an authentication error, got {other:?}"),
+    }
+}
+
+#[test]
+fn full_authentication_without_key_requests_hangs_up() {
+    assert_key_not_requested(
+        exchange_with(false, false, |peer| {
+            peer.more_data(&[0x04]);
+            peer.expect_hang_up();
+        }),
+        "caching_sha2_password",
+    );
+}
+
+#[test]
+fn sha256_password_without_key_requests_hangs_up() {
+    assert_key_not_requested(
+        exchange_with(false, false, |peer| {
+            peer.switch_to_sha256();
+            peer.expect_hang_up();
+        }),
+        "sha256_password",
+    );
+}
+
+#[test]
+fn without_key_requests_a_pinned_key_still_works() {
+    exchange_with(true, false, |peer| {
+        peer.more_data(&[0x04]);
+        let encrypted = peer.read().expect("the encrypted password");
+        assert_eq!(encrypted.len(), ENCRYPTED_LEN);
+        peer.write(OK);
+    })
+    .unwrap();
+}
+
+#[test]
+fn without_key_requests_fast_authentication_still_works() {
+    exchange_with(false, false, |peer| {
+        peer.more_data(&[0x03]);
         peer.write(OK);
     })
     .unwrap();

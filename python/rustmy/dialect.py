@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 #: Query arguments rustmy takes as floats (mysqlclient's dialect makes them
 #: integers) and as booleans (the URL gives strings).
 _FLOAT_ARGS = ("connect_timeout", "read_timeout", "write_timeout")
-_BOOL_ARGS = ("autocommit", "multi_statements")
+_BOOL_ARGS = ("autocommit", "multi_statements", "get_server_public_key")
 
 
 def _cursor_class(name: str) -> type[rustmy.Cursor]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import time
 
 from typing import TYPE_CHECKING
@@ -13,6 +14,8 @@ import rustmy
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from tests.conftest import Server
 
 
@@ -95,6 +98,39 @@ def test_connect_timeout_to_unreachable_host() -> None:
         rustmy.connect(host="10.255.255.1", port=3306, connect_timeout=0.5)
     assert info.value.args[0] == 2003
     assert time.perf_counter() - start < 3
+
+
+@pytest.fixture
+def silent_port() -> Iterator[int]:
+    """A port whose listener accepts connections (the kernel completes the
+    TCP handshake) and never says a word."""
+    with socket.create_server(("127.0.0.1", 0)) as listener:
+        yield listener.getsockname()[1]
+
+
+def test_connect_timeout_covers_the_greeting(silent_port: int) -> None:
+    start = time.perf_counter()
+    with pytest.raises(rustmy.OperationalError) as info:
+        rustmy.connect(host="127.0.0.1", port=silent_port, connect_timeout=0.3)
+    assert info.value.args[0] == 2003
+    assert time.perf_counter() - start < 3
+
+
+def test_connect_timeout_has_a_default(
+    silent_port: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert rustmy.connections._DEFAULT_CONNECT_TIMEOUT == 15  # noqa: SLF001
+    monkeypatch.setattr(rustmy.connections, "_DEFAULT_CONNECT_TIMEOUT", 0.3)
+    start = time.perf_counter()
+    with pytest.raises(rustmy.OperationalError) as info:
+        rustmy.connect(host="127.0.0.1", port=silent_port)
+    assert info.value.args[0] == 2003
+    assert time.perf_counter() - start < 3
+
+
+def test_connect_timeout_ends_once_connected(server: Server) -> None:
+    with server.connect(connect_timeout=0.3) as conn:
+        assert _one(conn, "SELECT SLEEP(0.8)") == 0
 
 
 def test_ping_after_unread_multi_results(server: Server) -> None:

@@ -218,6 +218,28 @@ def test_compression_options(
     assert _option_files.connect_args(options) == expected
 
 
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        ({"get-server-public-key": ""}, True),
+        ({"get-server-public-key": "1"}, True),
+        ({"get-server-public-key": "0"}, False),
+        ({"get-server-public-key": "OFF"}, False),
+        ({"skip-get-server-public-key": ""}, False),
+        ({"disable-get-server-public-key": ""}, False),
+        ({"enable-get-server-public-key": ""}, True),
+    ],
+)
+def test_get_server_public_key_option(
+    options: dict[str, str], *, expected: bool
+) -> None:
+    assert _option_files.connect_args(options) == {"get_server_public_key": expected}
+
+
+def test_unknown_skip_options_are_ignored() -> None:
+    assert _option_files.connect_args({"skip-ssl": "", "skip-compress": ""}) == {}
+
+
 # Against the servers.
 
 
