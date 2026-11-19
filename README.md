@@ -524,9 +524,9 @@ print(cursor.rowcount)  # rows loaded
 
 A request is answered only when the statement being run is a `LOAD DATA
 LOCAL INFILE` (or `LOAD XML LOCAL INFILE`) that names that very file, and
-the file, with symbolic links and `..` resolved, is inside the directory.
-Anything else (another file, a request after a `SELECT`, a link pointing out
-of the directory) gets an empty file and raises `OperationalError` 2068,
+the file, with symbolic links and `..` resolved, is a regular file inside the
+directory. Anything else (another file, a request after a `SELECT`, a link
+pointing out of the directory, a directory or a FIFO) gets an empty file and raises `OperationalError` 2068,
 and nothing is read unless the statement named that file; the connection
 stays usable. Relative names start at
 the working directory, as in other clients. The file is streamed, never read
@@ -699,7 +699,9 @@ def product(product_id: int) -> dict[str, object]:
 - Without verified TLS (see above), whoever can intercept the connection can
   impersonate the server, and with `caching_sha2_password` or
   `sha256_password` obtain the password during a full authentication, as with
-  any MySQL client.
+  any MySQL client. Pinning the server's RSA key with
+  `server_public_key="server-key.pem"` closes that path over plain TCP: the
+  password is then only ever encrypted with that key.
 - Please report vulnerabilities privately, as [SECURITY.md](SECURITY.md)
   explains.
 

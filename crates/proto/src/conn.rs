@@ -305,6 +305,18 @@ fn first_response(
     }
 }
 
+/// Whether `reply` asks the server for its RSA public key. Only then may the
+/// next `AuthMoreData` be a key: accepting one at any other time would let a
+/// man in the middle replace a key pinned with `server_public_key` (or skip
+/// the request) and decrypt the password.
+fn requests_key(plugin: AuthPlugin, reply: &[u8]) -> bool {
+    matches!(
+        (plugin, reply),
+        (AuthPlugin::CachingSha2, [CACHING_SHA2_REQUEST_PUBLIC_KEY])
+            | (AuthPlugin::Sha256, [SHA256_REQUEST_PUBLIC_KEY])
+    )
+}
+
 /// [`Opts::local_infile_dir`] resolved, or why it cannot be used.
 fn local_infile_dir(opts: &Opts) -> Result<Option<PathBuf>> {
     opts.local_infile_dir
@@ -604,6 +616,7 @@ impl Conn {
             infile: Infile::Refuse,
         };
         conn.authenticate(opts)?;
+        conn.stream.authenticated();
         if let Some(algorithm) = compression {
             conn.stream.compress(algorithm)?;
         }
@@ -662,7 +675,8 @@ impl Conn {
         }
         .encode()?;
         self.stream.write_packet(&response)?;
-        self.auth_exchange(password, plugin, nonce)
+        let key_requested = requests_key(plugin, &auth_response);
+        self.auth_exchange(password, plugin, nonce, key_requested)
     }
 
     fn first_response(&self, plugin: AuthPlugin, password: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
@@ -671,12 +685,14 @@ impl Conn {
     }
 
     /// Runs the server-driven part of authentication (auth switches and
-    /// plugin-specific round trips) until OK or ERR.
+    /// plugin-specific round trips) until OK or ERR. `key_requested` says
+    /// whether what the client last sent asked for the server's public key.
     fn auth_exchange(
         &mut self,
         password: &[u8],
         mut plugin: AuthPlugin,
         mut nonce: Vec<u8>,
+        mut key_requested: bool,
     ) -> Result<()> {
         let secure = self.stream.get_ref().is_secure();
         loop {
@@ -720,8 +736,14 @@ impl Conn {
                                 vec![CACHING_SHA2_REQUEST_PUBLIC_KEY]
                             }
                         }
-                        // The public key we asked for.
+                        // The public key we asked for; never one we did not
+                        // (a pinned key is never requested).
                         (AuthPlugin::CachingSha2 | AuthPlugin::Sha256, pem) => {
+                            if !key_requested {
+                                return Err(Error::protocol(
+                                    "the server sent a public key the client did not request",
+                                ));
+                            }
                             encrypt_password(password, &nonce, &parse_public_key(pem)?)?
                         }
                         (AuthPlugin::Parsec, salt) => parsec_response(password, &nonce, salt)?,
@@ -738,6 +760,7 @@ impl Conn {
                 }
                 _ => return Err(Error::protocol("unexpected packet during authentication")),
             };
+            key_requested = requests_key(plugin, &reply);
             self.stream.write_packet(&reply)?;
         }
     }
@@ -1356,6 +1379,15 @@ impl Conn {
                 dir.display()
             ));
         }
+        // Checked before opening too: opening a FIFO blocks until something
+        // writes to it, with the connection held. The descriptor is checked
+        // again below, in case the path changed in between.
+        let is_file = fs::metadata(&resolved)
+            .map_err(|err| format!("{path}: {err}"))?
+            .is_file();
+        if !is_file {
+            return Err(format!("{path} is not a regular file"));
+        }
         let file = File::open(&resolved).map_err(|err| format!("{path}: {err}"))?;
         let is_file = file
             .metadata()
@@ -1479,7 +1511,8 @@ impl Conn {
         payload.extend_from_slice(&u16::from(self.collation).to_le_bytes());
         put_nul_bytes(&mut payload, plugin.name());
         self.stream.write_command(command::CHANGE_USER, &payload)?;
-        self.auth_exchange(password.as_bytes(), plugin, nonce)
+        let key_requested = requests_key(plugin, &auth_response);
+        self.auth_exchange(password.as_bytes(), plugin, nonce, key_requested)
     }
 
     /// Discards unread rows of a streamed result set and unread results of

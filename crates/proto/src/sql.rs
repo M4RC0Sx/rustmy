@@ -123,7 +123,7 @@ pub fn insert_values(query: &[u8]) -> Option<InsertValues> {
 #[must_use]
 pub fn local_infile_names(query: &[u8], no_backslash_escapes: bool) -> Vec<Vec<u8>> {
     let mut names = Vec::new();
-    scan_local_infile(query, |scanner| {
+    scan_local_infile(query, no_backslash_escapes, |scanner| {
         if let Some(name) = scanner.string_literal(no_backslash_escapes) {
             names.push(name);
         }
@@ -133,17 +133,29 @@ pub fn local_infile_names(query: &[u8], no_backslash_escapes: bool) -> Vec<Vec<u
 
 /// Whether `query` has a `LOAD DATA LOCAL INFILE` (or `LOAD XML LOCAL
 /// INFILE`) statement, with its file name written or still a placeholder.
+///
+/// Reads backslashes as escapes whatever the SQL mode: either way it can be
+/// wrong only on statements built to fool it, and both mistakes are safe (a
+/// statement sent alone needlessly, or a request inside a pipeline, which
+/// closes the connection).
 #[must_use]
 pub fn mentions_local_infile(query: &[u8]) -> bool {
     let mut found = false;
-    scan_local_infile(query, |_| found = true);
+    scan_local_infile(query, false, |_| found = true);
     found
 }
 
 /// Calls `found` with the scanner right after each `LOAD DATA|XML
 /// [LOW_PRIORITY|CONCURRENT] LOCAL INFILE` of `query` (and its spaces).
-fn scan_local_infile(query: &[u8], mut found: impl FnMut(&mut Scanner<'_>)) {
+/// Literals are skipped as the server reads them: with
+/// `no_backslash_escapes`, a backslash is an ordinary character.
+fn scan_local_infile(
+    query: &[u8],
+    no_backslash_escapes: bool,
+    mut found: impl FnMut(&mut Scanner<'_>),
+) {
     let mut scanner = Scanner::new(query, 0);
+    scanner.backslash_escapes = !no_backslash_escapes;
     // How many words of the statement's head have matched so far.
     let mut matched = 0;
     while let Some(token) = scanner.next_token() {
@@ -223,6 +235,9 @@ struct Scanner<'a> {
     query: &'a [u8],
     pos: usize,
     depth: usize,
+    /// Whether a backslash escapes the next byte in string literals (off
+    /// under `NO_BACKSLASH_ESCAPES`).
+    backslash_escapes: bool,
 }
 
 impl<'a> Scanner<'a> {
@@ -231,6 +246,7 @@ impl<'a> Scanner<'a> {
             query,
             pos,
             depth: 0,
+            backslash_escapes: true,
         }
     }
 
@@ -294,13 +310,13 @@ impl<'a> Scanner<'a> {
     }
 
     /// Skips a quoted string or identifier, honouring doubled quotes and,
-    /// for strings, backslash escapes.
+    /// for strings, backslash escapes (unless they are off).
     fn skip_quoted(&mut self, quote: u8) -> Option<()> {
         self.pos += 1;
         loop {
             let byte = self.peek(0)?;
             self.pos += 1;
-            if byte == b'\\' && quote != b'`' {
+            if byte == b'\\' && quote != b'`' && self.backslash_escapes {
                 self.pos += 1;
             } else if byte == quote {
                 if self.peek(0) == Some(quote) {
@@ -542,6 +558,21 @@ mod tests {
             names("LOAD DATA LOCAL INFILE 'it''s' INTO TABLE t", true),
             ["it's"]
         );
+    }
+
+    /// Literals before the statement are skipped as the server reads them.
+    /// Under `NO_BACKSLASH_ESCAPES` this query selects two adjacent string
+    /// literals and names no file; reading `\'` as an escaped quote would
+    /// take `"secret"` for the name of a `LOAD DATA LOCAL INFILE`.
+    #[test]
+    fn local_infile_scan_follows_the_sql_mode() {
+        let query = r#"SELECT '\' 'LOAD DATA LOCAL INFILE "secret" '"#;
+        assert_eq!(names(query, true), Vec::<String>::new());
+        // With backslash escapes the same bytes are a statement after a
+        // literal, and are read as such.
+        let query = r#"SELECT '\' '; LOAD DATA LOCAL INFILE "x" INTO TABLE t"#;
+        assert_eq!(names(query, false), ["x"]);
+        assert_eq!(names(query, true), Vec::<String>::new());
     }
 
     #[test]

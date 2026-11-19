@@ -20,6 +20,17 @@ use crate::error::Result;
 const HEADER_LEN: usize = 4;
 const READ_BUFFER_CAPACITY: usize = 64 * 1024;
 
+/// Largest logical payload accepted until authentication succeeds. The
+/// greeting, auth switches, RSA keys and OK/ERR packets are all far smaller,
+/// so a server (or anyone in between, before TLS) cannot make the client
+/// allocate without bound before it even knows who it talks to.
+pub(crate) const HANDSHAKE_PAYLOAD_LIMIT: usize = 64 * 1024;
+
+/// Largest logical payload accepted afterwards: 1 GiB, the most any server
+/// sends (`max_allowed_packet` cannot go higher) and libmysqlclient's own
+/// limit.
+pub(crate) const PAYLOAD_LIMIT: usize = 1 << 30;
+
 /// Where a pipelined reply starts: the sequence id of its first packet and,
 /// on a compressed connection, of its first compressed packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +47,8 @@ pub(crate) struct PacketStream<S: Read + Write> {
     write_buf: Vec<u8>,
     /// Compressed layer, once negotiated and authenticated.
     compressed: Option<Box<Compressed>>,
+    /// Largest logical payload [`PacketStream::read_into`] accepts.
+    payload_limit: usize,
 }
 
 /// Appends exactly `len` bytes of `source` to `out`. When the read buffer
@@ -65,7 +78,14 @@ impl<S: Read + Write> PacketStream<S> {
             seq: 0,
             write_buf: Vec::new(),
             compressed: None,
+            payload_limit: HANDSHAKE_PAYLOAD_LIMIT,
         }
+    }
+
+    /// Raises the payload limit from [`HANDSHAKE_PAYLOAD_LIMIT`] to
+    /// [`PAYLOAD_LIMIT`], once authenticated.
+    pub(crate) fn authenticated(&mut self) {
+        self.payload_limit = PAYLOAD_LIMIT;
     }
 
     /// Hands the raw stream back (to wrap it in TLS) with the sequence id to
@@ -132,6 +152,13 @@ impl<S: Read + Write> PacketStream<S> {
             let len = u32::from_le_bytes([l0, l1, l2, 0]);
             let len_usize = usize::try_from(len)
                 .map_err(|_| Error::protocol("packet length exceeds address space"))?;
+            let read = out.len().saturating_sub(start);
+            if read.saturating_add(len_usize) > self.payload_limit {
+                return Err(Error::protocol(format!(
+                    "the server sent a payload over the {} byte limit",
+                    self.payload_limit
+                )));
+            }
             if let Some(compressed) = &mut self.compressed {
                 compressed.append(&mut self.inner, out, len_usize)?;
             } else {
@@ -277,6 +304,8 @@ mod tests {
     use std::io::Read;
     use std::io::Write;
 
+    use super::HANDSHAKE_PAYLOAD_LIMIT;
+    use super::PAYLOAD_LIMIT;
     use super::PacketStream;
     use crate::MAX_PACKET_PAYLOAD;
 
@@ -303,7 +332,14 @@ mod tests {
         }
     }
 
+    /// A stream past authentication (see [`handshake_reader`]).
     fn reader(bytes: Vec<u8>) -> PacketStream<Duplex> {
+        let mut ps = handshake_reader(bytes);
+        ps.authenticated();
+        ps
+    }
+
+    fn handshake_reader(bytes: Vec<u8>) -> PacketStream<Duplex> {
         PacketStream::new(Duplex {
             input: Cursor::new(bytes),
             output: Vec::new(),
@@ -379,6 +415,35 @@ mod tests {
         let mut out = Vec::new();
         ps.read_into(&mut out).unwrap();
         assert_eq!(out, payload);
+    }
+
+    /// The limit counts the whole logical payload, split packets included,
+    /// and is checked from each header, before reading what it announces.
+    #[test]
+    fn payloads_over_the_limit_are_refused() {
+        // Before authentication: one packet just over 64 KiB, of which only
+        // the header arrives.
+        let len = u32::try_from(HANDSHAKE_PAYLOAD_LIMIT + 1)
+            .unwrap()
+            .to_le_bytes();
+        let mut ps = handshake_reader(vec![len[0], len[1], len[2], 0]);
+        let err = ps.read_into(&mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("byte limit"), "{err}");
+        // At the limit exactly, it is read.
+        let payload = vec![1u8; HANDSHAKE_PAYLOAD_LIMIT];
+        let mut ps = handshake_reader(written(&payload));
+        let mut out = Vec::new();
+        ps.read_into(&mut out).unwrap();
+        assert_eq!(out.len(), HANDSHAKE_PAYLOAD_LIMIT);
+        // Split packets add up: a limit just under two of them stops at the
+        // second header.
+        let mut ps = reader(written(&vec![7u8; MAX_PACKET_PAYLOAD + 10]));
+        ps.payload_limit = MAX_PACKET_PAYLOAD + 9;
+        let mut out = Vec::new();
+        let err = ps.read_into(&mut out).unwrap_err();
+        assert!(err.to_string().contains("byte limit"), "{err}");
+        assert_eq!(out.len(), MAX_PACKET_PAYLOAD);
+        assert_eq!(PAYLOAD_LIMIT, 1 << 30);
     }
 
     #[test]
