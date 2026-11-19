@@ -73,7 +73,8 @@ def heap_mib() -> float:
         return in_use / (1 << 20)
     libc.mallinfo2.restype = _MallInfo2
     info = libc.mallinfo2()
-    return (info.uordblks + info.hblkhd) / (1 << 20)
+    in_use = int(info.uordblks + info.hblkhd)
+    return in_use / (1 << 20)
 
 
 def peak_mib() -> float:
