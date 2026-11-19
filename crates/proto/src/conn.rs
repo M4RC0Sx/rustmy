@@ -39,6 +39,7 @@ use crate::handshake::ServerHandshake;
 use crate::handshake::ssl_request;
 use crate::packet::PacketStream;
 use crate::packet::ReplyStart;
+use crate::packet::release;
 use crate::result::QueryResult;
 use crate::result::RowPacket;
 use crate::result::RowSet;
@@ -1258,6 +1259,8 @@ impl Conn {
                 Ok(Some(end)) => {
                     self.pending = None;
                     self.status = end.status;
+                    // A large row skipped may have grown the buffer.
+                    release(&mut self.buf);
                     return Ok((
                         skipped,
                         ReadOutcome::Done {
@@ -1267,6 +1270,7 @@ impl Conn {
                 }
                 Err(err) => {
                     self.pending = None;
+                    release(&mut self.buf);
                     return Err(err);
                 }
             }

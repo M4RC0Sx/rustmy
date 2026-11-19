@@ -1,0 +1,39 @@
+{
+  "python": "CPython 3.10.19",
+  "machine": "Darwin arm64",
+  "server": "8.4.13",
+  "mib": 64,
+  "repeat": 5,
+  "results": {
+    "rustmy": {
+      "insert": 0.9253787500201724,
+      "select": 0.03990312496898696,
+      "peak_mib": 407.65625,
+      "held_mib": 65.75016784667969
+    },
+    "rustmy prepared": {
+      "insert": 0.5956169590353966,
+      "select": 0.03546083299443126,
+      "peak_mib": 402.5,
+      "held_mib": 64.01605224609375
+    },
+    "rustmy zlib": {
+      "insert": 2.02127179200761,
+      "select": 0.9687373749911785,
+      "peak_mib": 361.015625,
+      "held_mib": 81.81321716308594
+    },
+    "rustmy zstd": {
+      "insert": 0.9717297090101056,
+      "select": 0.05582612502621487,
+      "peak_mib": 426.71875,
+      "held_mib": 93.85444641113281
+    },
+    "mysqlclient": {
+      "insert": 1.4629676250042394,
+      "select": 0.044477583025582135,
+      "peak_mib": 381.796875,
+      "held_mib": 64.02268981933594
+    }
+  }
+}

@@ -225,7 +225,12 @@ in a tight loop while the server sends the next (network and conversion
 overlap; reading everything first was ~1.4x slower), with no intermediate row
 or value types. `date`/`datetime`/`timedelta` are built directly; `Decimal`
 and JSON go through a cached Python class; dict rows are built in Rust with
-the keys created once per result (`convert::Converter`).
+the keys created once per result (`convert::Converter`). Parameters are told
+apart by exact type first (`Args::from_py`): asking whether any object is a
+`Mapping` runs Python code. A connection keeps no buffer a large packet grew
+past 1 MiB once the operation ends (`release` in `packet.rs`, compressed
+buffers included), and uncompressed payloads that large are written from
+the caller's buffer, packet by packet, without staging.
 
 **Buffered cursors** (`Connection::buffered` with a `Session`,
 `crates/pydriver/src/connection.rs`) keep the connection locked for the whole

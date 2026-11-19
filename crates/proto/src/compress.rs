@@ -27,6 +27,7 @@ use flate2::Status;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::packet::release;
 
 const HEADER_LEN: usize = 7;
 /// Largest payload, compressed or not, one compressed packet can declare.
@@ -35,9 +36,6 @@ const MAX_PAYLOAD: usize = 0xFF_FFFF;
 const MIN_COMPRESS_LENGTH: usize = 50;
 /// zlib level of MySQL's client (zlib's default).
 const ZLIB_LEVEL: u32 = 6;
-/// Buffers grown beyond this by a large packet are released afterwards, so
-/// an idle pooled connection does not keep megabytes.
-const KEEP_CAPACITY: usize = 1 << 20;
 
 /// Compression algorithm of a connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +130,7 @@ impl Compressed {
             self.pos += n;
             filled += n;
         }
+        self.release_consumed();
         Ok(())
     }
 
@@ -151,7 +150,17 @@ impl Compressed {
             self.pos += n;
             left -= n;
         }
+        self.release_consumed();
         Ok(())
+    }
+
+    /// Releases a large decompressed packet once all of it was handed out,
+    /// rather than when the next one arrives (which, after the last reply,
+    /// may be long).
+    fn release_consumed(&mut self) {
+        if self.pos >= self.input.len() {
+            release(&mut self.input);
+        }
     }
 
     /// Decompressed bytes not handed out yet, reading the next compressed
@@ -194,6 +203,14 @@ impl Compressed {
             std::mem::swap(&mut self.input, &mut self.wire);
             return Ok(());
         }
+        let decompressed = self.decompress(wire_len, plain_len);
+        release(&mut self.wire);
+        decompressed
+    }
+
+    /// Decompresses `wire` into `input`, which must end up `plain_len`
+    /// bytes long.
+    fn decompress(&mut self, wire_len: u32, plain_len: usize) -> Result<()> {
         // Room for what the header declares only: a payload that inflates
         // to more fails instead of growing the buffer (decompression bomb).
         self.input.reserve_exact(plain_len);
@@ -220,11 +237,16 @@ impl Compressed {
     /// returns them.
     pub(crate) fn encode(&mut self, data: &[u8]) -> &[u8] {
         let mut out = std::mem::take(&mut self.out);
-        release(&mut out);
         out.clear();
         self.encode_into(data, &mut out);
         self.out = out;
         &self.out
+    }
+
+    /// Releases what [`Compressed::encode`] returned once it was sent, if a
+    /// large payload grew it.
+    pub(crate) fn release_output(&mut self) {
+        release(&mut self.out);
     }
 
     /// Appends `data` to `out` as compressed packets of the current
@@ -270,13 +292,6 @@ impl Compressed {
     }
 }
 
-/// Drops a buffer a large packet grew, once it is no longer needed.
-fn release(buf: &mut Vec<u8>) {
-    if buf.capacity() > KEEP_CAPACITY {
-        *buf = Vec::new();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
@@ -284,6 +299,7 @@ mod tests {
     use super::Compressed;
     use super::Compression;
     use super::MAX_PAYLOAD;
+    use crate::packet::KEEP_CAPACITY;
 
     const ALGORITHMS: [Compression; 2] = [Compression::Zlib, Compression::Zstd { level: 3 }];
 
@@ -469,13 +485,28 @@ mod tests {
     }
 
     #[test]
-    fn large_buffers_are_released() {
-        // Incompressible, so the packets written are as large as the data.
-        let data = noise(4 << 20);
-        let mut layer = Compressed::new(Compression::Zlib).unwrap();
-        assert!(layer.encode(&data).len() > data.len());
-        assert!(layer.scratch.capacity() <= super::KEEP_CAPACITY);
-        layer.encode(b"small");
-        assert!(layer.out.capacity() <= super::KEEP_CAPACITY);
+    fn large_buffers_are_released_once_used() {
+        for algorithm in ALGORITHMS {
+            // Incompressible, so the packets written are as large as the
+            // data; and compressible, so reading inflates them.
+            for data in [noise(4 << 20), vec![b'z'; 4 << 20]] {
+                let mut writer = Compressed::new(algorithm).unwrap();
+                let wire = writer.encode(&data).to_vec();
+                assert!(writer.scratch.capacity() <= KEEP_CAPACITY);
+                writer.release_output();
+                assert!(writer.out.capacity() <= KEEP_CAPACITY);
+
+                let mut reader = Compressed::new(algorithm).unwrap();
+                let mut out = Vec::new();
+                reader
+                    .append(&mut Cursor::new(wire), &mut out, data.len())
+                    .unwrap();
+                assert_eq!(out, data);
+                // Released as soon as everything was handed out, without
+                // waiting for another packet.
+                assert!(reader.input.capacity() <= KEEP_CAPACITY);
+                assert!(reader.wire.capacity() <= KEEP_CAPACITY);
+            }
+        }
     }
 }

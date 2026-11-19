@@ -1385,3 +1385,44 @@ already sets the character set, exactly as `SET NAMES` would on all nine
 servers (`test_the_handshake_sets_the_character_set`), so it is now sent
 only for gb18030, which MariaDB lacks. An explicit collation, `sql_mode`
 and `autocommit` share one `SET` instead of one round trip each.
+
+## Large values and parameter classification (2026-11-19, Python 3.10)
+
+`large_values.py` inserts one 64 MiB BLOB and reads it back, each
+configuration in a fresh process, and reports what stays allocated once the
+connection sits idle, as a pooled connection would. Two runs before and two
+after this change, on MySQL 8.4:
+
+```sh
+docker compose up -d --wait mysql
+uv run --no-sync python benches/large_values.py \
+    --json benches/results/large-values-after-py310.json
+```
+
+| Configuration | held, before | held, after | peak RSS, before | peak RSS, after | insert, before | insert, after |
+|---|--:|--:|--:|--:|--:|--:|
+| rustmy | 66 MiB | **0 MiB** | 312–408 MiB | 212–228 MiB | 925–995 ms | 857–1005 ms |
+| rustmy prepared | 64 MiB | **0 MiB** | 370–402 MiB | 243–338 MiB | 593–596 ms | 600–608 ms |
+| rustmy zlib | 82–93 MiB | 8–16 MiB | 361–372 MiB | 339–347 MiB | 1974–2021 ms | 1995–2007 ms |
+| rustmy zstd | 88–94 MiB | 23 MiB | 394–427 MiB | 373 MiB | 972–1045 ms | 985 ms |
+| mysqlclient | 64–128 MiB | 64 MiB | 382 MiB | 366–382 MiB | 1463–1466 ms | 1395–1482 ms |
+
+Before, a connection kept the buffer its largest statement grew for as long
+as it lived: an idle pooled connection held the 64 MiB (libmysqlclient keeps
+its network buffer the same way). Now buffers a packet grew past 1 MiB are
+released as soon as the operation that needed them ends, compressed ones
+included, and an uncompressed statement of 1 MiB or more goes from its own
+buffer straight to the socket, packet by packet, instead of being copied
+into the write buffer first (and, past 16 MiB, joined to its command byte
+before that). Times do not change beyond the noise of a 64 MiB insert. The
+8–23 MiB still counted on compressed connections is not held by rustmy:
+macOS's allocator keeps freed blocks of that size cached (`leaks` finds
+4 MB live besides the value, and no leak, after 25 compressed rounds).
+
+`execute()` parameters are now classified by exact type first (tuple, list,
+dict), so ordinary calls no longer ask Python whether the object is a
+`Mapping`, which runs `ABCMeta.__instancecheck__`: `cursor.mogrify("SELECT
+%s", args)` 200,000 times, best of seven, went from 338 to 279 ns per call
+with a tuple and from 344 to 293 ns with a list (dicts, other mappings and
+single values unchanged). CodSpeed's `test_mogrify` and `test_executemany`
+follow it in CI.
