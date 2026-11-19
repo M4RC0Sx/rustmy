@@ -143,3 +143,29 @@ def test_client_certificate(server: Server) -> None:
     with pytest.raises(rustmy.OperationalError) as info:
         server.connect(user="rustmy_x509", ssl=True)
     assert info.value.args[0] == 1045
+
+
+def _sessions_reused(conn: rustmy.Connection) -> str:
+    cursor = conn.cursor()
+    cursor.execute("SHOW SESSION STATUS LIKE 'Ssl_sessions_reused'")
+    (_, reused) = cursor.fetchone() or ("", "")
+    assert isinstance(reused, str)
+    return reused
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"ssl_ca": CERTS / "ca.pem"}],
+    ids=["preferred", "verify_identity"],
+)
+def test_connections_with_the_same_options_resume_the_session(
+    server: Server, kwargs: dict[str, Any]
+) -> None:
+    # The TLS configuration is shared by every connection with the same
+    # options, and with it the session tickets the server issued. MySQL
+    # issues them; MariaDB does not, and then every handshake is complete.
+    server.connect(**kwargs).close()
+    with server.connect(**kwargs) as conn:
+        assert conn.tls
+        expected = "0" if server.name == "mariadb" else "1"
+        assert _sessions_reused(conn) == expected

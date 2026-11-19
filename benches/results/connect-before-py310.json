@@ -1,0 +1,85 @@
+{
+  "date": "2026-11-19T16:07:09+00:00",
+  "machine": "Darwin arm64",
+  "python": "CPython 3.10.19",
+  "server": "8.4.13",
+  "drivers": {
+    "rustmy": "0.0.0",
+    "mysqlclient": "2.3.1",
+    "pymysql": "2.2.8"
+  },
+  "repeat": 5,
+  "title": "1,000 connections to MySQL 8.4.13, local: throughput relative to mysqlclient",
+  "default": null,
+  "labels": {
+    "mysqlclient": "mysqlclient",
+    "pymysql": "PyMySQL"
+  },
+  "connections": 1000,
+  "latency_ms": 0,
+  "sweep": [
+    {
+      "label": "disabled",
+      "seconds": {
+        "rustmy": 0.4020227499422617,
+        "mysqlclient": 0.498054499970749,
+        "pymysql": 0.5329744579503313
+      },
+      "statements": {
+        "rustmy": [
+          "SET autocommit=0"
+        ],
+        "mysqlclient": [
+          "SET NAMES utf8mb4",
+          "set autocommit=0"
+        ],
+        "pymysql": [
+          "SET NAMES utf8mb4",
+          "SET AUTOCOMMIT = 0"
+        ]
+      }
+    },
+    {
+      "label": "preferred",
+      "seconds": {
+        "rustmy": 1.4157957920106128,
+        "mysqlclient": 12.90028312499635,
+        "pymysql": 9.290259458997753
+      },
+      "statements": {
+        "rustmy": [
+          "SET autocommit=0"
+        ],
+        "mysqlclient": [
+          "SET NAMES utf8mb4",
+          "set autocommit=0"
+        ],
+        "pymysql": [
+          "SET NAMES utf8mb4",
+          "SET AUTOCOMMIT = 0"
+        ]
+      }
+    },
+    {
+      "label": "verify_identity",
+      "seconds": {
+        "rustmy": 1.5927683330373839,
+        "mysqlclient": 6.614939749997575,
+        "pymysql": 4.1051625839900225
+      },
+      "statements": {
+        "rustmy": [
+          "SET autocommit=0"
+        ],
+        "mysqlclient": [
+          "SET NAMES utf8mb4",
+          "set autocommit=0"
+        ],
+        "pymysql": [
+          "SET NAMES utf8mb4",
+          "SET AUTOCOMMIT = 0"
+        ]
+      }
+    }
+  ]
+}

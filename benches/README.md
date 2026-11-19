@@ -1294,3 +1294,94 @@ three rounds, ms:
 
 16 KiB: within 1% of the best locally and 5% faster than 64 KiB with zstd,
 the configuration meant for slow links.
+
+## Connecting: TLS configuration and session statements (2026-11-19, Python 3.10)
+
+`connect.py` opens and closes 1,000 connections per driver, one after the
+other, with each driver's defaults (`autocommit` off, utf8mb4), plain, with
+TLS and no verification (`preferred`, the default of all three) and
+verifying the certificate against the test CA (`verify_identity`); best of
+five. It also prints the statements each driver sends while connecting, from
+the server's general log.
+
+```sh
+docker compose --profile bench up -d --wait mysql mariadb toxiproxy
+uv run --no-sync python benches/connect.py --repeat 5 \
+    --json benches/results/connect-before-py310.json        # before the change
+uv run --no-sync python benches/connect.py --repeat 5 \
+    --json benches/results/connect-after-py310.json \
+    --before benches/results/connect-before-py310.json      # after it
+uv run --no-sync python benches/report.py --section connect-mysql \
+    benches/results/connect-after-py310.json
+# the same with --port 13307 and connect-mariadb-*.json for MariaDB
+```
+
+Before this change rustmy built its rustls configuration on every
+connection: a new crypto provider, the CA file read and parsed, the
+verifier (or the operating system's trust store) set up again, and an empty
+TLS session cache. It is now built once per process for each set of TLS
+options and kept while its files are unchanged, and the connections that
+share it resume TLS sessions where the server issues tickets (MySQL does,
+MariaDB does not). The tables give the time of all 1,000 connections.
+
+MySQL 8.4:
+
+<!-- results:connect-mysql:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/connect-mysql-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/connect-mysql-light.svg">
+</picture>
+
+**CPython 3.10.19** · 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-19T16:24:36+00:00
+
+| Configuration | disabled | preferred | verify_identity | vs mysqlclient (disabled) | vs mysqlclient (preferred) | vs mysqlclient (verify_identity) |
+|---|--:|--:|--:|--:|--:|--:|
+| rustmy | **399.3 ms** | **685.5 ms** | **680.2 ms** | 1.19x | 18.66x | 10.72x |
+| rustmy before | 402.0 ms | 1415.8 ms | 1592.8 ms | 1.19x | 9.03x | 4.58x |
+| mysqlclient | 476.6 ms | 12791.0 ms | 7292.9 ms | 1.00x | 1.00x | 1.00x |
+| PyMySQL | 539.0 ms | 9314.9 ms | 3220.7 ms | 0.88x | 1.37x | 2.26x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:connect-mysql:end -->
+
+MariaDB 11.4:
+
+<!-- results:connect-mariadb:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/connect-mariadb-dark.svg">
+  <img alt="Throughput relative to mysqlclient" src="results/connect-mariadb-light.svg">
+</picture>
+
+**CPython 3.10.19** · 11.4.13-MariaDB-ubu2404 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8 · best of 5 · 2026-11-19T16:34:58+00:00
+
+| Configuration | disabled | preferred | verify_identity | vs mysqlclient (disabled) | vs mysqlclient (preferred) | vs mysqlclient (verify_identity) |
+|---|--:|--:|--:|--:|--:|--:|
+| rustmy | 343.0 ms | **626.9 ms** | **625.6 ms** | 1.25x | 17.86x | 7.42x |
+| rustmy before | **338.8 ms** | 1467.4 ms | 1472.0 ms | 1.27x | 7.63x | 3.15x |
+| mysqlclient | 430.4 ms | 11195.3 ms | 4641.5 ms | 1.00x | 1.00x | 1.00x |
+| PyMySQL | 475.0 ms | 8654.7 ms | 1774.8 ms | 0.91x | 1.29x | 2.62x |
+
+Times per configuration; the fastest is in bold.
+<!-- results:connect-mariadb:end -->
+
+With TLS a connection now costs 0.63–0.69 ms instead of 1.42–1.59 ms, about
+as much on MariaDB, which never resumes a session, as on MySQL: nearly all
+of the gain is not rebuilding the configuration. Plain TCP is unchanged
+(0.34–0.40 ms, ahead of mysqlclient). mysqlclient and PyMySQL take 3–13 ms
+with TLS on this machine.
+
+Statements sent while connecting, the same on both servers:
+
+| Driver | Statements |
+|---|---|
+| rustmy | `SET autocommit = 0` |
+| mysqlclient | `SET NAMES utf8mb4; set autocommit=0` |
+| PyMySQL | `SET NAMES utf8mb4; SET AUTOCOMMIT = 0` |
+
+rustmy never needed `SET NAMES` here (both test servers default to
+utf8mb4), but did whenever the server's default character set was another,
+such as MariaDB 10.11 and 11.4 out of the box (latin1): the handshake
+already sets the character set, exactly as `SET NAMES` would on all nine
+servers (`test_the_handshake_sets_the_character_set`), so it is now sent
+only for gb18030, which MariaDB lacks. An explicit collation, `sql_mode`
+and `autocommit` share one `SET` instead of one round trip each.

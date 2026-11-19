@@ -40,6 +40,12 @@ if TYPE_CHECKING:
 # Server status flags (see the protocol's SERVER_STATUS_* values).
 _STATUS_AUTOCOMMIT = 1 << 1
 _STATUS_NO_BACKSLASH_ESCAPES = 1 << 9
+#: Character sets whose handshake collation id some supported server does
+#: not know (MariaDB has no gb18030): it would keep its own default without
+#: an error. Every other character set the handshake sets exactly as
+#: ``SET NAMES`` would, on all supported servers
+#: (``test_charsets.py::test_the_handshake_sets_the_character_set``).
+_HANDSHAKE_MAY_IGNORE = frozenset({"gb18030"})
 
 PathArg: TypeAlias = "str | PathLike[str]"
 
@@ -167,7 +173,8 @@ class Connection:
         Without ``collation`` the session uses the server's default collation
         for it (what its tables use, so comparisons with user variables
         work), set in the handshake at no extra cost; with ``collation``,
-        ``SET NAMES … COLLATE …`` runs after connecting.
+        ``SET NAMES … COLLATE …`` runs after connecting, in the same
+        statement as ``sql_mode`` and ``autocommit``.
 
         ``multi_statements=True`` allows several statements separated by
         ``;`` in one ``execute`` (off by default: it lets an injected string
@@ -332,38 +339,55 @@ class Connection:
             )
         # The handshake asks for the character set (with the server's
         # default collation for it). SET NAMES follows for an explicit
-        # collation, after set_character_set(), and for any character set
-        # other than the server's own: a server silently ignores a collation
-        # id it does not know (MariaDB has no gb18030) and keeps its
-        # default, so only SET NAMES turns that into an error.
+        # collation, after set_character_set(), and for a character set some
+        # supported server does not know: it silently ignores the collation
+        # id and keeps its default, so only SET NAMES turns that into an
+        # error.
         self._collation = collation
         self._set_names = collation is not None
         self._sql_mode = sql_mode
         self._init_command = init_command
         self._autocommit_setting = autocommit
         try:
-            self._init_session()
+            self._init_session(connecting=True)
         except BaseException:
             self._conn.close()
             raise
 
-    def _init_session(self) -> None:
-        """Apply the per-session settings chosen at connect time.
+    def _init_session(self, *, connecting: bool = False) -> None:
+        """Apply the per-session settings chosen at connect time, in as few
+        statements as possible (each one is a round trip).
 
-        A character set other than the server's own is set again after a
-        reset too: MySQL's reset returns the session to the server's default
+        After a reset, a character set other than the server's own is set
+        again: MySQL's reset returns the session to the server's default
         character set rather than the one negotiated at connect time
         (MariaDB keeps it).
         """
         conn = self._conn
-        if self._set_names or conn.charset != conn.server_charset:
-            conn.set_character_set(conn.charset, self._collation)
+        settings: list[str] = []
+        params: list[object] = []
+        if self._set_names or (
+            conn.charset != conn.server_charset
+            and (not connecting or conn.charset in _HANDSHAKE_MAY_IGNORE)
+        ):
+            settings.append(_core.names_clause(conn.charset, self._collation))
         if self._sql_mode is not None:
-            self._conn.execute("SET sql_mode = %s", (self._sql_mode,))
+            settings.append("sql_mode = %s")
+            params.append(self._sql_mode)
+        autocommit = self._autocommit_setting
+        if (
+            self._init_command is None
+            and autocommit is not None
+            and self.get_autocommit() != autocommit
+        ):
+            settings.append("autocommit = 1" if autocommit else "autocommit = 0")
+            autocommit = None
+        if settings:
+            conn.execute("SET " + ", ".join(settings), tuple(params) or None)
         if self._init_command is not None:
             self._query(self._init_command)
-        if self._autocommit_setting is not None:
-            self.autocommit(self._autocommit_setting)
+        if autocommit is not None:
+            self.autocommit(autocommit)
 
     def _query(self, sql: str) -> QueryResult:
         return self._conn.query(sql)

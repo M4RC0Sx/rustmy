@@ -180,6 +180,38 @@ def test_charset_the_server_lacks_fails_to_connect(
     assert excinfo.value.args[0] == 1115  # ER_UNKNOWN_CHARACTER_SET
 
 
+def _set_statements(conn: rustmy.Connection) -> int:
+    """``SET`` statements the session has run so far."""
+    cursor = conn.cursor()
+    cursor.execute("SHOW SESSION STATUS LIKE 'Com_set_option'")
+    row = cursor.fetchone()
+    assert row is not None
+    return int(row[1])
+
+
+_CHARSET_VARIABLES = (
+    "SELECT @@character_set_client, @@character_set_connection,"
+    " @@character_set_results, @@collation_connection"
+)
+
+
+@pytest.mark.parametrize("charset", SUPPORTED)
+def test_the_handshake_sets_the_character_set(
+    server: Server, conn: rustmy.Connection, charset: str
+) -> None:
+    # Connecting sends no SET NAMES (only SET autocommit = 0), so the session
+    # must already be what SET NAMES would make it.
+    _connect_or_skip(server, conn, charset)
+    with server.connect(charset=charset) as other:
+        assert _set_statements(other) == 1
+        cursor = other.cursor()
+        cursor.execute(_CHARSET_VARIABLES)
+        connected = cursor.fetchone()
+        cursor.execute(f"SET NAMES {charset}")
+        cursor.execute(_CHARSET_VARIABLES)
+        assert cursor.fetchone() == connected
+
+
 # Default collation ---------------------------------------------------------
 
 
@@ -517,6 +549,8 @@ def _session(conn: rustmy.Connection) -> tuple[Any, ...]:
 
 def test_explicit_collation_survives_reset_and_change_user(server: Server) -> None:
     with server.connect(collation="utf8mb4_bin") as conn:
+        # SET NAMES and autocommit in one statement.
+        assert _set_statements(conn) == 1
         assert _session(conn) == ("utf8mb4", "utf8mb4_bin")
         conn.reset_connection()
         assert _session(conn) == ("utf8mb4", "utf8mb4_bin")
