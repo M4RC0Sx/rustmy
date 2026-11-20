@@ -339,11 +339,12 @@ def section(run: dict[str, Any], base: str, *, folded: bool = False) -> str:
         )
     ]
     for area, title in AREAS.items():
+        measure = "peak memory" if area == "memory" else "time"
         parts.append(f"#### {title}")
         parts.append(
             picture(
                 f"showcase-{area}",
-                f"{title}: time per driver, lower is better",
+                f"{title}: {measure} per driver, lower is better",
                 base,
             )
         )
