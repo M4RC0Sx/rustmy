@@ -2,6 +2,12 @@
 
 All notable changes to rustmy are documented in this file. Versions follow [Semantic Versioning](https://semver.org) and entries come from [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.3.1](https://github.com/M4RC0Sx/rustmy/compare/v1.3.0...v1.3.1) (2026-11-20)
+
+### Documentation
+
+* benchmark figures measured with the published 1.3.0 wheel ([00ef6cb](https://github.com/M4RC0Sx/rustmy/commit/00ef6cbb3470bcbae21ba5c9029e9a9dab40b8f6))
+
 ## [1.3.0](https://github.com/M4RC0Sx/rustmy/compare/v1.2.1...v1.3.0) (2026-11-19)
 
 ### Features
