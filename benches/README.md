@@ -48,6 +48,10 @@ rows for every driver (some build the whole batch as one statement, beyond
 `render_nulls=True`, without which the ORM splits the batch wherever the
 NULL columns change (thousands of statements, with any driver).
 
+The published figures measure the wheel from PyPI (`uv pip install --no-deps
+rustmy==<version>` in place of `maturin develop`), what users install; a
+local release build can differ by a few percent.
+
 ```sh
 export UV_PROJECT_ENVIRONMENT=.venv-3.14
 PKG_CONFIG_PATH=/opt/homebrew/opt/mysql-client/lib/pkgconfig \
@@ -64,7 +68,7 @@ main README (`hero-*.svg`), and rewrites the tables below and in the main
 README's Performance section.
 
 <!-- results:showcase:start -->
-**CPython 3.14.3** · MySQL 8.4.13 · Darwin arm64 · rustmy 0.0.0, mysqlclient 2.3.1, PyMySQL 2.2.8, mysql-connector-python 26.10.0 (C extension), SQLAlchemy 2.1.9, Django 6.1.3 · best of 5 (100k) and 3 (1M) · 2026-11-18T23:17:13+00:00
+**CPython 3.14.3** · MySQL 8.4.13 · Darwin arm64 · rustmy 1.3.0, mysqlclient 2.3.1, PyMySQL 2.2.8, mysql-connector-python 26.10.0 (C extension), SQLAlchemy 2.1.9, Django 6.1.3 · best of 5 (100k) and 3 (1M) · 2026-11-20T00:16:22+00:00
 
 #### DB-API
 
@@ -75,14 +79,14 @@ README's Performance section.
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|
-| Read rows (tuples) | 100,000 | **41 ms** | 124 ms | 308 ms | 154 ms | 3.0× faster |
-| Read rows (dicts) | 100,000 | **52 ms** | 131 ms | 340 ms | 211 ms | 2.5× faster |
-| Stream rows | 100,000 | **32 ms** | 102 ms | 321 ms | 182 ms | 3.2× faster |
-| Insert rows (executemany) | 100,000 | **336 ms** | 1.06 s | 638 ms | 590 ms | 3.2× faster |
-| Read rows (tuples) | 1,000,000 | **456 ms** | 1.31 s | 3.19 s | 1.60 s | 2.9× faster |
-| Read rows (dicts) | 1,000,000 | **534 ms** | 1.39 s | 3.52 s | 2.14 s | 2.6× faster |
-| Stream rows | 1,000,000 | **268 ms** | 1.04 s | 3.22 s | 1.81 s | 3.9× faster |
-| Insert rows (executemany) | 1,000,000 | **3.67 s** | 11.77 s | 6.60 s | 5.89 s | 3.2× faster |
+| Read rows (tuples) | 100,000 | **45 ms** | 120 ms | 300 ms | 153 ms | 2.7× faster |
+| Read rows (dicts) | 100,000 | **52 ms** | 135 ms | 332 ms | 208 ms | 2.6× faster |
+| Stream rows | 100,000 | **31 ms** | 103 ms | 314 ms | 179 ms | 3.4× faster |
+| Insert rows (executemany) | 100,000 | **324 ms** | 1.08 s | 617 ms | 574 ms | 3.3× faster |
+| Read rows (tuples) | 1,000,000 | **454 ms** | 1.28 s | 3.06 s | 1.57 s | 2.8× faster |
+| Read rows (dicts) | 1,000,000 | **538 ms** | 1.36 s | 3.42 s | 2.10 s | 2.5× faster |
+| Stream rows | 1,000,000 | **268 ms** | 1.04 s | 3.12 s | 1.81 s | 3.9× faster |
+| Insert rows (executemany) | 1,000,000 | **3.77 s** | 11.55 s | 6.38 s | 5.81 s | 3.1× faster |
 
 #### Prepared statements
 
@@ -93,8 +97,8 @@ README's Performance section.
 
 | Workload | Rows | rustmy (prepared) | rustmy (text) | mysql-connector (prepared) | mysqlclient | PyMySQL | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|--:|
-| Read rows | 100,000 | 42 ms | **41 ms** | 179 ms | 125 ms | 315 ms | 3.0× faster |
-| Read rows | 1,000,000 | 477 ms | **456 ms** | 1.80 s | 1.46 s | 3.15 s | 3.1× faster |
+| Read rows | 100,000 | **42 ms** | 45 ms | 178 ms | 124 ms | 312 ms | 2.9× faster |
+| Read rows | 1,000,000 | 473 ms | **454 ms** | 1.79 s | 1.45 s | 3.10 s | 3.1× faster |
 
 #### SQLAlchemy 2
 
@@ -105,14 +109,14 @@ README's Performance section.
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|
-| Core: read rows | 100,000 | **55 ms** | 147 ms | 331 ms | 167 ms | 2.7× faster |
-| ORM: load objects | 100,000 | **247 ms** | 328 ms | 521 ms | 362 ms | 1.3× faster |
-| ORM: stream objects (yield_per) | 100,000 | **202 ms** | 255 ms | 492 ms | 331 ms | 1.3× faster |
-| ORM: bulk insert | 100,000 | **550 ms** | 1.43 s | 899 ms | 1.02 s | 2.6× faster |
-| Core: read rows | 1,000,000 | **536 ms** | 1.33 s | 3.32 s | 1.70 s | 2.5× faster |
-| ORM: load objects | 1,000,000 | **2.59 s** | 3.39 s | 5.38 s | 3.73 s | 1.3× faster |
-| ORM: stream objects (yield_per) | 1,000,000 | **1.90 s** | 2.45 s | 4.81 s | 3.24 s | 1.3× faster |
-| ORM: bulk insert | 1,000,000 | **5.52 s** | 15.07 s | 9.15 s | 9.94 s | 2.7× faster |
+| Core: read rows | 100,000 | **57 ms** | 150 ms | 326 ms | 168 ms | 2.6× faster |
+| ORM: load objects | 100,000 | **243 ms** | 323 ms | 513 ms | 357 ms | 1.3× faster |
+| ORM: stream objects (yield_per) | 100,000 | **199 ms** | 259 ms | 479 ms | 330 ms | 1.3× faster |
+| ORM: bulk insert | 100,000 | **527 ms** | 1.29 s | 893 ms | 1.01 s | 2.4× faster |
+| Core: read rows | 1,000,000 | **541 ms** | 1.32 s | 3.28 s | 1.68 s | 2.4× faster |
+| ORM: load objects | 1,000,000 | **2.59 s** | 3.37 s | 5.29 s | 3.74 s | 1.3× faster |
+| ORM: stream objects (yield_per) | 1,000,000 | **1.89 s** | 2.46 s | 4.71 s | 3.25 s | 1.3× faster |
+| ORM: bulk insert | 1,000,000 | **5.35 s** | 15.14 s | 9.07 s | 9.94 s | 2.8× faster |
 
 #### Django
 
@@ -123,37 +127,37 @@ README's Performance section.
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|
-| QuerySet: load objects | 100,000 | **210 ms** | 278 ms | 480 ms | 400 ms | 1.3× faster |
-| QuerySet: values_list() | 100,000 | **46 ms** | 142 ms | 327 ms | 248 ms | 3.1× faster |
-| QuerySet: iterator() | 100,000 | **172 ms** | 265 ms | 450 ms | 365 ms | 1.5× faster |
-| bulk_create() | 100,000 | **1.17 s** | 1.41 s | 1.44 s | 1.93 s | 1.2× faster |
-| QuerySet: load objects | 1,000,000 | **1.93 s** | 2.72 s | 4.74 s | 3.96 s | 1.4× faster |
-| QuerySet: values_list() | 1,000,000 | **427 ms** | 1.25 s | 3.23 s | 2.46 s | 2.9× faster |
-| QuerySet: iterator() | 1,000,000 | **1.66 s** | 2.43 s | 4.49 s | 3.64 s | 1.5× faster |
-| bulk_create() | 1,000,000 | **11.43 s** | 13.89 s | 14.10 s | 19.39 s | 1.2× faster |
+| QuerySet: load objects | 100,000 | **200 ms** | 290 ms | 481 ms | 413 ms | 1.4× faster |
+| QuerySet: values_list() | 100,000 | **45 ms** | 139 ms | 328 ms | 253 ms | 3.1× faster |
+| QuerySet: iterator() | 100,000 | **178 ms** | 248 ms | 448 ms | 369 ms | 1.4× faster |
+| bulk_create() | 100,000 | **1.17 s** | 1.40 s | 1.45 s | 1.90 s | 1.2× faster |
+| QuerySet: load objects | 1,000,000 | **1.92 s** | 2.70 s | 4.73 s | 4.02 s | 1.4× faster |
+| QuerySet: values_list() | 1,000,000 | **425 ms** | 1.21 s | 3.25 s | 2.57 s | 2.8× faster |
+| QuerySet: iterator() | 1,000,000 | **1.68 s** | 2.42 s | 4.49 s | 3.63 s | 1.4× faster |
+| bulk_create() | 1,000,000 | **11.43 s** | 13.83 s | 13.92 s | 18.96 s | 1.2× faster |
 
 #### Memory
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="results/showcase-memory-dark.svg">
-  <img alt="Memory: time per driver, lower is better" src="results/showcase-memory-light.svg">
+  <img alt="Memory: peak memory per driver, lower is better" src="results/showcase-memory-light.svg">
 </picture>
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|
-| Peak memory of fetchall() | 1,000,000 | 504 MiB | 696 MiB | 511 MiB | **496 MiB** | 28% less memory |
+| Peak memory of fetchall() | 1,000,000 | 504 MiB | 697 MiB | 512 MiB | **496 MiB** | 28% less memory |
 <!-- results:showcase:end -->
 
 What the numbers say:
 
 - Plain DB-API is where rustmy gains most: 2.5–3.9x mysqlclient's speed
   reading (more when streaming, where mysqlclient fetches one row per call),
-  and 3.2x inserting: mysqlclient sends `executemany` in 64 KiB
+  and 3.1–3.3x inserting: mysqlclient sends `executemany` in 64 KiB
   statements, rustmy in 256 KiB ones built in Rust.
 - Through an ORM, building a Python object per row costs the same with every
   driver and dominates: rustmy is still 1.2–1.5x faster than mysqlclient and
-  2–2.5x faster than PyMySQL, and Django's `values_list()`, which builds no
-  objects, keeps nearly all of the DB-API gain (2.9–3.1x).
+  2–2.7x faster than PyMySQL, and Django's `values_list()`, which builds no
+  objects, keeps nearly all of the DB-API gain (2.8–3.1x).
 - Prepared statements read this table as fast as text, not faster: its rows
   are mostly strings, which travel the same way in both protocols, and the
   binary protocol only saves parsing numbers and dates (on doubles, datetimes
