@@ -248,8 +248,10 @@ fast; signals are checked between batches (Ctrl+C interrupts a long read, and
 the next command discards the rest).
 
 **Streaming** (`SSCursor`, `crates/pydriver/src/stream.rs`): the pending
-result set is state of `Conn` (`query_streamed`, `read_rows`, `skip_rows`), so
-any command discards unread rows first. The connection lock is held only
+result set is protocol state of the connection (`Session` in `session.rs`,
+which reads a reply's head and its rows without I/O; `Conn::query_streamed`,
+`read_rows` and `skip_rows` drive it), so any command discards unread rows
+first. The connection lock is held only
 while a batch is read, never while Python runs. Every command bumps the
 connection's `generation`; a `ResultStream` compares its own on every fetch,
 so a cursor whose rows were discarded raises instead of returning a truncated
