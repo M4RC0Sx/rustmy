@@ -1332,40 +1332,13 @@ fn sql_name<'a>(what: &str, name: &'a str) -> PyResult<&'a str> {
     }
 }
 
-/// Opens an authenticated connection. Python-facing argument handling
-/// (defaults, aliases) lives in `rustmy.connections`.
-#[pyfunction]
-#[pyo3(signature = (
-    *,
-    host,
-    port,
-    user,
-    password,
-    database = None,
-    unix_socket = None,
-    connect_timeout = None,
-    read_timeout = None,
-    write_timeout = None,
-    client_flag = 0,
-    charset = "utf8mb4",
-    ssl_mode = "preferred",
-    ssl_ca = None,
-    ssl_cert = None,
-    ssl_key = None,
-    server_public_key = None,
-    get_server_public_key = true,
-    binary_prefix = true,
-    statement_cache_size = 32,
-    compress = None,
-    zstd_level = 3,
-    local_infile = false,
-    local_infile_dir = None,
-))]
+/// The protocol's connection options from `connect()`'s arguments
+/// (validated), with the session's codec and the target errors name.
 #[expect(
     clippy::too_many_arguments,
     reason = "mirrors the keyword-only Python signature one to one"
 )]
-pub(crate) fn connect(
+pub(crate) fn connect_opts(
     py: Python<'_>,
     host: String,
     port: u16,
@@ -1384,13 +1357,12 @@ pub(crate) fn connect(
     ssl_key: Option<PathBuf>,
     server_public_key: Option<PathBuf>,
     get_server_public_key: bool,
-    binary_prefix: bool,
     statement_cache_size: usize,
     compress: Option<&str>,
     zstd_level: u8,
     local_infile: bool,
     local_infile_dir: Option<PathBuf>,
-) -> PyResult<Connection> {
+) -> PyResult<(Opts, Arc<Codec>, String)> {
     if local_infile && local_infile_dir.is_none() {
         return Err(PyValueError::new_err(
             "local_infile=True needs local_infile_dir: LOAD DATA LOCAL INFILE \
@@ -1452,6 +1424,93 @@ pub(crate) fn connect(
         compress,
         local_infile_dir,
     };
+    Ok((opts, codec, target))
+}
+
+/// Opens an authenticated connection. Python-facing argument handling
+/// (defaults, aliases) lives in `rustmy.connections`.
+#[pyfunction]
+#[pyo3(signature = (
+    *,
+    host,
+    port,
+    user,
+    password,
+    database = None,
+    unix_socket = None,
+    connect_timeout = None,
+    read_timeout = None,
+    write_timeout = None,
+    client_flag = 0,
+    charset = "utf8mb4",
+    ssl_mode = "preferred",
+    ssl_ca = None,
+    ssl_cert = None,
+    ssl_key = None,
+    server_public_key = None,
+    get_server_public_key = true,
+    binary_prefix = true,
+    statement_cache_size = 32,
+    compress = None,
+    zstd_level = 3,
+    local_infile = false,
+    local_infile_dir = None,
+))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the keyword-only Python signature one to one"
+)]
+pub(crate) fn connect(
+    py: Python<'_>,
+    host: String,
+    port: u16,
+    user: &str,
+    password: String,
+    database: Option<&str>,
+    unix_socket: Option<PathBuf>,
+    connect_timeout: Option<f64>,
+    read_timeout: Option<f64>,
+    write_timeout: Option<f64>,
+    client_flag: u32,
+    charset: &str,
+    ssl_mode: &str,
+    ssl_ca: Option<PathBuf>,
+    ssl_cert: Option<PathBuf>,
+    ssl_key: Option<PathBuf>,
+    server_public_key: Option<PathBuf>,
+    get_server_public_key: bool,
+    binary_prefix: bool,
+    statement_cache_size: usize,
+    compress: Option<&str>,
+    zstd_level: u8,
+    local_infile: bool,
+    local_infile_dir: Option<PathBuf>,
+) -> PyResult<Connection> {
+    let (opts, codec, target) = connect_opts(
+        py,
+        host,
+        port,
+        user,
+        password,
+        database,
+        unix_socket,
+        connect_timeout,
+        read_timeout,
+        write_timeout,
+        client_flag,
+        charset,
+        ssl_mode,
+        ssl_ca,
+        ssl_cert,
+        ssl_key,
+        server_public_key,
+        get_server_public_key,
+        statement_cache_size,
+        compress,
+        zstd_level,
+        local_infile,
+        local_infile_dir,
+    )?;
     let conn = py.detach(|| Conn::connect(&opts)).map_err(|err| {
         from_proto(err, Phase::Connect, &target, |message| {
             String::from_utf8_lossy(message).into_owned()
@@ -1512,7 +1571,7 @@ fn timeout(seconds: Option<f64>, name: &str) -> PyResult<Option<Duration>> {
 }
 
 /// The UTF-8 statement writer of the module-level helpers.
-pub(crate) fn utf8_encoder(no_backslash_escapes: bool) -> Encoder {
+fn utf8_encoder(no_backslash_escapes: bool) -> Encoder {
     Encoder {
         no_backslash_escapes,
         binary_prefix: true,

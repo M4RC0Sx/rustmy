@@ -50,6 +50,8 @@ pub use session::ReadOutcome;
 pub use session::StreamId;
 pub use tls::SslMode;
 pub use tls::TlsOpts;
+pub use transport::MaybeTls;
+pub use transport::StartTls;
 pub use transport::Transport;
 
 /// Maximum payload carried by a single protocol packet (2^24 - 1 bytes).
