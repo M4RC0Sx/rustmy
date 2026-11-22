@@ -189,7 +189,9 @@ done; docker compose down -v
   `cargo +nightly fuzz run session fuzz/corpus/session fuzz/seeds/session -- -max_total_time=300`.
   Targets call `rustmy_proto::fuzzing::*`, compiled only with the `fuzzing`
   feature (a scripted transport and a low parsec iteration cap); CI lints that
-  feature and fuzzes weekly.
+  feature and fuzzes weekly. `differential` runs the same session through
+  `proto` and through the 1.3.2 release (a git dependency on its tag, in
+  `fuzz/` only) and fails on any difference in results or errors.
 - **Coverage**: `coverage.yml` uploads Python (`coverage.xml`) and Rust
   (`cargo llvm-cov` over `proto`'s tests and the instrumented extension under
   pytest) to Codecov with flags `python` and `rust`.

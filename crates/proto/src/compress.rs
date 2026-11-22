@@ -142,14 +142,39 @@ impl Compressed {
     /// holds. Returns how many bytes of `data` it used and whether a whole
     /// packet was decoded; a packet that arrives in parts is kept until its
     /// last byte does.
-    pub(crate) fn decode(&mut self, data: &[u8]) -> Result<(usize, bool)> {
+    ///
+    /// On an error what was read up to it counts as used and the packet is
+    /// forgotten, with the part of an ordinary header waiting for it: the
+    /// next read starts with whatever follows, as it did when this layer
+    /// read the stream itself.
+    pub(crate) fn decode(&mut self, data: &[u8]) -> (usize, Result<bool>) {
         let mut used = 0;
+        let decoded = self.decode_into(data, &mut used);
+        if decoded.is_err() {
+            self.lose();
+        }
+        (used, decoded)
+    }
+
+    /// Forgets the packet being read and the decompressed bytes not handed
+    /// out yet.
+    pub(crate) fn lose(&mut self) {
+        self.receiving = None;
+        release(&mut self.wire);
+        self.wire.clear();
+        release(&mut self.input);
+        self.input.clear();
+        self.pos = 0;
+    }
+
+    fn decode_into(&mut self, data: &[u8], used: &mut usize) -> Result<bool> {
         let (wire_len, plain_len) = if let Some(lengths) = self.receiving {
             lengths
         } else {
             let Some(&[c0, c1, c2, seq, u0, u1, u2]) = data.first_chunk::<HEADER_LEN>() else {
-                return Ok((0, false));
+                return Ok(false);
             };
+            *used = HEADER_LEN;
             if seq != self.seq {
                 return Err(Error::protocol(format!(
                     "compressed packet out of order: expected sequence {}, got {seq}",
@@ -160,21 +185,20 @@ impl Compressed {
             let lengths = (length(c0, c1, c2)?, length(u0, u1, u2)?);
             release(&mut self.wire);
             self.wire.clear();
-            used = HEADER_LEN;
             self.receiving = Some(lengths);
             lengths
         };
-        let rest = data.get(used..).unwrap_or_default();
+        let rest = data.get(*used..).unwrap_or_default();
         let n = wire_len.saturating_sub(self.wire.len()).min(rest.len());
         self.wire
             .extend_from_slice(rest.get(..n).unwrap_or_default());
-        used += n;
+        *used += n;
         if self.wire.len() < wire_len {
-            return Ok((used, false));
+            return Ok(false);
         }
         self.receiving = None;
         self.unpack(plain_len)?;
-        Ok((used, true))
+        Ok(true)
     }
 
     /// Moves the packet received in `wire` to `input`, after what is left
@@ -331,9 +355,9 @@ impl Compressed {
             }
             let position = usize::try_from(source.position()).unwrap_or(usize::MAX);
             let data = source.get_ref().get(position..).unwrap_or_default();
-            let (used, decoded) = self.decode(data)?;
+            let (used, decoded) = self.decode(data);
             source.set_position(source.position() + used as u64);
-            if !decoded {
+            if !decoded? {
                 return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
             }
         }

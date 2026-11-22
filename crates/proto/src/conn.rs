@@ -979,9 +979,10 @@ impl Conn {
     fn read_reply(&mut self, totals: &mut PipelineTotals) -> Result<()> {
         let mut reply = self.session.reply();
         let ended = loop {
-            let step = self
-                .read_packet()
-                .and_then(|()| self.session.reply_step(&mut reply, &self.buf, totals));
+            let packet = self.read_packet();
+            let step =
+                self.session
+                    .reply_step(&mut reply, packet.map(|()| self.buf.as_slice()), totals);
             match step {
                 Ok(ReplyStep::Read) => {}
                 Ok(ReplyStep::File(name)) => {
