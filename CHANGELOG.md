@@ -2,6 +2,12 @@
 
 All notable changes to rustmy are documented in this file. Versions follow [Semantic Versioning](https://semver.org) and entries come from [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.3.2](https://github.com/M4RC0Sx/rustmy/compare/v1.3.1...v1.3.2) (2026-11-22)
+
+### Performance Improvements
+
+* keep row tuples of atomic values out of the garbage collector ([#53](https://github.com/M4RC0Sx/rustmy/issues/53)) ([6922f6f](https://github.com/M4RC0Sx/rustmy/commit/6922f6f1e10a6a9a42898d9e2b187e405a968b85))
+
 ## [1.3.1](https://github.com/M4RC0Sx/rustmy/compare/v1.3.0...v1.3.1) (2026-11-20)
 
 ### Documentation
