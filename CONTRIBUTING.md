@@ -283,13 +283,18 @@ cleartext over TLS or Unix sockets, and with RSA-OAEP over plain TCP: the key
 is requested from the server when needed, as PyMySQL does, or pinned with
 `server_public_key`; `get_server_public_key=False` never requests it and
 fails with `Error::Auth` (2061) instead, as libmysqlclient does by default. A key is accepted only right after the client asked for
-it, never with a pinned one (`requests_key` in `conn.rs`;
+it, never with a pinned one (`requests_key` in `login.rs`;
 `crates/proto/tests/auth.rs` plays the man in the middle). MariaDB's `parsec`
 derives its key with as many PBKDF2 rounds as the server asks for, bounded
 as MariaDB Connector/C bounds them: what fits in `connect_timeout`
 (`parsec_max_factor`). A logical payload may be 64 KiB until authentication
 succeeds and 1 GiB after, checked from each header before reading
-(`packet.rs`). `Opts`'s `Debug` output hides the password.
+(`packet.rs`). `Opts`'s `Debug` output hides the password. Like framing,
+the handshake does no I/O of its own (`login.rs`): `Login` turns the
+greeting into the session's parameters and replies, and `Auth` runs the
+authentication exchange one payload at a time, for `COM_CHANGE_USER` too;
+`Conn` moves the payloads, runs the TLS handshake and reads the pinned key
+file (after TLS, before the first response).
 
 **Character sets** (`crates/pydriver/src/charset.rs`, ids in
 `crates/proto/src/charset.rs`). The handshake requests the server's own

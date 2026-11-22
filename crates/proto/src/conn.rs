@@ -20,16 +20,11 @@ use socket2::SockRef;
 use socket2::TcpKeepalive;
 
 use crate::auth::AuthPlugin;
-use crate::auth::cleartext_password;
-use crate::auth::encrypt_password;
 use crate::auth::parse_public_key;
 use crate::auth::parsec_max_factor;
-use crate::auth::parsec_response;
-use crate::auth::trim_nonce;
 use crate::binary::Execute;
 use crate::buf::Reader;
 use crate::buf::put_nul_bytes;
-use crate::charset::handshake_collation;
 use crate::column::Column;
 use crate::compress::Compression;
 use crate::constants::capability;
@@ -37,9 +32,10 @@ use crate::constants::command;
 use crate::constants::status;
 use crate::error::Error;
 use crate::error::Result;
-use crate::handshake::HandshakeResponse;
-use crate::handshake::ServerHandshake;
-use crate::handshake::ssl_request;
+use crate::login::Auth;
+use crate::login::AuthSettings;
+use crate::login::AuthStep;
+use crate::login::Login;
 use crate::packet::PacketStream;
 use crate::packet::ReplyStart;
 use crate::packet::release;
@@ -52,33 +48,10 @@ use crate::result::parse_err;
 use crate::result::parse_ok;
 use crate::result::row_terminator;
 use crate::sql::local_infile_names;
-use crate::tls::SslMode;
 use crate::tls::TlsOpts;
 use crate::tls::client_config;
 use crate::tls::server_name;
 use crate::tls::tls_error;
-
-/// Capabilities requested by default; the effective set is the
-/// intersection with what the server offers.
-const DEFAULT_CAPABILITIES: u32 = capability::LONG_PASSWORD
-    | capability::LONG_FLAG
-    | capability::PROTOCOL_41
-    | capability::TRANSACTIONS
-    | capability::SECURE_CONNECTION
-    | capability::MULTI_RESULTS
-    | capability::PS_MULTI_RESULTS
-    | capability::PLUGIN_AUTH
-    | capability::PLUGIN_AUTH_LENENC_CLIENT_DATA
-    | capability::DEPRECATE_EOF;
-
-/// `caching_sha2_password`: the server found the password in its cache.
-const FAST_AUTH_SUCCESS: u8 = 0x03;
-/// `caching_sha2_password`: the server needs the cleartext password.
-const PERFORM_FULL_AUTH: u8 = 0x04;
-/// `caching_sha2_password`: client asks for the server's RSA public key.
-const CACHING_SHA2_REQUEST_PUBLIC_KEY: u8 = 0x02;
-/// `sha256_password`: client asks for the server's RSA public key.
-const SHA256_REQUEST_PUBLIC_KEY: u8 = 0x01;
 
 /// The server could not re-prepare a statement after a schema change.
 const ER_NEED_REPREPARE: u16 = 1615;
@@ -390,54 +363,6 @@ fn keepalive() -> TcpKeepalive {
     keepalive
 }
 
-/// The error for a password that would have to be encrypted with a key
-/// the server sends, when [`Opts::get_server_public_key`] forbids asking.
-fn key_request_refused(plugin: AuthPlugin) -> Error {
-    Error::Auth(format!(
-        "{} needs the server's RSA public key to send the password without TLS; \
-         pin it with server_public_key, use TLS, or allow get_server_public_key",
-        String::from_utf8_lossy(plugin.name()),
-    ))
-}
-
-/// First authentication payload for `plugin`.
-fn first_response(
-    plugin: AuthPlugin,
-    password: &[u8],
-    nonce: &[u8],
-    secure: bool,
-    pinned_key: Option<&rsa::PublicKey>,
-    get_server_public_key: bool,
-) -> Result<Vec<u8>> {
-    if plugin != AuthPlugin::Sha256 {
-        return Ok(plugin.scramble(password, nonce));
-    }
-    // sha256_password sends the password itself from the start.
-    if password.is_empty() {
-        Ok(vec![0])
-    } else if secure {
-        Ok(cleartext_password(password))
-    } else if let Some(key) = pinned_key {
-        encrypt_password(password, nonce, key)
-    } else if get_server_public_key {
-        Ok(vec![SHA256_REQUEST_PUBLIC_KEY])
-    } else {
-        Err(key_request_refused(plugin))
-    }
-}
-
-/// Whether `reply` asks the server for its RSA public key. Only then may the
-/// next `AuthMoreData` be a key: accepting one at any other time would let a
-/// man in the middle replace a key pinned with `server_public_key` (or skip
-/// the request) and decrypt the password.
-fn requests_key(plugin: AuthPlugin, reply: &[u8]) -> bool {
-    matches!(
-        (plugin, reply),
-        (AuthPlugin::CachingSha2, [CACHING_SHA2_REQUEST_PUBLIC_KEY])
-            | (AuthPlugin::Sha256, [SHA256_REQUEST_PUBLIC_KEY])
-    )
-}
-
 /// [`Opts::local_infile_dir`] resolved, or why it cannot be used.
 fn local_infile_dir(opts: &Opts) -> Result<Option<PathBuf>> {
     opts.local_infile_dir
@@ -619,12 +544,9 @@ pub struct Conn {
     /// Default plugin and nonce from the greeting, reused by `COM_CHANGE_USER`.
     default_plugin: AuthPlugin,
     greeting_nonce: Vec<u8>,
-    /// Pinned RSA key (`Opts::server_public_key`), also for `COM_CHANGE_USER`.
-    pinned_key: Option<rsa::PublicKey>,
-    /// [`Opts::get_server_public_key`], also for `COM_CHANGE_USER`.
-    get_server_public_key: bool,
-    /// Largest parsec iteration factor accepted, from the connect timeout.
-    parsec_max_factor: u8,
+    /// What authentication needs besides the password, also for
+    /// `COM_CHANGE_USER`.
+    auth: AuthSettings,
     /// Session collation sent in the handshake, also for `COM_CHANGE_USER`.
     collation: u8,
     /// The server's default collation, from its greeting.
@@ -642,8 +564,6 @@ pub struct Conn {
     statements: StatementCache,
     /// Compression in use, negotiated in the handshake.
     compression: Option<Compression>,
-    /// zstd level sent in the handshake response.
-    zstd_level: u8,
     /// [`Opts::local_infile_dir`], resolved.
     local_infile_dir: Option<PathBuf>,
     /// Local files the current command may send.
@@ -688,61 +608,15 @@ impl Conn {
         let mut stream = PacketStream::new(transport);
         let mut buf = Vec::new();
         stream.read_into(&mut buf)?;
-        let greeting = ServerHandshake::parse(&buf)?;
-
-        if greeting.capabilities & capability::PROTOCOL_41 == 0 {
-            return Err(Error::unsupported("servers older than MySQL 4.1"));
-        }
-        let mut wanted = DEFAULT_CAPABILITIES | opts.client_flag;
-        if opts.database.is_some() {
-            wanted |= capability::CONNECT_WITH_DB;
-        }
-        if local_infile_dir.is_some() {
-            wanted |= capability::LOCAL_FILES;
-        }
-        let use_tls = Self::negotiate_tls(opts, &greeting)?;
-        if use_tls {
-            wanted |= capability::SSL;
-        }
-        // With both flags the server picks zlib: ask for one only.
-        let zstd_offered = greeting.capabilities & capability::ZSTD_COMPRESSION_ALGORITHM != 0;
-        let (compression, zstd_level) = match opts.compress {
-            Some(Compression::Zstd { level }) if zstd_offered => {
-                wanted |= capability::ZSTD_COMPRESSION_ALGORITHM;
-                (Some(Compression::Zstd { level }), level)
-            }
-            Some(_) if greeting.capabilities & capability::COMPRESS != 0 => {
-                wanted |= capability::COMPRESS;
-                (Some(Compression::Zlib), 0)
-            }
-            _ => (None, 0),
-        };
-        let capabilities = wanted & greeting.capabilities;
-        let collation =
-            handshake_collation(&opts.charset, greeting.collation, greeting.is_mariadb())
-                .ok_or_else(|| {
-                    Error::Config(format!("unknown character set {:?}", opts.charset))
-                })?;
-
-        if use_tls {
+        let login = Login::new(opts, &buf, local_infile_dir.is_some())?;
+        if let Some(request) = login.ssl_request() {
             // SSLRequest goes out in plain text, then the same socket is
             // wrapped in TLS and the sequence continues inside it.
-            stream.write_packet(&ssl_request(capabilities, collation))?;
+            stream.write_packet(&request)?;
             let (raw, seq) = stream.into_parts()?;
             stream = PacketStream::from_parts(raw.upgrade(&opts.tls, &opts.host)?, seq);
         }
-
-        let mut conn = Self {
-            stream,
-            capabilities,
-            status: greeting.status,
-            server_version: greeting.server_version.clone(),
-            connection_id: greeting.connection_id,
-            // Answer with the server's default plugin when we know it;
-            // otherwise offer native auth and let the server switch us.
-            default_plugin: AuthPlugin::from_name(&greeting.auth_plugin)
-                .unwrap_or(AuthPlugin::Native),
-            greeting_nonce: greeting.nonce.clone(),
+        let auth = AuthSettings {
             pinned_key: opts
                 .server_public_key
                 .as_deref()
@@ -750,6 +624,26 @@ impl Conn {
                 .transpose()?,
             get_server_public_key: opts.get_server_public_key,
             parsec_max_factor: parsec_max_factor(opts.connect_timeout),
+            secure: stream.get_ref().is_secure(),
+        };
+        let (response, exchange) = login.response(opts, &auth)?;
+        let Login {
+            greeting,
+            capabilities,
+            collation,
+            compression,
+            plugin,
+            ..
+        } = login;
+        let mut conn = Self {
+            stream,
+            capabilities,
+            status: greeting.status,
+            server_version: greeting.server_version,
+            connection_id: greeting.connection_id,
+            default_plugin: plugin,
+            greeting_nonce: greeting.nonce,
+            auth,
             collation,
             server_collation: greeting.collation,
             buf,
@@ -758,40 +652,16 @@ impl Conn {
             binary_reply: false,
             statements: StatementCache::new(opts.statement_cache),
             compression,
-            zstd_level,
             local_infile_dir,
             infile: Infile::Refuse,
         };
-        conn.authenticate(opts)?;
+        conn.stream.write_packet(&response)?;
+        conn.auth_exchange(exchange, opts.password.as_bytes())?;
         conn.stream.authenticated();
         if let Some(algorithm) = compression {
             conn.stream.compress(algorithm)?;
         }
         Ok(conn)
-    }
-
-    /// Decides whether to use TLS, per `ssl_mode` and what the server offers.
-    fn negotiate_tls(opts: &Opts, greeting: &ServerHandshake) -> Result<bool> {
-        let mode = opts.tls.mode;
-        if mode == SslMode::Disabled {
-            return Ok(false);
-        }
-        if opts.unix_socket.is_some() {
-            // A local socket is already private; certificates name hosts.
-            if mode.verifies() {
-                return Err(Error::Tls(
-                    "certificate verification needs a TCP connection, not a Unix socket".to_owned(),
-                ));
-            }
-            return Ok(false);
-        }
-        let server_has_tls = greeting.capabilities & capability::SSL != 0;
-        if mode.requires_tls() && !server_has_tls {
-            return Err(Error::Tls(format!(
-                "ssl_mode {mode:?} needs TLS but the server does not support it"
-            )));
-        }
-        Ok(server_has_tls)
     }
 
     /// Compression in use, if any.
@@ -806,120 +676,19 @@ impl Conn {
         matches!(self.stream.get_ref(), Stream::Tls(_))
     }
 
-    fn authenticate(&mut self, opts: &Opts) -> Result<()> {
-        let password = opts.password.as_bytes();
-        let plugin = self.default_plugin;
-        let nonce = self.greeting_nonce.clone();
-        let auth_response = self.first_response(plugin, password, &nonce)?;
-        let response = HandshakeResponse {
-            capabilities: self.capabilities,
-            collation: self.collation,
-            user: &opts.user,
-            auth_response: &auth_response,
-            database: opts.database.as_deref(),
-            auth_plugin: plugin.name(),
-            zstd_level: self.zstd_level,
-        }
-        .encode()?;
-        self.stream.write_packet(&response)?;
-        let key_requested = requests_key(plugin, &auth_response);
-        self.auth_exchange(password, plugin, nonce, key_requested)
-    }
-
-    fn first_response(&self, plugin: AuthPlugin, password: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
-        let secure = self.stream.get_ref().is_secure();
-        first_response(
-            plugin,
-            password,
-            nonce,
-            secure,
-            self.pinned_key.as_ref(),
-            self.get_server_public_key,
-        )
-    }
-
     /// Runs the server-driven part of authentication (auth switches and
-    /// plugin-specific round trips) until OK or ERR. `key_requested` says
-    /// whether what the client last sent asked for the server's public key.
-    fn auth_exchange(
-        &mut self,
-        password: &[u8],
-        mut plugin: AuthPlugin,
-        mut nonce: Vec<u8>,
-        mut key_requested: bool,
-    ) -> Result<()> {
-        let secure = self.stream.get_ref().is_secure();
+    /// plugin-specific round trips) until OK or ERR.
+    fn auth_exchange(&mut self, mut auth: Auth, password: &[u8]) -> Result<()> {
         loop {
             self.read_packet()?;
-            let reply = match self.buf.first().copied() {
-                Some(0x00) => {
-                    self.status = parse_ok(&self.buf)?.status;
+            match auth.step(&self.buf, password, &self.auth)? {
+                AuthStep::Send(reply) => self.stream.write_packet(&reply)?,
+                AuthStep::Read => {}
+                AuthStep::Done { status } => {
+                    self.status = status;
                     return Ok(());
                 }
-                Some(0xFF) => return Err(parse_err(&self.buf)),
-                Some(0xFE) => {
-                    // Auth switch: plugin name, then a fresh nonce.
-                    let mut r = Reader::new(&self.buf);
-                    r.skip(1)?;
-                    let name = r.nul_bytes()?;
-                    plugin = AuthPlugin::from_name(name).ok_or_else(|| {
-                        Error::unsupported(format!(
-                            "authentication plugin {:?}",
-                            String::from_utf8_lossy(name)
-                        ))
-                    })?;
-                    let data = r.rest();
-                    nonce = if plugin.nul_terminated_nonce() {
-                        trim_nonce(data).to_vec()
-                    } else {
-                        data.to_vec()
-                    };
-                    self.first_response(plugin, password, &nonce)?
-                }
-                // AuthMoreData: plugin-specific continuation.
-                Some(0x01) => {
-                    let data = self.buf.get(1..).unwrap_or_default();
-                    match (plugin, data) {
-                        (AuthPlugin::CachingSha2, [FAST_AUTH_SUCCESS]) => continue,
-                        (AuthPlugin::CachingSha2, [PERFORM_FULL_AUTH]) => {
-                            if secure {
-                                cleartext_password(password)
-                            } else if let Some(key) = &self.pinned_key {
-                                encrypt_password(password, &nonce, key)?
-                            } else if self.get_server_public_key {
-                                vec![CACHING_SHA2_REQUEST_PUBLIC_KEY]
-                            } else {
-                                return Err(key_request_refused(plugin));
-                            }
-                        }
-                        // The public key we asked for; never one we did not
-                        // (a pinned key is never requested).
-                        (AuthPlugin::CachingSha2 | AuthPlugin::Sha256, pem) => {
-                            if !key_requested {
-                                return Err(Error::protocol(
-                                    "the server sent a public key the client did not request",
-                                ));
-                            }
-                            encrypt_password(password, &nonce, &parse_public_key(pem)?)?
-                        }
-                        (AuthPlugin::Parsec, salt) => {
-                            parsec_response(password, &nonce, salt, self.parsec_max_factor)?
-                        }
-                        (AuthPlugin::Native | AuthPlugin::Ed25519, _) => {
-                            return Err(Error::protocol(
-                                "unexpected AuthMoreData for this authentication plugin",
-                            ));
-                        }
-                    }
-                }
-                // parsec's salt message may also arrive without the 0x01 prefix.
-                Some(b'P') if plugin == AuthPlugin::Parsec => {
-                    parsec_response(password, &nonce, &self.buf, self.parsec_max_factor)?
-                }
-                _ => return Err(Error::protocol("unexpected packet during authentication")),
-            };
-            key_requested = requests_key(plugin, &reply);
-            self.stream.write_packet(&reply)?;
+            }
         }
     }
 
@@ -1673,8 +1442,12 @@ impl Conn {
         // The new session has none of the old one's prepared statements.
         self.statements.clear();
         let plugin = self.default_plugin;
-        let nonce = self.greeting_nonce.clone();
-        let auth_response = self.first_response(plugin, password.as_bytes(), &nonce)?;
+        let (auth_response, auth) = Auth::start(
+            plugin,
+            self.greeting_nonce.clone(),
+            password.as_bytes(),
+            &self.auth,
+        )?;
         let auth_len = u8::try_from(auth_response.len())
             .map_err(|_| Error::protocol("authentication response too long"))?;
 
@@ -1686,8 +1459,7 @@ impl Conn {
         payload.extend_from_slice(&u16::from(self.collation).to_le_bytes());
         put_nul_bytes(&mut payload, plugin.name());
         self.stream.write_command(command::CHANGE_USER, &payload)?;
-        let key_requested = requests_key(plugin, &auth_response);
-        self.auth_exchange(password.as_bytes(), plugin, nonce, key_requested)
+        self.auth_exchange(auth, password.as_bytes())
     }
 
     /// Discards unread rows of a streamed result set and unread results of
