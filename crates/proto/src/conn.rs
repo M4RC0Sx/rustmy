@@ -19,21 +19,17 @@ use socket2::SockRef;
 use socket2::TcpKeepalive;
 
 use crate::auth::parse_public_key;
-use crate::auth::parsec_max_factor;
 use crate::binary::Execute;
 use crate::client::Client;
 use crate::column::Column;
 use crate::compress::Compression;
 use crate::error::Error;
 use crate::error::Result;
-use crate::infile::Infile;
-use crate::login::AuthSettings;
 use crate::login::Login;
 use crate::packet::PacketStream;
 use crate::result::QueryResult;
 use crate::result::RowSet;
 use crate::session::ReadOutcome;
-use crate::session::Session;
 use crate::session::StreamId;
 use crate::tls::TlsOpts;
 use crate::tls::client_config;
@@ -350,7 +346,7 @@ fn keepalive() -> TcpKeepalive {
 }
 
 /// [`Opts::local_infile_dir`] resolved, or why it cannot be used.
-fn local_infile_dir(opts: &Opts) -> Result<Option<PathBuf>> {
+pub(crate) fn local_infile_dir(opts: &Opts) -> Result<Option<PathBuf>> {
     opts.local_infile_dir
         .as_deref()
         .map(allowed_directory)
@@ -369,7 +365,7 @@ fn allowed_directory(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-fn load_public_key(path: &Path) -> Result<rsa::PublicKey> {
+pub(crate) fn load_public_key(path: &Path) -> Result<rsa::PublicKey> {
     let pem = fs::read(path).map_err(|e| {
         Error::Config(format!(
             "cannot read server_public_key {}: {e}",
@@ -527,53 +523,18 @@ impl Conn {
             let (raw, seq) = stream.into_parts()?;
             stream = PacketStream::from_parts(raw.upgrade(&opts.tls, &opts.host)?, seq);
         }
-        let auth = AuthSettings {
-            pinned_key: opts
-                .server_public_key
-                .as_deref()
-                .map(load_public_key)
-                .transpose()?,
-            get_server_public_key: opts.get_server_public_key,
-            parsec_max_factor: parsec_max_factor(opts.connect_timeout),
-            secure: stream.get_ref().is_secure(),
-        };
-        let (response, exchange) = login.response(opts, &auth)?;
-        let Login {
-            greeting,
-            capabilities,
-            collation,
-            compression,
-            plugin,
-            ..
-        } = login;
-        let (io, wire) = stream.into_wire();
-        let mut conn = Self {
-            io,
-            client: Client {
-                wire,
-                session: Session::new(capabilities, greeting.status),
-                server_version: greeting.server_version,
-                connection_id: greeting.connection_id,
-                default_plugin: plugin,
-                greeting_nonce: greeting.nonce,
-                auth,
-                collation,
-                server_collation: greeting.collation,
-                buf,
-                statements: StatementCache::new(opts.statement_cache),
-                compression,
-                local_infile_dir,
-                infile: Infile::Refuse,
-            },
-        };
-        let client = &mut conn.client;
-        block_on(client.wire.write_packet(&mut conn.io, &response))?;
-        block_on(client.auth_exchange(&mut conn.io, exchange, opts.password.as_bytes()))?;
-        client.wire.authenticated();
-        if let Some(algorithm) = compression {
-            client.wire.compress(algorithm)?;
-        }
-        Ok(conn)
+        let secure = stream.get_ref().is_secure();
+        let (mut io, wire) = stream.into_wire();
+        let client = block_on(Client::authenticate(
+            &mut io,
+            wire,
+            login,
+            opts,
+            buf,
+            local_infile_dir,
+            secure,
+        ))?;
+        Ok(Self { io, client })
     }
 
     /// Compression in use, if any.

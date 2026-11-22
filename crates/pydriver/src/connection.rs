@@ -1512,7 +1512,7 @@ fn timeout(seconds: Option<f64>, name: &str) -> PyResult<Option<Duration>> {
 }
 
 /// The UTF-8 statement writer of the module-level helpers.
-fn utf8_encoder(no_backslash_escapes: bool) -> Encoder {
+pub(crate) fn utf8_encoder(no_backslash_escapes: bool) -> Encoder {
     Encoder {
         no_backslash_escapes,
         binary_prefix: true,

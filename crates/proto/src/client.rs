@@ -1,7 +1,7 @@
-//! A connection's protocol, from the end of the handshake on, without a
-//! stream of its own: every command as an `async fn` over a [`Transport`].
-//! [`crate::Conn`] runs them over a blocking stream (see
-//! [`crate::transport`]), which is where they are documented.
+//! A connection's protocol without a stream of its own: the handshake and
+//! every command as an `async fn` over a [`Transport`]. [`crate::Conn`] runs
+//! them over a blocking stream (see `transport.rs`), which is where they
+//! are documented; an event loop runs them with a transport of its own.
 
 use std::fs::File;
 use std::io;
@@ -9,12 +9,16 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::auth::AuthPlugin;
+use crate::auth::parsec_max_factor;
 use crate::binary::Execute;
 use crate::buf::put_nul_bytes;
 use crate::compress::Compression;
+use crate::conn::Opts;
 use crate::conn::PipelineTotals;
 use crate::conn::Statement;
 use crate::conn::StatementCache;
+use crate::conn::load_public_key;
+use crate::conn::local_infile_dir;
 use crate::constants::command;
 use crate::constants::status;
 use crate::error::Error;
@@ -24,6 +28,7 @@ use crate::infile::Infile;
 use crate::login::Auth;
 use crate::login::AuthSettings;
 use crate::login::AuthStep;
+use crate::login::Login;
 use crate::packet::ReplyStart;
 use crate::packet::Wire;
 use crate::packet::release;
@@ -46,7 +51,7 @@ const ER_MAX_PREPARED_STMT_COUNT_REACHED: u16 = 1461;
 
 /// The protocol state of an authenticated connection.
 #[derive(Debug)]
-pub(crate) struct Client {
+pub struct Client {
     pub(crate) wire: Wire,
     /// Protocol state between commands: status, the pending result set.
     pub(crate) session: Session,
@@ -75,6 +80,93 @@ pub(crate) struct Client {
 }
 
 impl Client {
+    /// Status flags from the last OK/EOF packet (see [`crate::constants::status`]).
+    #[must_use]
+    pub const fn status_flags(&self) -> u16 {
+        self.session.status
+    }
+
+    /// Opens a session over `io`, a stream just connected to the server:
+    /// greeting, handshake and authentication, as [`crate::Conn::connect`]
+    /// does over its own. `secure` says whether the stream is already
+    /// confidential (a Unix socket). TLS is not available over a transport
+    /// yet: a session that would use it fails before answering the greeting.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::connect`], and [`Error::Unsupported`] for TLS.
+    pub async fn connect<T: Transport>(io: &mut T, opts: &Opts, secure: bool) -> Result<Self> {
+        // Settings first: a bad one fails before anything goes on the wire.
+        let local_infile_dir = local_infile_dir(opts)?;
+        let mut wire = Wire::default();
+        let mut buf = Vec::new();
+        wire.read_into(io, &mut buf).await?;
+        let login = Login::new(opts, &buf, local_infile_dir.is_some())?;
+        if login.tls {
+            return Err(Error::unsupported(
+                "TLS over an event loop transport (use ssl_mode=\"disabled\" for now)",
+            ));
+        }
+        Self::authenticate(io, wire, login, opts, buf, local_infile_dir, secure).await
+    }
+
+    /// The handshake from the response to the greeting on, once TLS (if
+    /// any) is up: authentication, then the session as agreed.
+    pub(crate) async fn authenticate<T: Transport>(
+        io: &mut T,
+        mut wire: Wire,
+        login: Login,
+        opts: &Opts,
+        buf: Vec<u8>,
+        local_infile_dir: Option<PathBuf>,
+        secure: bool,
+    ) -> Result<Self> {
+        let auth = AuthSettings {
+            pinned_key: opts
+                .server_public_key
+                .as_deref()
+                .map(load_public_key)
+                .transpose()?,
+            get_server_public_key: opts.get_server_public_key,
+            parsec_max_factor: parsec_max_factor(opts.connect_timeout),
+            secure,
+        };
+        let (response, exchange) = login.response(opts, &auth)?;
+        let Login {
+            greeting,
+            capabilities,
+            collation,
+            compression,
+            plugin,
+            ..
+        } = login;
+        wire.write_packet(io, &response).await?;
+        let mut client = Self {
+            wire,
+            session: Session::new(capabilities, greeting.status),
+            server_version: greeting.server_version,
+            connection_id: greeting.connection_id,
+            default_plugin: plugin,
+            greeting_nonce: greeting.nonce,
+            auth,
+            collation,
+            server_collation: greeting.collation,
+            buf,
+            statements: StatementCache::new(opts.statement_cache),
+            compression,
+            local_infile_dir,
+            infile: Infile::Refuse,
+        };
+        client
+            .auth_exchange(io, exchange, opts.password.as_bytes())
+            .await?;
+        client.wire.authenticated();
+        if let Some(algorithm) = compression {
+            client.wire.compress(algorithm)?;
+        }
+        Ok(client)
+    }
+
     /// Runs the server-driven part of authentication (auth switches and
     /// plugin-specific round trips) until OK or ERR.
     pub(crate) async fn auth_exchange<T: Transport>(
@@ -101,16 +193,22 @@ impl Client {
         self.wire.read_into(io, &mut self.buf).await.map(|_| ())
     }
 
-    pub(crate) async fn query<T: Transport>(
-        &mut self,
-        io: &mut T,
-        sql: &[u8],
-    ) -> Result<QueryResult> {
+    /// [`crate::Conn::query`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::query`].
+    pub async fn query<T: Transport>(&mut self, io: &mut T, sql: &[u8]) -> Result<QueryResult> {
         let (result, stream) = self.query_streamed(io, sql).await?;
         self.read_all(io, result, stream).await
     }
 
-    pub(crate) async fn query_streamed<T: Transport>(
+    /// [`crate::Conn::query_streamed`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::query_streamed`].
+    pub async fn query_streamed<T: Transport>(
         &mut self,
         io: &mut T,
         sql: &[u8],
@@ -122,11 +220,12 @@ impl Client {
         self.read_head(io).await
     }
 
-    pub(crate) async fn prepare<T: Transport>(
-        &mut self,
-        io: &mut T,
-        sql: &[u8],
-    ) -> Result<Statement> {
+    /// [`crate::Conn::prepare`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::prepare`].
+    pub async fn prepare<T: Transport>(&mut self, io: &mut T, sql: &[u8]) -> Result<Statement> {
         self.drain_results(io).await?;
         self.wire
             .write_command(io, command::STMT_PREPARE, sql)
@@ -140,7 +239,12 @@ impl Client {
         }
     }
 
-    pub(crate) async fn execute_streamed<T: Transport>(
+    /// [`crate::Conn::execute_streamed`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::execute_streamed`].
+    pub async fn execute_streamed<T: Transport>(
         &mut self,
         io: &mut T,
         payload: &[u8],
@@ -153,7 +257,12 @@ impl Client {
         self.read_head(io).await
     }
 
-    pub(crate) async fn execute<T: Transport>(
+    /// [`crate::Conn::execute`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::execute`].
+    pub async fn execute<T: Transport>(
         &mut self,
         io: &mut T,
         payload: &[u8],
@@ -162,18 +271,24 @@ impl Client {
         self.read_all(io, result, stream).await
     }
 
-    pub(crate) async fn close_statement<T: Transport>(
-        &mut self,
-        io: &mut T,
-        id: u32,
-    ) -> Result<()> {
+    /// [`crate::Conn::close_statement`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::close_statement`].
+    pub async fn close_statement<T: Transport>(&mut self, io: &mut T, id: u32) -> Result<()> {
         self.drain_results(io).await?;
         self.wire
             .write_command(io, command::STMT_CLOSE, &id.to_le_bytes())
             .await
     }
 
-    pub(crate) async fn execute_cached_streamed<T: Transport>(
+    /// [`crate::Conn::execute_cached_streamed`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::execute_cached_streamed`].
+    pub async fn execute_cached_streamed<T: Transport>(
         &mut self,
         io: &mut T,
         sql: &[u8],
@@ -197,7 +312,12 @@ impl Client {
         }
     }
 
-    pub(crate) async fn execute_cached<T: Transport>(
+    /// [`crate::Conn::execute_cached`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::execute_cached`].
+    pub async fn execute_cached<T: Transport>(
         &mut self,
         io: &mut T,
         sql: &[u8],
@@ -250,7 +370,12 @@ impl Client {
         Ok(id)
     }
 
-    pub(crate) async fn pipeline<'a, T: Transport>(
+    /// [`crate::Conn::pipeline`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::pipeline`].
+    pub async fn pipeline<'a, T: Transport>(
         &mut self,
         io: &mut T,
         statements: impl IntoIterator<Item = &'a [u8]>,
@@ -261,7 +386,12 @@ impl Client {
         Ok(totals)
     }
 
-    pub(crate) async fn pipeline_streamed<'a, T: Transport>(
+    /// [`crate::Conn::pipeline_streamed`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::pipeline_streamed`].
+    pub async fn pipeline_streamed<'a, T: Transport>(
         &mut self,
         io: &mut T,
         statements: impl IntoIterator<Item = &'a [u8]>,
@@ -273,7 +403,12 @@ impl Client {
         self.finish_pipeline_streamed(io, &replies).await
     }
 
-    pub(crate) async fn execute_many_cached<T: Transport>(
+    /// [`crate::Conn::execute_many_cached`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::execute_many_cached`].
+    pub async fn execute_many_cached<T: Transport>(
         &mut self,
         io: &mut T,
         sql: &[u8],
@@ -292,7 +427,12 @@ impl Client {
         Ok(totals)
     }
 
-    pub(crate) async fn execute_many_cached_streamed<T: Transport>(
+    /// [`crate::Conn::execute_many_cached_streamed`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::execute_many_cached_streamed`].
+    pub async fn execute_many_cached_streamed<T: Transport>(
         &mut self,
         io: &mut T,
         sql: &[u8],
@@ -434,7 +574,12 @@ impl Client {
         ended
     }
 
-    pub(crate) async fn read_rows<T: Transport>(
+    /// [`crate::Conn::read_rows`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::read_rows`].
+    pub async fn read_rows<T: Transport>(
         &mut self,
         io: &mut T,
         id: StreamId,
@@ -463,7 +608,12 @@ impl Client {
         }
     }
 
-    pub(crate) async fn skip_rows<T: Transport>(
+    /// [`crate::Conn::skip_rows`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::skip_rows`].
+    pub async fn skip_rows<T: Transport>(
         &mut self,
         io: &mut T,
         id: StreamId,
@@ -508,17 +658,24 @@ impl Client {
         Ok(result)
     }
 
-    pub(crate) async fn next_result<T: Transport>(
-        &mut self,
-        io: &mut T,
-    ) -> Result<Option<QueryResult>> {
+    /// [`crate::Conn::next_result`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::next_result`].
+    pub async fn next_result<T: Transport>(&mut self, io: &mut T) -> Result<Option<QueryResult>> {
         match self.next_result_streamed(io).await? {
             Some((result, stream)) => self.read_all(io, result, stream).await.map(Some),
             None => Ok(None),
         }
     }
 
-    pub(crate) async fn next_result_streamed<T: Transport>(
+    /// [`crate::Conn::next_result_streamed`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::next_result_streamed`].
+    pub async fn next_result_streamed<T: Transport>(
         &mut self,
         io: &mut T,
     ) -> Result<Option<(QueryResult, Option<StreamId>)>> {
@@ -616,11 +773,12 @@ impl Client {
         }
     }
 
-    pub(crate) async fn select_db<T: Transport>(
-        &mut self,
-        io: &mut T,
-        database: &[u8],
-    ) -> Result<()> {
+    /// [`crate::Conn::select_db`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::select_db`].
+    pub async fn select_db<T: Transport>(&mut self, io: &mut T, database: &[u8]) -> Result<()> {
         self.drain_results(io).await?;
         self.wire
             .write_command(io, command::INIT_DB, database)
@@ -628,7 +786,12 @@ impl Client {
         self.expect_ok(io).await
     }
 
-    pub(crate) async fn reset_connection<T: Transport>(&mut self, io: &mut T) -> Result<()> {
+    /// [`crate::Conn::reset_connection`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::reset_connection`].
+    pub async fn reset_connection<T: Transport>(&mut self, io: &mut T) -> Result<()> {
         self.drain_results(io).await?;
         // The reset closes every prepared statement.
         self.statements.clear();
@@ -638,7 +801,12 @@ impl Client {
         self.expect_ok(io).await
     }
 
-    pub(crate) async fn change_user<T: Transport>(
+    /// [`crate::Conn::change_user`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::change_user`].
+    pub async fn change_user<T: Transport>(
         &mut self,
         io: &mut T,
         user: &[u8],
@@ -706,7 +874,12 @@ impl Client {
         self.session.ok_reply(&self.buf)
     }
 
-    pub(crate) async fn ping<T: Transport>(&mut self, io: &mut T) -> Result<()> {
+    /// [`crate::Conn::ping`], over `io`.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Conn::ping`].
+    pub async fn ping<T: Transport>(&mut self, io: &mut T) -> Result<()> {
         self.drain_results(io).await?;
         self.wire.write_command(io, command::PING, &[]).await?;
         self.expect_ok(io).await
@@ -714,7 +887,11 @@ impl Client {
 
     /// Sends `COM_QUIT`; errors are ignored, the connection is being
     /// discarded either way.
-    pub(crate) async fn quit<T: Transport>(&mut self, io: &mut T) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// None: the result is for symmetry with the other commands.
+    pub async fn quit<T: Transport>(&mut self, io: &mut T) -> Result<()> {
         let _ = self.wire.write_command(io, command::QUIT, &[]).await;
         Ok(())
     }

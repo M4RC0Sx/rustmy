@@ -25,7 +25,7 @@ use crate::packet::Input;
 pub(crate) const READ_BUFFER_CAPACITY: usize = 64 * 1024;
 
 /// What the protocol's operations need from the byte stream.
-pub(crate) trait Transport {
+pub trait Transport {
     /// Reads what the server sent into `input`: how many bytes, at least
     /// one, or 0 at the end of the stream.
     fn fill(&mut self, input: &mut Input) -> impl Future<Output = io::Result<usize>>;
