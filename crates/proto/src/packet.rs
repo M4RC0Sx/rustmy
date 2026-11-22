@@ -18,9 +18,13 @@ use crate::compress::Compressed;
 use crate::compress::Compression;
 use crate::error::Error;
 use crate::error::Result;
+use crate::transport::Blocking;
+use crate::transport::Close;
+use crate::transport::READ_BUFFER_CAPACITY;
+use crate::transport::Transport;
+use crate::transport::block_on;
 
 const HEADER_LEN: usize = 4;
-const READ_BUFFER_CAPACITY: usize = 64 * 1024;
 /// Buffers grown beyond this by a large packet are released once it has
 /// been handled, so an idle pooled connection does not keep megabytes.
 /// Uncompressed payloads this large are not staged at all: they go from the
@@ -437,52 +441,22 @@ impl Framer {
     }
 }
 
-/// [`Framer`] over a blocking byte stream.
-#[derive(Debug)]
-pub(crate) struct PacketStream<S: Read + Write> {
-    stream: S,
+/// The bytes of one connection without the stream: the input buffer, the
+/// framing and the write buffer. Reading and writing are `async fn`s over a
+/// [`Transport`]; [`Wire::try_read_into`] takes a payload the buffer holds
+/// without any I/O.
+#[derive(Debug, Default)]
+pub(crate) struct Wire {
     input: Input,
     framer: Framer,
     write_buf: Vec<u8>,
 }
 
-impl<S: Read + Write> PacketStream<S> {
-    pub(crate) fn new(stream: S) -> Self {
-        Self {
-            stream,
-            input: Input::default(),
-            framer: Framer::default(),
-            write_buf: Vec::new(),
-        }
-    }
-
+impl Wire {
     /// Raises the payload limit from [`HANDSHAKE_PAYLOAD_LIMIT`] to
     /// [`PAYLOAD_LIMIT`], once authenticated.
     pub(crate) const fn authenticated(&mut self) {
         self.framer.authenticated();
-    }
-
-    /// Hands the raw stream back (to wrap it in TLS) with the sequence id to
-    /// continue from. Fails if the server already sent bytes we buffered.
-    pub(crate) fn into_parts(self) -> Result<(S, u8)> {
-        if !self.input.is_empty() || !self.framer.is_idle() {
-            return Err(Error::protocol("unexpected data before the TLS handshake"));
-        }
-        Ok((self.stream, self.framer.frames.seq))
-    }
-
-    pub(crate) fn from_parts(stream: S, seq: u8) -> Self {
-        let mut packets = Self::new(stream);
-        packets.framer.frames.seq = seq;
-        packets
-    }
-
-    pub(crate) const fn get_ref(&self) -> &S {
-        &self.stream
-    }
-
-    pub(crate) const fn get_mut(&mut self) -> &mut S {
-        &mut self.stream
     }
 
     /// From now on, every byte travels in compressed packets (once
@@ -496,74 +470,106 @@ impl<S: Read + Write> PacketStream<S> {
         self.framer.reset_seq();
     }
 
+    /// Sets the sequence ids the next packets read must carry (the start of
+    /// a pipelined reply, from [`Wire::write_commands`]).
+    pub(crate) fn expect_reply(&mut self, start: ReplyStart) {
+        self.framer.expect_reply(start);
+    }
+
+    /// Whether nothing was read that the caller has not had.
+    fn is_idle(&self) -> bool {
+        self.input.is_empty() && self.framer.is_idle()
+    }
+
+    /// The next payload the input buffer holds, appended to `out` (see
+    /// [`Framer::read_payload`]), without I/O: `None` until
+    /// [`Wire::refill`] brings more.
+    pub(crate) fn try_read_into(&mut self, out: &mut Vec<u8>) -> Result<Option<Range<usize>>> {
+        self.framer.read_payload(&mut self.input, out)
+    }
+
     /// Reads one logical payload (joining split packets) and appends it to
     /// `out`, returning where it landed. Appending lets result-set rows
     /// accumulate in a single contiguous buffer.
-    pub(crate) fn read_into(&mut self, out: &mut Vec<u8>) -> Result<Range<usize>> {
+    pub(crate) async fn read_into<T: Transport>(
+        &mut self,
+        io: &mut T,
+        out: &mut Vec<u8>,
+    ) -> Result<Range<usize>> {
         loop {
-            if let Some(payload) = self.framer.read_payload(&mut self.input, out)? {
+            if let Some(payload) = self.try_read_into(out)? {
                 return Ok(payload);
             }
-            // The buffer is empty (framing took every body byte it had): a
-            // large rest of a body is read straight into `out`, as it was
-            // reserved, without passing through the buffer.
-            let left = self.framer.body_left();
-            let read = if left >= READ_BUFFER_CAPACITY {
-                self.read_body(left, out)
-            } else {
-                self.fill()
-            };
-            if let Err(err) = read {
-                self.framer.lose();
-                self.input.clear();
-                return Err(err.into());
-            }
+            self.refill(io, out).await?;
         }
     }
 
-    /// Reads the `left` bytes of a large body straight into `out`.
-    fn read_body(&mut self, left: usize, out: &mut Vec<u8>) -> io::Result<()> {
-        let wanted = u64::try_from(left).unwrap_or(u64::MAX);
-        let read = (&mut self.stream).take(wanted).read_to_end(out)?;
-        if read < left {
-            return Err(self.framer.end_of_stream());
+    /// Brings more of the payload being read after [`Wire::try_read_into`]
+    /// returned `None`, with the same `out`. The buffer is empty then
+    /// (framing took every body byte it had): a large rest of a body is
+    /// read straight into `out`, as it was reserved, where the transport
+    /// can. A failed read loses what was half read.
+    pub(crate) async fn refill<T: Transport>(
+        &mut self,
+        io: &mut T,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let left = self.framer.body_left();
+        let read = if left >= READ_BUFFER_CAPACITY {
+            match io.read_body(out, left).await {
+                Some(Ok(read)) if read >= left => {
+                    self.framer.body_read(read);
+                    Ok(())
+                }
+                Some(Ok(_)) => Err(self.framer.end_of_stream()),
+                Some(Err(err)) => Err(err),
+                None => self.fill(io).await,
+            }
+        } else {
+            self.fill(io).await
+        };
+        if let Err(err) = read {
+            self.framer.lose();
+            self.input.clear();
+            return Err(err.into());
         }
-        self.framer.body_read(read);
         Ok(())
     }
 
-    /// Reads what the stream has (at least a byte) into the input buffer.
-    fn fill(&mut self) -> io::Result<()> {
-        loop {
-            match self.stream.read(self.input.spare(READ_BUFFER_CAPACITY)) {
-                Ok(0) => return Err(self.framer.end_of_stream()),
-                Ok(n) => {
-                    self.input.filled(n);
-                    return Ok(());
-                }
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(err) => return Err(err),
-            }
+    async fn fill<T: Transport>(&mut self, io: &mut T) -> io::Result<()> {
+        match io.fill(&mut self.input).await? {
+            0 => Err(self.framer.end_of_stream()),
+            _ => Ok(()),
         }
     }
 
     /// Starts a new command: resets the sequence and sends `[cmd] ++ arg`.
-    pub(crate) fn write_command(&mut self, cmd: u8, arg: &[u8]) -> Result<()> {
+    pub(crate) async fn write_command<T: Transport>(
+        &mut self,
+        io: &mut T,
+        cmd: u8,
+        arg: &[u8],
+    ) -> Result<()> {
         self.reset_seq();
-        self.write_parts(&[cmd], arg)
+        self.write_parts(io, &[cmd], arg).await
     }
 
     /// Sends one logical payload, continuing the current sequence.
-    pub(crate) fn write_packet(&mut self, payload: &[u8]) -> Result<()> {
-        self.write_parts(&[], payload)
+    pub(crate) async fn write_packet<T: Transport>(
+        &mut self,
+        io: &mut T,
+        payload: &[u8],
+    ) -> Result<()> {
+        self.write_parts(io, &[], payload).await
     }
 
     /// Sends one command per item of `args` in a single write, without
     /// waiting for any reply, and records in `replies` where each reply
-    /// starts. Before reading reply `i`, call [`PacketStream::expect_reply`]
-    /// with `replies[i]`.
-    pub(crate) fn write_commands<'a>(
+    /// starts. Before reading reply `i`, call [`Wire::expect_reply`] with
+    /// `replies[i]`.
+    pub(crate) async fn write_commands<'a, T: Transport>(
         &mut self,
+        io: &mut T,
         cmd: u8,
         args: impl IntoIterator<Item = &'a [u8]>,
         replies: &mut Vec<ReplyStart>,
@@ -596,30 +602,32 @@ impl<S: Read + Write> PacketStream<S> {
                 compressed,
             });
         }
-        let result = encoded.and_then(|()| self.send_framed(&buf));
+        let result = match encoded {
+            Ok(()) => send_framed(io, &buf).await,
+            Err(err) => Err(err),
+        };
         release(&mut buf);
         self.write_buf = buf;
         result
     }
 
-    /// Sets the sequence ids the next packets read must carry (the start of
-    /// a pipelined reply, from [`PacketStream::write_commands`]).
-    pub(crate) fn expect_reply(&mut self, start: ReplyStart) {
-        self.framer.expect_reply(start);
-    }
-
     /// Sends `head ++ body` as one logical payload without concatenating
     /// them.
-    fn write_parts(&mut self, head: &[u8], body: &[u8]) -> Result<()> {
+    async fn write_parts<T: Transport>(
+        &mut self,
+        io: &mut T,
+        head: &[u8],
+        body: &[u8],
+    ) -> Result<()> {
         if self.framer.compressed.is_none() && head.len() + body.len() >= KEEP_CAPACITY {
-            return self.write_direct(head, body);
+            return self.write_direct(io, head, body).await;
         }
         let mut buf = std::mem::take(&mut self.write_buf);
         buf.clear();
-        let result = self
-            .framer
-            .encode_parts(&mut buf, head, body)
-            .and_then(|()| self.send(&buf));
+        let result = match self.framer.encode_parts(&mut buf, head, body) {
+            Ok(()) => self.send(io, &buf).await,
+            Err(err) => Err(err),
+        };
         release(&mut buf);
         self.write_buf = buf;
         result
@@ -627,35 +635,129 @@ impl<S: Read + Write> PacketStream<S> {
 
     /// Writes a large payload packet by packet, header and parts, with no
     /// copy (uncompressed connections only).
-    fn write_direct(&mut self, head: &[u8], body: &[u8]) -> Result<()> {
+    async fn write_direct<T: Transport>(
+        &mut self,
+        io: &mut T,
+        head: &[u8],
+        body: &[u8],
+    ) -> Result<()> {
         for (in_head, in_body) in packets(head, body) {
             let header = self.framer.next_header(in_head.len() + in_body.len())?;
-            self.stream.write_all(&header)?;
-            self.stream.write_all(in_head)?;
-            self.stream.write_all(in_body)?;
+            io.write(&[&header, in_head, in_body]).await?;
         }
-        Ok(self.stream.flush()?)
+        Ok(io.flush().await?)
     }
 
     /// Sends packets, wrapping them in compressed ones if need be.
-    fn send(&mut self, buf: &[u8]) -> Result<()> {
+    async fn send<T: Transport>(&mut self, io: &mut T, buf: &[u8]) -> Result<()> {
         match &mut self.framer.compressed {
-            None => self.send_framed(buf),
+            None => send_framed(io, buf).await,
             Some(compressed) => {
-                let stream = &mut self.stream;
-                let sent = stream
-                    .write_all(compressed.encode(buf))
-                    .and_then(|()| stream.flush());
+                let sent = match io.write(&[compressed.encode(buf)]).await {
+                    Ok(()) => io.flush().await,
+                    Err(err) => Err(err),
+                };
                 compressed.release_output();
                 Ok(sent?)
             }
         }
     }
+}
 
-    /// Sends bytes already framed for the wire.
-    fn send_framed(&mut self, bytes: &[u8]) -> Result<()> {
-        let stream = &mut self.stream;
-        Ok(stream.write_all(bytes).and_then(|()| stream.flush())?)
+/// Sends bytes already framed for the wire.
+async fn send_framed<T: Transport>(io: &mut T, bytes: &[u8]) -> Result<()> {
+    io.write(&[bytes]).await?;
+    Ok(io.flush().await?)
+}
+
+/// [`Wire`] over a blocking byte stream, for the handshake (whose stream
+/// changes under it with TLS) and for tests.
+#[derive(Debug)]
+pub(crate) struct PacketStream<S: Read + Write> {
+    io: Blocking<S>,
+    wire: Wire,
+}
+
+impl<S: Read + Write + Close> PacketStream<S> {
+    pub(crate) fn new(stream: S) -> Self {
+        Self {
+            io: Blocking(stream),
+            wire: Wire::default(),
+        }
+    }
+
+    /// Hands the raw stream back (to wrap it in TLS) with the sequence id to
+    /// continue from. Fails if the server already sent bytes we buffered.
+    pub(crate) fn into_parts(self) -> Result<(S, u8)> {
+        if !self.wire.is_idle() {
+            return Err(Error::protocol("unexpected data before the TLS handshake"));
+        }
+        Ok((self.io.0, self.wire.framer.frames.seq))
+    }
+
+    pub(crate) fn from_parts(stream: S, seq: u8) -> Self {
+        let mut packets = Self::new(stream);
+        packets.wire.framer.frames.seq = seq;
+        packets
+    }
+
+    /// The stream and the bytes on it, for a connection to go on with.
+    pub(crate) fn into_wire(self) -> (Blocking<S>, Wire) {
+        (self.io, self.wire)
+    }
+
+    pub(crate) const fn get_ref(&self) -> &S {
+        &self.io.0
+    }
+
+    /// Reads one logical payload (joining split packets) and appends it to
+    /// `out`, returning where it landed.
+    pub(crate) fn read_into(&mut self, out: &mut Vec<u8>) -> Result<Range<usize>> {
+        block_on(self.wire.read_into(&mut self.io, out))
+    }
+
+    /// Sends one logical payload, continuing the current sequence.
+    pub(crate) fn write_packet(&mut self, payload: &[u8]) -> Result<()> {
+        block_on(self.wire.write_packet(&mut self.io, payload))
+    }
+}
+
+/// What tests and fuzz targets drive directly.
+#[cfg(any(test, feature = "fuzzing"))]
+impl<S: Read + Write + Close> PacketStream<S> {
+    /// Raises the payload limit from [`HANDSHAKE_PAYLOAD_LIMIT`] to
+    /// [`PAYLOAD_LIMIT`], once authenticated.
+    #[cfg(test)]
+    pub(crate) const fn authenticated(&mut self) {
+        self.wire.authenticated();
+    }
+
+    /// From now on, every byte travels in compressed packets (once
+    /// authentication succeeds: its last packet is not compressed).
+    pub(crate) fn compress(&mut self, algorithm: Compression) -> Result<()> {
+        self.wire.compress(algorithm)
+    }
+
+    /// Starts a new command: resets the sequence and sends `[cmd] ++ arg`.
+    pub(crate) fn write_command(&mut self, cmd: u8, arg: &[u8]) -> Result<()> {
+        block_on(self.wire.write_command(&mut self.io, cmd, arg))
+    }
+
+    /// See [`Wire::write_commands`].
+    #[cfg(test)]
+    pub(crate) fn write_commands<'a>(
+        &mut self,
+        cmd: u8,
+        args: impl IntoIterator<Item = &'a [u8]>,
+        replies: &mut Vec<ReplyStart>,
+    ) -> Result<()> {
+        block_on(self.wire.write_commands(&mut self.io, cmd, args, replies))
+    }
+
+    /// See [`Wire::expect_reply`].
+    #[cfg(test)]
+    pub(crate) fn expect_reply(&mut self, start: ReplyStart) {
+        self.wire.expect_reply(start);
     }
 }
 
@@ -682,6 +784,8 @@ mod tests {
         input: Cursor<Vec<u8>>,
         output: Vec<u8>,
     }
+
+    impl crate::transport::Close for Duplex {}
 
     impl Read for Duplex {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -716,7 +820,7 @@ mod tests {
     fn written(payload: &[u8]) -> Vec<u8> {
         let mut ps = reader(Vec::new());
         ps.write_packet(payload).unwrap();
-        ps.stream.output
+        ps.io.0.output
     }
 
     #[test]
@@ -742,6 +846,8 @@ mod tests {
 
     /// Hands out at most three bytes per read, as a slow socket would.
     struct Trickle(Cursor<Vec<u8>>);
+
+    impl crate::transport::Close for Trickle {}
 
     impl Read for Trickle {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -805,7 +911,7 @@ mod tests {
         // Split packets add up: a limit just under two of them stops at the
         // second header.
         let mut ps = reader(written(&vec![7u8; MAX_PACKET_PAYLOAD + 10]));
-        ps.framer.frames.payload_limit = MAX_PACKET_PAYLOAD + 9;
+        ps.wire.framer.frames.payload_limit = MAX_PACKET_PAYLOAD + 9;
         let mut out = Vec::new();
         let err = ps.read_into(&mut out).unwrap_err();
         assert!(err.to_string().contains("byte limit"), "{err}");
@@ -830,7 +936,7 @@ mod tests {
         let mut ps = reader(Vec::new());
         ps.write_packet(b"a").unwrap();
         ps.write_command(0x03, b"SELECT 1").unwrap();
-        let out = ps.stream.output;
+        let out = ps.io.0.output;
         assert_eq!(out[5..9], [9, 0, 0, 0]);
         assert_eq!(&out[9..], b"\x03SELECT 1");
     }
@@ -845,7 +951,7 @@ mod tests {
         // The second command takes two packets, so its reply starts at 2.
         let seqs: Vec<u8> = replies.iter().map(|r| r.seq).collect();
         assert_eq!(seqs, [1, 2, 1]);
-        let out = ps.stream.output;
+        let out = ps.io.0.output;
         assert_eq!(out[..6], [2, 0, 0, 0, 0x03, b'A']);
         let second = 6 + 4 + MAX_PACKET_PAYLOAD;
         assert_eq!(out[6..10], [0xFF, 0xFF, 0xFF, 0]);
@@ -892,11 +998,11 @@ mod tests {
                 .collect();
             let mut ps = reader(Vec::new());
             ps.write_command(0x03, &body).unwrap();
-            assert!(ps.write_buf.capacity() <= KEEP_CAPACITY, "{total}");
+            assert!(ps.wire.write_buf.capacity() <= KEEP_CAPACITY, "{total}");
             let mut payload = vec![0x03];
             payload.extend_from_slice(&body);
             assert!(
-                ps.stream.output == framed(&payload, 0),
+                ps.io.0.output == framed(&payload, 0),
                 "{total} bytes framed differently"
             );
         }
@@ -909,9 +1015,9 @@ mod tests {
         let mut replies = Vec::new();
         ps.write_commands(0x03, [&big[..], b"B"], &mut replies)
             .unwrap();
-        assert!(ps.write_buf.capacity() <= KEEP_CAPACITY);
+        assert!(ps.wire.write_buf.capacity() <= KEEP_CAPACITY);
         ps.write_packet(b"small").unwrap();
-        assert!(ps.write_buf.capacity() > 0);
+        assert!(ps.wire.write_buf.capacity() > 0);
     }
 
     #[test]
@@ -1107,6 +1213,6 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(ps.read_into(&mut out).unwrap(), 0..payload.len());
         assert!(out == payload);
-        assert!(ps.input.buf.len() <= super::READ_BUFFER_CAPACITY + HEADER_LEN);
+        assert!(ps.wire.input.buf.len() <= crate::transport::READ_BUFFER_CAPACITY + HEADER_LEN);
     }
 }
