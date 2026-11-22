@@ -54,15 +54,50 @@ pub fn handshake(data: &[u8]) {
     let _ = ServerHandshake::parse(data);
 }
 
-/// Packet framing: reads logical packets until the stream fails.
+/// A fake server that hands its bytes out in pieces of varying sizes,
+/// taken from the bytes themselves, as a socket may, and swallows writes.
+#[derive(Debug)]
+pub struct Pieces(Cursor<Vec<u8>>);
+
+impl Read for Pieces {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let position = usize::try_from(self.0.position()).unwrap_or(usize::MAX);
+        let byte = self.0.get_ref().get(position).copied().unwrap_or(0);
+        let n = (1 + usize::from(byte) % 23).min(buf.len());
+        self.0.read(buf.get_mut(..n).unwrap_or_default())
+    }
+}
+
+impl Write for Pieces {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Packet framing: reads logical packets until the stream fails, from the
+/// bytes whole and in pieces; both must give the same payloads and error.
 pub fn packets(data: &[u8]) {
-    let mut stream = PacketStream::new(MockStream(Cursor::new(data.to_vec())));
+    let whole = read_packets(PacketStream::new(MockStream(Cursor::new(data.to_vec()))));
+    let pieces = read_packets(PacketStream::new(Pieces(Cursor::new(data.to_vec()))));
+    assert_eq!(whole, pieces, "framing depends on how the bytes arrive");
+}
+
+fn read_packets<S: Read + Write>(mut stream: PacketStream<S>) -> (Vec<u8>, String) {
     let mut out = Vec::new();
-    while stream.read_into(&mut out).is_ok() {}
+    loop {
+        if let Err(err) = stream.read_into(&mut out) {
+            return (out, err.to_string());
+        }
+    }
 }
 
 /// Compressed packet framing: the first byte picks zlib or zstd, the rest
-/// is what the server sends once compression is on.
+/// is what the server sends once compression is on, read whole and in
+/// pieces; both must give the same payloads and error.
 pub fn compressed(data: &[u8]) {
     let Some((&selector, rest)) = data.split_first() else {
         return;
@@ -72,15 +107,33 @@ pub fn compressed(data: &[u8]) {
     } else {
         Compression::Zstd { level: 3 }
     };
-    let mut stream = PacketStream::new(MockStream(Cursor::new(rest.to_vec())));
-    if stream.compress(algorithm).is_err() {
-        return;
-    }
+    let whole = read_compressed(
+        PacketStream::new(MockStream(Cursor::new(rest.to_vec()))),
+        algorithm,
+    );
+    let pieces = read_compressed(
+        PacketStream::new(Pieces(Cursor::new(rest.to_vec()))),
+        algorithm,
+    );
+    assert_eq!(whole, pieces, "framing depends on how the bytes arrive");
+}
+
+fn read_compressed<S: Read + Write>(
+    mut stream: PacketStream<S>,
+    algorithm: Compression,
+) -> Option<(Vec<Vec<u8>>, String)> {
+    stream.compress(algorithm).ok()?;
+    let mut payloads = Vec::new();
     let mut out = Vec::new();
-    while stream.read_into(&mut out).is_ok() {
-        // Answers go through the compressed writer too.
-        let _ = stream.write_command(0x03, &out);
-        out.clear();
+    loop {
+        match stream.read_into(&mut out) {
+            Ok(_) => {
+                // Answers go through the compressed writer too.
+                let _ = stream.write_command(0x03, &out);
+                payloads.push(std::mem::take(&mut out));
+            }
+            Err(err) => return Some((payloads, err.to_string())),
+        }
     }
 }
 
