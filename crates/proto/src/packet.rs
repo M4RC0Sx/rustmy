@@ -79,7 +79,7 @@ pub(crate) struct ReplyStart {
 /// `buf`). The buffer is not shrunk as it is consumed, so refilling it
 /// zero-fills nothing.
 #[derive(Debug, Default)]
-pub(crate) struct Input {
+pub struct Input {
     buf: Vec<u8>,
     pos: usize,
     end: usize,
@@ -88,7 +88,7 @@ pub(crate) struct Input {
 impl Input {
     /// Room for at least `min` more bytes; report how many were written at
     /// its start with [`Input::filled`].
-    pub(crate) fn spare(&mut self, min: usize) -> &mut [u8] {
+    pub fn spare(&mut self, min: usize) -> &mut [u8] {
         if self.pos > 0 {
             // What is left is at most part of a header: framing consumes
             // whatever body bytes arrived.
@@ -105,7 +105,7 @@ impl Input {
 
     /// `n` bytes were written at the start of what [`Input::spare`]
     /// returned.
-    pub(crate) fn filled(&mut self, n: usize) {
+    pub fn filled(&mut self, n: usize) {
         self.end = self.end.saturating_add(n).min(self.buf.len());
     }
 

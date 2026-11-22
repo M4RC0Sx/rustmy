@@ -280,6 +280,18 @@ taken without any I/O (`Wire::try_read_into`); only a refill waits. A row that t
 and `compressed` fuzz targets read every input whole and in pieces, and the
 results must match.
 
+**asyncio** (first cut: `rustmy._aio`, `crates/pydriver/src/aio.rs`): the
+same `Client` operations run on the event loop's thread, with no runtime and
+no other thread. `AioConnection` is the core of an `asyncio.BufferedProtocol`
+whose callbacks are bound to its methods (no Python frame per read):
+`buffer_updated` hands the bytes to its transport (`LoopIo`, whose refill is
+pending until the loop has something) and polls the running operation once
+more; what it writes goes to the loop's transport after each poll, and its
+result resolves the command's future. Rows are converted every 64 KiB as
+they arrive. A command whose task is cancelled closes the connection (the
+reply would arrive in the middle of the next command's); an I/O failure or a
+protocol violation leaves it closed too. No TLS or compression yet.
+
 **TLS and authentication.** TLS through `rustls`; `ssl_mode` is disabled /
 preferred (default) / required / verify_ca / verify_identity. With `ssl_ca`,
 verification uses only that file (as PyMySQL does); verify modes without it

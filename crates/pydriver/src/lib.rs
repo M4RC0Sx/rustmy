@@ -1,5 +1,6 @@
 //! `rustmy._core`: the native extension module behind the `rustmy` package.
 
+mod aio;
 mod charset;
 mod connection;
 mod convert;
@@ -20,6 +21,7 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("MAX_PACKET_PAYLOAD", rustmy_proto::MAX_PACKET_PAYLOAD)?;
     m.add_class::<connection::Connection>()?;
     m.add_class::<stream::ResultStream>()?;
+    m.add_class::<aio::AioConnection>()?;
     m.add_function(wrap_pyfunction!(connection::connect, m)?)?;
     m.add_function(wrap_pyfunction!(connection::literal, m)?)?;
     m.add_function(wrap_pyfunction!(connection::escape_string, m)?)?;
