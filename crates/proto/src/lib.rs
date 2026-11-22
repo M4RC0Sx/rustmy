@@ -11,6 +11,7 @@ mod auth;
 pub mod binary;
 mod buf;
 pub mod charset;
+mod client;
 mod column;
 mod compress;
 mod conn;
@@ -28,6 +29,7 @@ mod session;
 pub mod sql;
 pub mod text;
 mod tls;
+mod transport;
 
 pub use binary::Execute;
 pub use column::Column;

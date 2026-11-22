@@ -268,9 +268,15 @@ answers). TCP sockets get `TCP_NODELAY` and keepalive through `socket2`
 (probes after 60 s idle, every 10 s where the platform allows setting it).
 Packet framing does no I/O of its own (`packet::Framer`): bytes from the
 server go into an `Input` buffer in whatever pieces they arrive, compressed
-packets included, and whole payloads come out; `PacketStream` drives it over
-the blocking stream and reads a large body straight into the caller's
-buffer. A row that the buffer holds whole takes a fast path. The `packets`
+packets included, and whole payloads come out; `packet::Wire` reads and
+writes them over a `Transport` (`transport.rs`) and reads a large body
+straight into the caller's buffer where the transport can. Every command
+from the handshake's end on is an `async fn` of `client::Client` over a
+`Transport`, written once; `Conn` runs them over its blocking stream with
+`block_on`, a single poll with a no-op waker (a blocking transport never
+leaves one pending: no runtime, no thread), and an event loop can run the
+same ones with a transport of its own. Rows the input buffer holds are
+taken without any I/O (`Wire::try_read_into`); only a refill waits. A row that the buffer holds whole takes a fast path. The `packets`
 and `compressed` fuzz targets read every input whole and in pieces, and the
 results must match.
 

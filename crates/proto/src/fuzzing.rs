@@ -33,6 +33,8 @@ use crate::tls::TlsOpts;
 #[derive(Debug)]
 pub struct MockStream(Cursor<Vec<u8>>);
 
+impl crate::transport::Close for MockStream {}
+
 impl Read for MockStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.read(buf)
@@ -58,6 +60,8 @@ pub fn handshake(data: &[u8]) {
 /// taken from the bytes themselves, as a socket may, and swallows writes.
 #[derive(Debug)]
 pub struct Pieces(Cursor<Vec<u8>>);
+
+impl crate::transport::Close for Pieces {}
 
 impl Read for Pieces {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -86,7 +90,9 @@ pub fn packets(data: &[u8]) {
     assert_eq!(whole, pieces, "framing depends on how the bytes arrive");
 }
 
-fn read_packets<S: Read + Write>(mut stream: PacketStream<S>) -> (Vec<u8>, String) {
+fn read_packets<S: Read + Write + crate::transport::Close>(
+    mut stream: PacketStream<S>,
+) -> (Vec<u8>, String) {
     let mut out = Vec::new();
     loop {
         if let Err(err) = stream.read_into(&mut out) {
@@ -118,7 +124,7 @@ pub fn compressed(data: &[u8]) {
     assert_eq!(whole, pieces, "framing depends on how the bytes arrive");
 }
 
-fn read_compressed<S: Read + Write>(
+fn read_compressed<S: Read + Write + crate::transport::Close>(
     mut stream: PacketStream<S>,
     algorithm: Compression,
 ) -> Option<(Vec<Vec<u8>>, String)> {
