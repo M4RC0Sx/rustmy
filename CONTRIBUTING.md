@@ -249,7 +249,8 @@ the next command discards the rest).
 
 **Streaming** (`SSCursor`, `crates/pydriver/src/stream.rs`): the pending
 result set is protocol state of the connection (`Session` in `session.rs`,
-which reads a reply's head and its rows without I/O; `Conn::query_streamed`,
+which reads a reply's head, its rows, a `COM_STMT_PREPARE` reply and a
+pipelined statement's whole reply without I/O; `Conn::query_streamed`,
 `read_rows` and `skip_rows` drive it), so any command discards unread rows
 first. The connection lock is held only
 while a batch is read, never while Python runs. Every command bumps the
@@ -386,7 +387,9 @@ their own, and every reply starts at compressed sequence 1 (`ReplyStart` in
 `packet.rs`). `RUSTMY_TEST_COMPRESS=zlib|zstd` runs `live.rs` and the Python
 suite compressed (CI does it in every server job).
 
-**`LOAD DATA LOCAL INFILE`**: off unless `connect(local_infile_dir=…)`, and
+**`LOAD DATA LOCAL INFILE`** (`infile.rs`: the permission, the checks and
+the outcome; the connection sends the file): off unless
+`connect(local_infile_dir=…)`, and
 only then is `CLIENT_LOCAL_FILES` requested. Every command records which file
 names it may be asked for: a `COM_QUERY` the names its `LOAD DATA|XML …
 LOCAL INFILE '…'` statements give (`sql::local_infile_names`, unescaped as
