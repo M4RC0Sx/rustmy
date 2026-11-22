@@ -226,12 +226,20 @@ in a tight loop while the server sends the next (network and conversion
 overlap; reading everything first was ~1.4x slower), with no intermediate row
 or value types. `date`/`datetime`/`timedelta` are built directly; `Decimal`
 and JSON go through a cached Python class; dict rows are built in Rust with
-the keys created once per result (`convert::Converter`). Parameters are told
-apart by exact type first (`Args::from_py`): asking whether any object is a
-`Mapping` runs Python code. A connection keeps no buffer a large packet grew
-past 1 MiB once the operation ends (`release` in `packet.rs`, compressed
-buffers included), and uncompressed payloads that large are written from
-the caller's buffer, packet by packet, without staging.
+the keys created once per result (`convert::Converter`). Tuple rows whose
+values cannot form reference cycles (numbers, text, bytes, dates, `None`,
+`Decimal`) are taken out of the cyclic garbage collector as they are built
+(`convert::untrack`), so collections during a large read do not traverse
+every row read so far. Tuples holding a container (a `conv=` decoder's
+list) stay tracked, and so do dict rows: they are mutable, and since Python
+3.14 an untracked dict does not track itself again when a container is
+stored in it.
+Parameters are told apart by exact type first (`Args::from_py`): asking
+whether any object is a `Mapping` runs Python code. A connection keeps no
+buffer a large packet grew past 1 MiB once the operation ends (`release` in
+`packet.rs`, compressed buffers included), and uncompressed payloads that
+large are written from the caller's buffer, packet by packet, without
+staging.
 
 **Buffered cursors** (`Connection::buffered` with a `Session`,
 `crates/pydriver/src/connection.rs`) keep the connection locked for the whole
