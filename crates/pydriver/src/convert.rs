@@ -260,6 +260,10 @@ impl Converter {
         };
         if let Some(keys) = &self.keys {
             for row in rows.rows() {
+                // Dict rows stay tracked: they are mutable, and since Python
+                // 3.14 a dict no longer tracks itself again when a container
+                // is stored in it, so an untracked one could hold a cycle
+                // the collector never sees.
                 let dict = PyDict::new(py);
                 for (index, ((cell, &kind), key)) in
                     row.cells().zip(&self.kinds).zip(keys).enumerate()
@@ -271,14 +275,56 @@ impl Converter {
         } else {
             let mut values = Vec::with_capacity(self.kinds.len());
             for row in rows.rows() {
+                let mut atomic = true;
                 for (index, (cell, &kind)) in row.cells().zip(&self.kinds).enumerate() {
-                    values.push(cell_value(cell, kind, index)?);
+                    let value = cell_value(cell, kind, index)?;
+                    if matches!(kind, Kind::Custom { .. }) {
+                        atomic &= is_atomic(&value, decimal);
+                    }
+                    values.push(value);
                 }
-                push(PyTuple::new(py, values.drain(..))?.into_any());
+                let tuple = PyTuple::new(py, values.drain(..))?;
+                if atomic {
+                    untrack(&tuple);
+                }
+                push(tuple.into_any());
             }
         }
         Ok(())
     }
+}
+
+/// Whether a row holding `value`, returned by a `conv=` decoder, can stay
+/// out of the cyclic garbage collector: `value` is an object the collector
+/// does not track, or a `Decimal`. A container (a list, say) keeps the row
+/// tracked. Every other kind of value the converter builds is atomic by
+/// construction (numbers, strings, bytes, dates, `None`, `Decimal`), so it
+/// is not asked: that question, on every cell, cost more than it saved on
+/// small results.
+fn is_atomic(value: &Bound<'_, PyAny>, decimal: Option<&Bound<'_, PyType>>) -> bool {
+    // SAFETY: `value` is a live object; asking whether the collector tracks
+    // it has no side effects.
+    let tracked = unsafe { pyo3::ffi::PyObject_GC_IsTracked(value.as_ptr()) } != 0;
+    !tracked || decimal.is_some_and(|d| value.get_type_ptr() == d.as_type_ptr())
+}
+
+/// Takes a tuple row of atomic values out of the cyclic garbage collector:
+/// the converter's own values, and `conv=` values that are [`is_atomic`].
+///
+/// A large result creates rows faster than anything else, and each
+/// collection would otherwise traverse every row still alive: reading a
+/// million rows spent about a sixth of its time there. `CPython` untracks
+/// such tuples itself, but only after a collection has traversed them, and
+/// never with a `Decimal` inside: Python 3.13+ tracks `Decimal` only because
+/// its type lives on the heap, and it refers to nothing but that type.
+///
+/// A tuple is immutable, so one holding no container can never become part
+/// of a reference cycle. The worst case, a cycle through the `decimal`
+/// module itself, would leak, never crash.
+fn untrack(row: &Bound<'_, PyTuple>) {
+    // SAFETY: a tuple is a collector-aware object, and untracking one is
+    // safe whether or not it is tracked (`CPython` checks first).
+    unsafe { pyo3::ffi::PyObject_GC_UnTrack(row.as_ptr().cast()) };
 }
 
 /// Dict keys: the column name, or `table.name` for a name already taken
