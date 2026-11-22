@@ -7,8 +7,8 @@ panic, hang or allocate without bound.
 | Target | What it feeds untrusted bytes to |
 |---|---|
 | `handshake` | the server greeting parser |
-| `packets` | packet framing (lengths, sequence ids, >16 MiB payloads) |
-| `compressed` | the compressed protocol layer (zlib or zstd, picked by the first byte): compressed headers and sequence ids, payloads that do not inflate to their declared length, packets split across compressed ones |
+| `packets` | packet framing (lengths, sequence ids, >16 MiB payloads), read whole and in pieces of varying sizes, which must give the same payloads and error |
+| `compressed` | the compressed protocol layer (zlib or zstd, picked by the first byte): compressed headers and sequence ids, payloads that do not inflate to their declared length, packets split across compressed ones; read whole and in pieces, like `packets` |
 | `result_set` | column definitions, rows, OK / ERR / EOF packets |
 | `text_values` | text-protocol integer, float, date and time parsers |
 | `sql` | the `INSERT … VALUES` recogniser used by `executemany` and string escaping |

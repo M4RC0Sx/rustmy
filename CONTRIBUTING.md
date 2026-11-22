@@ -261,6 +261,13 @@ authentication ends; `read_timeout`/`write_timeout` replace it then
 (`Conn::connect`; `crates/proto/tests/timeouts.rs` plays a server that never
 answers). TCP sockets get `TCP_NODELAY` and keepalive through `socket2`
 (probes after 60 s idle, every 10 s where the platform allows setting it).
+Packet framing does no I/O of its own (`packet::Framer`): bytes from the
+server go into an `Input` buffer in whatever pieces they arrive, compressed
+packets included, and whole payloads come out; `PacketStream` drives it over
+the blocking stream and reads a large body straight into the caller's
+buffer. A row that the buffer holds whole takes a fast path. The `packets`
+and `compressed` fuzz targets read every input whole and in pieces, and the
+results must match.
 
 **TLS and authentication.** TLS through `rustls`; `ssl_mode` is disabled /
 preferred (default) / required / verify_ca / verify_identity. With `ssl_ca`,

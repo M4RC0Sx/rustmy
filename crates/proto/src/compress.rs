@@ -16,9 +16,6 @@
 //! in compressed packets of their own, so every reply starts at compressed
 //! sequence 1, as verified on all nine supported servers.
 
-use std::io;
-use std::io::Read;
-
 use flate2::Compress;
 use flate2::Decompress;
 use flate2::FlushCompress;
@@ -78,9 +75,12 @@ pub(crate) struct Compressed {
     pos: usize,
     /// Payload of the compressed packet being read.
     wire: Vec<u8>,
+    /// Lengths (on the wire, decompressed) of the compressed packet being
+    /// read, from its header, until all of it arrived.
+    receiving: Option<(usize, usize)>,
     /// Compressed packets being written ([`Compressed::encode`]).
     out: Vec<u8>,
-    /// One compressed payload.
+    /// One compressed payload, or one decompressed after a leftover.
     scratch: Vec<u8>,
 }
 
@@ -102,6 +102,7 @@ impl Compressed {
             input: Vec::new(),
             pos: 0,
             wire: Vec::new(),
+            receiving: None,
             out: Vec::new(),
             scratch: Vec::new(),
         })
@@ -118,119 +119,101 @@ impl Compressed {
         self.seq = seq;
     }
 
-    /// Fills `buf` with decompressed bytes.
-    pub(crate) fn read_exact(&mut self, source: &mut impl Read, buf: &mut [u8]) -> Result<()> {
-        let mut filled = 0;
-        while let Some(rest) = buf.get_mut(filled..).filter(|rest| !rest.is_empty()) {
-            let available = self.available(source)?;
-            let n = available.len().min(rest.len());
-            if let (Some(dst), Some(src)) = (rest.get_mut(..n), available.get(..n)) {
-                dst.copy_from_slice(src);
-            }
-            self.pos += n;
-            filled += n;
-        }
-        self.release_consumed();
-        Ok(())
+    /// Decompressed bytes not handed out yet.
+    pub(crate) fn plain(&self) -> &[u8] {
+        self.input.get(self.pos..).unwrap_or_default()
     }
 
-    /// Appends `len` decompressed bytes to `out`.
-    pub(crate) fn append(
-        &mut self,
-        source: &mut impl Read,
-        out: &mut Vec<u8>,
-        len: usize,
-    ) -> Result<()> {
-        out.reserve(len);
-        let mut left = len;
-        while left > 0 {
-            let available = self.available(source)?;
-            let n = available.len().min(left);
-            out.extend_from_slice(available.get(..n).unwrap_or_default());
-            self.pos += n;
-            left -= n;
-        }
-        self.release_consumed();
-        Ok(())
-    }
-
-    /// Releases a large decompressed packet once all of it was handed out,
-    /// rather than when the next one arrives (which, after the last reply,
-    /// may be long).
-    fn release_consumed(&mut self) {
+    /// `n` bytes of [`Compressed::plain`] were handed out. A large
+    /// decompressed packet is released as soon as all of it was, rather
+    /// than when the next one arrives (which, after the last reply, may be
+    /// long).
+    pub(crate) fn consume(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n);
         if self.pos >= self.input.len() {
             release(&mut self.input);
-        }
-    }
-
-    /// Decompressed bytes not handed out yet, reading the next compressed
-    /// packet when there are none.
-    fn available(&mut self, source: &mut impl Read) -> Result<&[u8]> {
-        while self.pos >= self.input.len() {
-            self.fill(source)?;
-        }
-        Ok(self.input.get(self.pos..).unwrap_or_default())
-    }
-
-    /// Reads the next compressed packet and decompresses it into `input`.
-    fn fill(&mut self, source: &mut impl Read) -> Result<()> {
-        // Whatever happens below, nothing old is left to hand out.
-        release(&mut self.input);
-        self.input.clear();
-        self.pos = 0;
-        let mut header = [0u8; HEADER_LEN];
-        source.read_exact(&mut header)?;
-        let [c0, c1, c2, seq, u0, u1, u2] = header;
-        if seq != self.seq {
-            return Err(Error::protocol(format!(
-                "compressed packet out of order: expected sequence {}, got {seq}",
-                self.seq
-            )));
-        }
-        self.seq = seq.wrapping_add(1);
-        let wire_len = u32::from_le_bytes([c0, c1, c2, 0]);
-        let plain_len = usize::try_from(u32::from_le_bytes([u0, u1, u2, 0]))
-            .map_err(|_| Error::protocol("packet length exceeds address space"))?;
-        release(&mut self.wire);
-        self.wire.clear();
-        let read = source
-            .take(u64::from(wire_len))
-            .read_to_end(&mut self.wire)?;
-        if u64::try_from(read).ok() != Some(u64::from(wire_len)) {
-            return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
-        }
-        if plain_len == 0 {
-            std::mem::swap(&mut self.input, &mut self.wire);
-            return Ok(());
-        }
-        let decompressed = self.decompress(wire_len, plain_len);
-        release(&mut self.wire);
-        decompressed
-    }
-
-    /// Decompresses `wire` into `input`, which must end up `plain_len`
-    /// bytes long.
-    fn decompress(&mut self, wire_len: u32, plain_len: usize) -> Result<()> {
-        // Room for what the header declares only: a payload that inflates
-        // to more fails instead of growing the buffer (decompression bomb).
-        self.input.reserve_exact(plain_len);
-        let complete = match &mut self.codec {
-            Codec::Zlib { decompress, .. } => {
-                decompress.reset(true);
-                let status =
-                    decompress.decompress_vec(&self.wire, &mut self.input, FlushDecompress::Finish);
-                matches!(status, Ok(Status::StreamEnd))
-                    && decompress.total_in() == u64::from(wire_len)
-            }
-            Codec::Zstd { decompress, .. } => decompress
-                .decompress_to_buffer(&self.wire, &mut self.input)
-                .is_ok(),
-        };
-        if !complete || self.input.len() != plain_len {
             self.input.clear();
-            return Err(Error::protocol("corrupt compressed packet"));
+            self.pos = 0;
         }
-        Ok(())
+    }
+
+    /// Takes the next compressed packet out of `data` (bytes from the
+    /// server) and decompresses it after what [`Compressed::plain`] still
+    /// holds. Returns how many bytes of `data` it used and whether a whole
+    /// packet was decoded; a packet that arrives in parts is kept until its
+    /// last byte does.
+    pub(crate) fn decode(&mut self, data: &[u8]) -> Result<(usize, bool)> {
+        let mut used = 0;
+        let (wire_len, plain_len) = if let Some(lengths) = self.receiving {
+            lengths
+        } else {
+            let Some(&[c0, c1, c2, seq, u0, u1, u2]) = data.first_chunk::<HEADER_LEN>() else {
+                return Ok((0, false));
+            };
+            if seq != self.seq {
+                return Err(Error::protocol(format!(
+                    "compressed packet out of order: expected sequence {}, got {seq}",
+                    self.seq
+                )));
+            }
+            self.seq = seq.wrapping_add(1);
+            let lengths = (length(c0, c1, c2)?, length(u0, u1, u2)?);
+            release(&mut self.wire);
+            self.wire.clear();
+            used = HEADER_LEN;
+            self.receiving = Some(lengths);
+            lengths
+        };
+        let rest = data.get(used..).unwrap_or_default();
+        let n = wire_len.saturating_sub(self.wire.len()).min(rest.len());
+        self.wire
+            .extend_from_slice(rest.get(..n).unwrap_or_default());
+        used += n;
+        if self.wire.len() < wire_len {
+            return Ok((used, false));
+        }
+        self.receiving = None;
+        self.unpack(plain_len)?;
+        Ok((used, true))
+    }
+
+    /// Moves the packet received in `wire` to `input`, after what is left
+    /// there (part of an ordinary header, at most).
+    fn unpack(&mut self, plain_len: usize) -> Result<()> {
+        self.input.drain(..self.pos.min(self.input.len()));
+        self.pos = 0;
+        let unpacked = if plain_len == 0 {
+            if self.input.is_empty() {
+                std::mem::swap(&mut self.input, &mut self.wire);
+            } else {
+                self.input.extend_from_slice(&self.wire);
+            }
+            Ok(())
+        } else if self.input.is_empty() {
+            decompress(&mut self.codec, &self.wire, &mut self.input, plain_len)
+        } else {
+            let mut plain = std::mem::take(&mut self.scratch);
+            plain.clear();
+            let unpacked = decompress(&mut self.codec, &self.wire, &mut plain, plain_len);
+            if unpacked.is_ok() {
+                self.input.extend_from_slice(&plain);
+            }
+            release(&mut plain);
+            self.scratch = plain;
+            unpacked
+        };
+        release(&mut self.wire);
+        if unpacked.is_err() {
+            // Nothing of a corrupt packet, or of what came before it, is
+            // handed out later.
+            self.input.clear();
+        }
+        unpacked
+    }
+
+    /// Whether a compressed packet has started arriving and not ended.
+    pub(crate) const fn receiving(&self) -> bool {
+        self.receiving.is_some()
     }
 
     /// Wraps `data` in compressed packets of the current sequence and
@@ -288,6 +271,71 @@ impl Compressed {
             Codec::Zstd { compress, .. } => compress
                 .compress_to_buffer(chunk, &mut self.scratch)
                 .is_ok_and(|n| n < chunk.len()),
+        }
+    }
+}
+
+/// A 3-byte little-endian length.
+fn length(b0: u8, b1: u8, b2: u8) -> Result<usize> {
+    usize::try_from(u32::from_le_bytes([b0, b1, b2, 0]))
+        .map_err(|_| Error::protocol("packet length exceeds address space"))
+}
+
+/// Decompresses `wire` into `out` (empty), which must end up `plain_len`
+/// bytes long.
+fn decompress(codec: &mut Codec, wire: &[u8], out: &mut Vec<u8>, plain_len: usize) -> Result<()> {
+    // Room for what the header declares only: a payload that inflates to
+    // more fails instead of growing the buffer (decompression bomb).
+    out.reserve_exact(plain_len);
+    let complete = match codec {
+        Codec::Zlib { decompress, .. } => {
+            decompress.reset(true);
+            let status = decompress.decompress_vec(wire, out, FlushDecompress::Finish);
+            matches!(status, Ok(Status::StreamEnd))
+                && u64::try_from(wire.len()).is_ok_and(|len| decompress.total_in() == len)
+        }
+        Codec::Zstd { decompress, .. } => decompress.decompress_to_buffer(wire, out).is_ok(),
+    };
+    if !complete || out.len() != plain_len {
+        out.clear();
+        return Err(Error::protocol("corrupt compressed packet"));
+    }
+    Ok(())
+}
+
+/// Test drivers: the layer fed from an in-memory source, as the packet
+/// layer above it feeds it.
+#[cfg(test)]
+impl Compressed {
+    fn read_exact(&mut self, source: &mut std::io::Cursor<Vec<u8>>, buf: &mut [u8]) -> Result<()> {
+        let mut out = Vec::new();
+        self.append(source, &mut out, buf.len())?;
+        buf.copy_from_slice(&out);
+        Ok(())
+    }
+
+    fn append(
+        &mut self,
+        source: &mut std::io::Cursor<Vec<u8>>,
+        out: &mut Vec<u8>,
+        len: usize,
+    ) -> Result<()> {
+        let mut left = len;
+        loop {
+            let n = self.plain().len().min(left);
+            out.extend_from_slice(self.plain().get(..n).unwrap_or_default());
+            self.consume(n);
+            left -= n;
+            if left == 0 {
+                return Ok(());
+            }
+            let position = usize::try_from(source.position()).unwrap_or(usize::MAX);
+            let data = source.get_ref().get(position..).unwrap_or_default();
+            let (used, decoded) = self.decode(data)?;
+            source.set_position(source.position() + used as u64);
+            if !decoded {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
         }
     }
 }
