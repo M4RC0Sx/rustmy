@@ -245,22 +245,23 @@ impl Session {
         }
     }
 
-    /// Handles the next payload of a statement's whole reply, adding what
-    /// it reports to `totals`.
+    /// Handles the next payload of a statement's whole reply (or the error
+    /// reading it, which ends a result set whose rows were being dropped),
+    /// adding what it reports to `totals`.
     pub(crate) fn reply_step(
         &mut self,
         reply: &mut Reply,
-        payload: &[u8],
+        packet: Result<&[u8]>,
         totals: &mut PipelineTotals,
     ) -> Result<ReplyStep> {
         match &mut reply.state {
-            ReplyState::Head(head) => match self.head_step(head, payload)? {
+            ReplyState::Head(head) => match self.head_step(head, packet?)? {
                 HeadStep::Read => Ok(ReplyStep::Read),
                 HeadStep::File(name) => Ok(ReplyStep::File(name)),
                 HeadStep::Done(result, stream) => self.reply_result(reply, &result, stream, totals),
             },
             ReplyState::Skip(pending, skipped) => {
-                if self.skip(*pending, Ok(payload))?.is_none() {
+                if self.skip(*pending, packet)?.is_none() {
                     *skipped += 1;
                     return Ok(ReplyStep::Read);
                 }
@@ -565,17 +566,43 @@ mod tests {
         for payload in rest {
             assert_eq!(
                 session
-                    .reply_step(&mut reply, payload, &mut totals)
+                    .reply_step(&mut reply, Ok(payload), &mut totals)
                     .unwrap(),
                 super::ReplyStep::Read
             );
         }
         assert_eq!(
-            session.reply_step(&mut reply, last, &mut totals).unwrap(),
+            session
+                .reply_step(&mut reply, Ok(last), &mut totals)
+                .unwrap(),
             super::ReplyStep::Done
         );
         assert_eq!((totals.rowcount, totals.last_insert_id), (3, 9));
         assert_eq!(session.pending(), None);
         assert!(!session.has_more_results());
+    }
+
+    /// Found by the `differential` fuzz target: a read that fails while a
+    /// pipelined reply's rows are dropped ends that result set, as
+    /// `Conn::skip_rows` does, instead of leaving it pending for the next
+    /// command to discard.
+    #[test]
+    fn a_failed_read_ends_the_rows_a_reply_drops() {
+        let mut session = Session::new(capability::DEPRECATE_EOF, 0);
+        let mut totals = crate::conn::PipelineTotals::default();
+        let mut reply = session.reply();
+        let col = column(b"a");
+        for payload in [&[1][..], &col] {
+            assert_eq!(
+                session
+                    .reply_step(&mut reply, Ok(payload), &mut totals)
+                    .unwrap(),
+                super::ReplyStep::Read
+            );
+        }
+        assert!(session.pending().is_some());
+        let lost = Err(Error::protocol("packet out of order"));
+        assert!(session.reply_step(&mut reply, lost, &mut totals).is_err());
+        assert_eq!(session.pending(), None);
     }
 }

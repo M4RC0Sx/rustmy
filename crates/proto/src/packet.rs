@@ -117,6 +117,12 @@ impl Input {
     pub(crate) const fn is_empty(&self) -> bool {
         self.pos == self.end
     }
+
+    /// Drops the bytes not consumed yet.
+    pub(crate) const fn clear(&mut self) {
+        self.pos = 0;
+        self.end = 0;
+    }
 }
 
 /// The logical payload being read, while its packets arrive.
@@ -145,15 +151,33 @@ impl Frames {
     /// being read and returns how many it used, with where the payload
     /// landed once it is whole. `check_seq` is off on compressed
     /// connections (see [`crate::compress`]).
+    ///
+    /// On an error the bytes read up to it, the bad header included, count
+    /// as used and the payload is forgotten: the next read starts with
+    /// whatever follows, as it did when framing read the stream itself.
     fn parse(
         &mut self,
         check_seq: bool,
         data: &[u8],
         out: &mut Vec<u8>,
-    ) -> Result<(usize, Option<Range<usize>>)> {
+    ) -> (usize, Result<Option<Range<usize>>>) {
         let mut used = 0;
+        let parsed = self.parse_into(check_seq, data, out, &mut used);
+        if parsed.is_err() {
+            self.partial = None;
+        }
+        (used, parsed)
+    }
+
+    fn parse_into(
+        &mut self,
+        check_seq: bool,
+        data: &[u8],
+        out: &mut Vec<u8>,
+        used: &mut usize,
+    ) -> Result<Option<Range<usize>>> {
         loop {
-            let rest = data.get(used..).unwrap_or_default();
+            let rest = data.get(*used..).unwrap_or_default();
             let (mut partial, left) = match self.partial {
                 Some(
                     partial @ Partial {
@@ -162,8 +186,9 @@ impl Frames {
                 ) => (partial, left),
                 previous => {
                     let Some(&[l0, l1, l2, seq]) = rest.first_chunk::<HEADER_LEN>() else {
-                        return Ok((used, None));
+                        return Ok(None);
                     };
+                    *used += HEADER_LEN;
                     // Compressed, only the compressed sequence is checked:
                     // servers move the ordinary one to it whenever they
                     // flush (see `compress`), and the compressed layer
@@ -185,7 +210,6 @@ impl Frames {
                             self.payload_limit
                         )));
                     }
-                    used += HEADER_LEN;
                     if rest.len() - HEADER_LEN < len {
                         // It comes in parts: room for it once, as the
                         // header (checked above) announces.
@@ -199,18 +223,18 @@ impl Frames {
                     (partial, len)
                 }
             };
-            let rest = data.get(used..).unwrap_or_default();
+            let rest = data.get(*used..).unwrap_or_default();
             let n = left.min(rest.len());
             out.extend_from_slice(rest.get(..n).unwrap_or_default());
-            used += n;
+            *used += n;
             if n < left {
                 partial.left = Some(left - n);
                 self.partial = Some(partial);
-                return Ok((used, None));
+                return Ok(None);
             }
             if partial.last {
                 self.partial = None;
-                return Ok((used, Some(partial.start..out.len())));
+                return Ok(Some(partial.start..out.len()));
             }
             partial.left = None;
             self.partial = Some(partial);
@@ -272,21 +296,26 @@ impl Framer {
                     return Ok(Some(start..out.len()));
                 }
             }
-            let (used, payload) = self.frames.parse(true, input.data(), out)?;
+            let (used, payload) = self.frames.parse(true, input.data(), out);
             input.consume(used);
-            return Ok(payload);
+            return payload;
         };
         loop {
-            let (used, payload) = self.frames.parse(false, compressed.plain(), out)?;
+            let (used, payload) = self.frames.parse(false, compressed.plain(), out);
             compressed.consume(used);
-            if payload.is_some() {
-                return Ok(payload);
+            if payload.as_ref().is_ok_and(Option::is_none) {
+                let (used, decoded) = compressed.decode(input.data());
+                input.consume(used);
+                match decoded {
+                    Ok(true) => continue,
+                    Ok(false) => return Ok(None),
+                    Err(err) => {
+                        self.frames.partial = None;
+                        return Err(err);
+                    }
+                }
             }
-            let (used, decoded) = compressed.decode(input.data())?;
-            input.consume(used);
-            if !decoded {
-                return Ok(None);
-            }
+            return payload;
         }
     }
 
@@ -324,7 +353,22 @@ impl Framer {
         if in_packet {
             io::Error::from(io::ErrorKind::UnexpectedEof)
         } else {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer")
+            // The error `Read::read_exact` gives at the end of a stream (a
+            // constant of the standard library), as for any short read.
+            let mut empty: &[u8] = &[];
+            empty
+                .read_exact(&mut [0])
+                .err()
+                .unwrap_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))
+        }
+    }
+
+    /// Forgets what was half read: the stream failed (or ended) in the
+    /// middle of it, as a blocking read loses what it had read so far.
+    fn lose(&mut self) {
+        self.frames.partial = None;
+        if let Some(compressed) = &mut self.compressed {
+            compressed.lose();
         }
     }
 
@@ -464,31 +508,41 @@ impl<S: Read + Write> PacketStream<S> {
             // large rest of a body is read straight into `out`, as it was
             // reserved, without passing through the buffer.
             let left = self.framer.body_left();
-            if left >= READ_BUFFER_CAPACITY {
-                let wanted =
-                    u64::try_from(left).map_err(|_| Error::protocol("packet length too large"))?;
-                let read = (&mut self.stream).take(wanted).read_to_end(out)?;
-                if read < left {
-                    return Err(self.framer.end_of_stream().into());
-                }
-                self.framer.body_read(read);
-                continue;
+            let read = if left >= READ_BUFFER_CAPACITY {
+                self.read_body(left, out)
+            } else {
+                self.fill()
+            };
+            if let Err(err) = read {
+                self.framer.lose();
+                self.input.clear();
+                return Err(err.into());
             }
-            self.fill()?;
         }
     }
 
+    /// Reads the `left` bytes of a large body straight into `out`.
+    fn read_body(&mut self, left: usize, out: &mut Vec<u8>) -> io::Result<()> {
+        let wanted = u64::try_from(left).unwrap_or(u64::MAX);
+        let read = (&mut self.stream).take(wanted).read_to_end(out)?;
+        if read < left {
+            return Err(self.framer.end_of_stream());
+        }
+        self.framer.body_read(read);
+        Ok(())
+    }
+
     /// Reads what the stream has (at least a byte) into the input buffer.
-    fn fill(&mut self) -> Result<()> {
+    fn fill(&mut self) -> io::Result<()> {
         loop {
             match self.stream.read(self.input.spare(READ_BUFFER_CAPACITY)) {
-                Ok(0) => return Err(self.framer.end_of_stream().into()),
+                Ok(0) => return Err(self.framer.end_of_stream()),
                 Ok(n) => {
                     self.input.filled(n);
                     return Ok(());
                 }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(err) => return Err(err.into()),
+                Err(err) => return Err(err),
             }
         }
     }
@@ -992,9 +1046,53 @@ mod tests {
         let mut ps = reader(vec![10, 0]);
         let err = ps.read_into(&mut Vec::new()).unwrap_err();
         assert_eq!(err.to_string(), "failed to fill whole buffer");
+        // The standard library's own error, not one built alike.
+        let mut empty: &[u8] = &[];
+        let std_err = empty.read_exact(&mut [0]).unwrap_err();
+        assert_eq!(
+            format!("{err:?}"),
+            format!("{:?}", crate::Error::Io(std_err))
+        );
         let mut ps = reader(vec![10, 0, 0, 0, b'a']);
         let err = ps.read_into(&mut Vec::new()).unwrap_err();
         assert_eq!(err.to_string(), "unexpected end of file");
+    }
+
+    /// Found by the `differential` fuzz target: after an error, what was
+    /// read up to it stays consumed and nothing half read survives, as
+    /// when framing read the stream itself (1.3.2 and before).
+    #[test]
+    fn an_error_consumes_what_was_read_and_forgets_the_rest() {
+        // A header out of order is consumed: the next read sees the next
+        // header (the sequence still expects 0).
+        let mut ps = reader(vec![0, 0, 0, 7, 0, 0, 0, 8]);
+        for got in ["got 7", "got 8"] {
+            let err = ps.read_into(&mut Vec::new()).unwrap_err();
+            assert!(err.to_string().contains(got), "{err}");
+        }
+        // A stream that ends inside a body: that packet is forgotten, and
+        // the next read fails as at the end of any stream.
+        let mut ps = reader(vec![10, 0, 0, 0, b'a']);
+        let err = ps.read_into(&mut Vec::new()).unwrap_err();
+        assert_eq!(err.to_string(), "unexpected end of file");
+        let err = ps.read_into(&mut Vec::new()).unwrap_err();
+        assert_eq!(err.to_string(), "failed to fill whole buffer");
+        // Compressed: only the header of a packet out of order is consumed,
+        // so the next read takes its (stored) payload for a header.
+        let mut writer = Compressed::new(Compression::Zlib).unwrap();
+        writer.set_seq(3);
+        let mut wire = writer.encode(&framed(b"late", 0)).to_vec();
+        writer.set_seq(0);
+        wire.extend_from_slice(writer.encode(&framed(b"next", 0)));
+        let mut ps = reader(wire);
+        ps.compress(Compression::Zlib).unwrap();
+        let err = ps.read_into(&mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("got 3"), "{err}");
+        let err = ps.read_into(&mut Vec::new()).unwrap_err();
+        assert!(
+            err.to_string().contains("corrupt compressed packet"),
+            "{err}"
+        );
     }
 
     #[test]

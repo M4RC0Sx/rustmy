@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [handshake, packets, compressed, result_set, text_values, sql, session]
+        target: [handshake, packets, compressed, result_set, text_values, sql, session, differential]
     env:
       SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
     steps:
@@ -46,6 +46,8 @@ jobs:
         run: |
           mkdir -p "fuzz/corpus/${{ matrix.target }}"
           seeds="fuzz/seeds/${{ matrix.target }}"
+          # differential replays recorded sessions, as session does.
+          [ "${{ matrix.target }}" = differential ] && seeds="fuzz/seeds/session"
           [ -d "$seeds" ] || seeds=""
           # The prebuilt cargo-fuzz is a musl binary and would default to its
           # own target (static libc, which the sanitizer rejects): use rustc's.
