@@ -4,8 +4,10 @@ name: Coverage
 # side includes the PyO3 bindings: the extension is built with coverage
 # instrumentation and exercised by the Python tests, the only tests it has.
 on:
+  # feature/async: the asyncio integration branch, whose pushes give its pull
+  # requests a coverage base; remove it once the branch is merged.
   push:
-    branches: [develop]
+    branches: [develop, feature/async]
   pull_request:
 
 concurrency:
