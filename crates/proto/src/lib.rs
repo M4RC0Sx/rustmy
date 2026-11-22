@@ -20,6 +20,7 @@ mod error;
 #[doc(hidden)]
 pub mod fuzzing;
 mod handshake;
+mod infile;
 mod login;
 mod packet;
 mod result;

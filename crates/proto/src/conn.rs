@@ -23,15 +23,15 @@ use crate::auth::AuthPlugin;
 use crate::auth::parse_public_key;
 use crate::auth::parsec_max_factor;
 use crate::binary::Execute;
-use crate::buf::Reader;
 use crate::buf::put_nul_bytes;
 use crate::column::Column;
 use crate::compress::Compression;
-use crate::constants::capability;
 use crate::constants::command;
 use crate::constants::status;
 use crate::error::Error;
 use crate::error::Result;
+use crate::infile;
+use crate::infile::Infile;
 use crate::login::Auth;
 use crate::login::AuthSettings;
 use crate::login::AuthStep;
@@ -41,9 +41,10 @@ use crate::packet::ReplyStart;
 use crate::packet::release;
 use crate::result::QueryResult;
 use crate::result::RowSet;
-use crate::result::parse_err;
 use crate::session::HeadStep;
+use crate::session::Prepared;
 use crate::session::ReadOutcome;
+use crate::session::ReplyStep;
 use crate::session::Session;
 use crate::session::StreamId;
 use crate::sql::local_infile_names;
@@ -66,11 +67,6 @@ const ER_MAX_PREPARED_STMT_COUNT_REACHED: u16 = 1461;
 /// last; the probes also keep such middleboxes from dropping it.
 const KEEPALIVE_TIME: Duration = Duration::from_secs(60);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Bytes of a local file sent per packet (`LOAD DATA LOCAL INFILE`). Measured
-/// from 4 to 64 KiB (benches/README.md): flat on a local link, while over a
-/// slow compressed one 16 KiB was 5% faster with zstd than 64 KiB.
-const LOCAL_INFILE_CHUNK: usize = 16 * 1024;
 
 /// Default size of the prepared-statement cache: the server allows 16,382
 /// prepared statements across all its connections by default
@@ -382,20 +378,6 @@ fn allowed_directory(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-/// Fills `buf` from `file` unless it ends first; returns the bytes read.
-fn read_full(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
-    let mut filled = 0;
-    while let Some(rest) = buf.get_mut(filled..).filter(|rest| !rest.is_empty()) {
-        match file.read(rest) {
-            Ok(0) => break,
-            Ok(read) => filled += read,
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(filled)
-}
-
 fn load_public_key(path: &Path) -> Result<rsa::PublicKey> {
     let pem = fs::read(path).map_err(|e| {
         Error::Config(format!(
@@ -497,18 +479,6 @@ pub struct PipelineTotals {
     /// The first statement the server refused: its index in the batch and
     /// the error.
     pub error: Option<(usize, Error)>,
-}
-
-/// Which local files the server may ask for during the current command.
-#[derive(Debug)]
-enum Infile {
-    /// None.
-    Refuse,
-    /// Those the statement names (`LOAD DATA LOCAL INFILE 'name'`).
-    Allow(Vec<Vec<u8>>),
-    /// None, and a request breaks the connection: the server would read
-    /// the statements sent after this one as the file's contents.
-    Pipelined,
 }
 
 /// An authenticated connection to a MySQL or MariaDB server.
@@ -704,39 +674,13 @@ impl Conn {
     pub fn prepare(&mut self, sql: &[u8]) -> Result<Statement> {
         self.drain_results()?;
         self.stream.write_command(command::STMT_PREPARE, sql)?;
-        self.read_packet()?;
-        match self.buf.first() {
-            Some(0x00) => {}
-            Some(0xFF) => return Err(parse_err(&self.buf)),
-            _ => return Err(Error::protocol("unexpected reply to COM_STMT_PREPARE")),
-        }
-        let mut r = Reader::new(&self.buf);
-        r.skip(1)?;
-        let id = r.u32()?;
-        let columns = usize::from(r.u16()?);
-        let params = r.u16()?;
-        let deprecate_eof = self.session.capabilities & capability::DEPRECATE_EOF != 0;
-        // Parameter definitions say nothing useful (every type is "string"
-        // before the first execution).
-        for _ in 0..params {
+        let mut reply = Prepared::default();
+        loop {
             self.read_packet()?;
+            if let Some(statement) = self.session.prepare_step(&mut reply, &self.buf)? {
+                return Ok(statement);
+            }
         }
-        if params > 0 && !deprecate_eof {
-            self.read_packet()?;
-        }
-        let mut definitions = Vec::with_capacity(columns.min(4096));
-        for _ in 0..columns {
-            self.read_packet()?;
-            definitions.push(Column::parse(&self.buf)?);
-        }
-        if columns > 0 && !deprecate_eof {
-            self.read_packet()?;
-        }
-        Ok(Statement {
-            id,
-            params,
-            columns: definitions,
-        })
     }
 
     /// Runs a prepared statement (`COM_STMT_EXECUTE`, `payload` from
@@ -1033,23 +977,29 @@ impl Conn {
     /// Reads one statement's whole reply (every result, rows dropped),
     /// adding its first result's rowcount to `totals`.
     fn read_reply(&mut self, totals: &mut PipelineTotals) -> Result<()> {
-        let mut first = true;
-        loop {
-            let (result, stream) = self.read_head()?;
-            let count = if let Some(id) = stream {
-                u64::try_from(self.skip_rows(id, usize::MAX)?.0).unwrap_or(u64::MAX)
-            } else {
-                totals.last_insert_id = result.last_insert_id;
-                result.affected_rows
-            };
-            if first {
-                totals.rowcount += count;
-                first = false;
+        let mut reply = self.session.reply();
+        let ended = loop {
+            let step = self
+                .read_packet()
+                .and_then(|()| self.session.reply_step(&mut reply, &self.buf, totals));
+            match step {
+                Ok(ReplyStep::Read) => {}
+                Ok(ReplyStep::File(name)) => {
+                    let step = self.local_infile(&name).and_then(|(result, stream)| {
+                        self.session
+                            .reply_result(&mut reply, &result, stream, totals)
+                    });
+                    if !matches!(step, Ok(ReplyStep::Read)) {
+                        break step.map(|_| ());
+                    }
+                }
+                Ok(ReplyStep::Done) => break Ok(()),
+                Err(err) => break Err(err),
             }
-            if !self.has_more_results() {
-                return Ok(());
-            }
-        }
+        };
+        // A large row dropped may have grown the buffer.
+        release(&mut self.buf);
+        ended
     }
 
     /// Reads rows of the streamed result set `id` into `rows`, stopping
@@ -1192,7 +1142,7 @@ impl Conn {
                 "the server asked for a local file in the middle of a pipelined batch",
             ));
         }
-        let refused = match self.open_local_file(name) {
+        let refused = match infile::open(self.local_infile_dir.as_deref(), &self.infile, name) {
             Ok((path, file)) => {
                 self.send_file(&path, file)?;
                 None
@@ -1204,74 +1154,16 @@ impl Conn {
             self.stream.write_packet(&[])?;
         }
         self.read_packet()?;
-        let reply = self
-            .session
-            .file_reply(&self.buf)
-            .map(|result| (result, None));
-        match (refused, reply) {
-            (_, Err(err @ (Error::Io(_) | Error::Protocol(_)))) | (None, Err(err)) => Err(err),
-            (Some(reason), _) => Err(Error::LocalInfile(reason)),
-            (None, reply) => reply,
-        }
-    }
-
-    /// Opens the local file `name` (as the server asked for it) if this
-    /// command may send it, or says why not. Nothing on disk is touched
-    /// unless the statement named the file.
-    fn open_local_file(&self, name: &[u8]) -> std::result::Result<(PathBuf, File), String> {
-        let shown = String::from_utf8_lossy(name);
-        let Some(dir) = &self.local_infile_dir else {
-            return Err(format!(
-                "the server asked for {shown:?}, but LOAD DATA LOCAL INFILE is disabled \
-                 (local_infile_dir allows the files of a directory)"
-            ));
-        };
-        let named = match &self.infile {
-            Infile::Allow(names) => names.iter().any(|allowed| allowed == name),
-            Infile::Refuse | Infile::Pipelined => false,
-        };
-        if !named {
-            return Err(format!(
-                "the server asked for {shown:?}, which the statement being run does not name"
-            ));
-        }
-        let path = std::str::from_utf8(name)
-            .map_err(|_| format!("the file name {shown:?} is not valid UTF-8"))?;
-        // Relative names start at the working directory, as in other clients.
-        let resolved = fs::canonicalize(path).map_err(|err| format!("{path}: {err}"))?;
-        if !resolved.starts_with(dir) {
-            return Err(format!(
-                "{path} is outside local_infile_dir ({})",
-                dir.display()
-            ));
-        }
-        // Checked before opening too: opening a FIFO blocks until something
-        // writes to it, with the connection held. The descriptor is checked
-        // again below, in case the path changed in between.
-        let is_file = fs::metadata(&resolved)
-            .map_err(|err| format!("{path}: {err}"))?
-            .is_file();
-        if !is_file {
-            return Err(format!("{path} is not a regular file"));
-        }
-        let file = File::open(&resolved).map_err(|err| format!("{path}: {err}"))?;
-        let is_file = file
-            .metadata()
-            .map_err(|err| format!("{path}: {err}"))?
-            .is_file();
-        if !is_file {
-            return Err(format!("{path} is not a regular file"));
-        }
-        Ok((resolved, file))
+        infile::outcome(refused, self.session.file_reply(&self.buf)).map(|result| (result, None))
     }
 
     /// Sends `file` in packets and the empty packet that ends it. If the
     /// file cannot be read to the end, the connection is closed instead,
     /// so the server aborts the statement rather than loading part of it.
     fn send_file(&mut self, path: &Path, mut file: File) -> Result<()> {
-        let mut chunk = vec![0; LOCAL_INFILE_CHUNK];
+        let mut chunk = vec![0; infile::CHUNK];
         loop {
-            let len = match read_full(&mut file, &mut chunk) {
+            let len = match infile::read_full(&mut file, &mut chunk) {
                 Ok(len) => len,
                 Err(err) => {
                     self.stream.get_mut().shutdown();
