@@ -68,7 +68,8 @@ class Server:
     host: str
     port: int
 
-    def connect(self, **overrides: Any) -> rustmy.Connection:
+    def connect_args(self, **overrides: Any) -> dict[str, Any]:
+        """``connect()``'s arguments for the test account and database."""
         kwargs: dict[str, Any] = {
             "host": self.host,
             "port": self.port,
@@ -79,7 +80,10 @@ class Server:
         if _COMPRESS:
             kwargs["compress"] = _COMPRESS
         kwargs.update(overrides)
-        return rustmy.connect(**kwargs)
+        return kwargs
+
+    def connect(self, **overrides: Any) -> rustmy.Connection:
+        return rustmy.connect(**self.connect_args(**overrides))
 
     @cached_property
     def major_version(self) -> int:
