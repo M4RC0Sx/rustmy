@@ -9,6 +9,7 @@
 //! until the next call. What it writes is passed to the loop's transport
 //! after each poll, and its result resolves the command's asyncio future.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::path::PathBuf;
@@ -17,6 +18,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
@@ -36,6 +39,7 @@ use rustmy_proto::Input;
 use rustmy_proto::MaybeTls;
 use rustmy_proto::QueryResult;
 use rustmy_proto::ReadOutcome;
+use rustmy_proto::RowSet;
 use rustmy_proto::StartTls;
 use rustmy_proto::StreamId;
 use rustmy_proto::Transport;
@@ -46,10 +50,12 @@ use crate::connection::Plan;
 use crate::connection::connect_opts;
 use crate::connection::names_clause;
 use crate::connection::prepared_plan;
+use crate::connection::warn_abandoned_stream;
 use crate::convert::Converter;
 use crate::convert::Custom;
 use crate::convert::description;
 use crate::convert::result_to_py;
+use crate::errors::InterfaceError;
 use crate::errors::Phase;
 use crate::errors::ProgrammingError;
 use crate::errors::from_proto;
@@ -188,6 +194,29 @@ pub(crate) struct AioConnection {
     target: Arc<str>,
     /// Whether `bytes` parameters carry the `_binary` introducer.
     binary_prefix: bool,
+    /// Command generation and the streamed result set still open, shared
+    /// with the streams.
+    counters: Arc<Counters>,
+}
+
+/// Bumped by every command, so a streamed result set can tell whether
+/// another command ran (and discarded its rows) since it started; and the
+/// generation of the streamed result set whose rows the user has not all
+/// fetched yet, or 0.
+#[derive(Debug, Default)]
+struct Counters {
+    generation: AtomicU64,
+    open_stream: AtomicU64,
+}
+
+impl Counters {
+    /// The streamed result set of `generation` has no rows left for the
+    /// user, so the next command abandons nothing.
+    fn stream_finished(&self, generation: u64) {
+        let _ =
+            self.open_stream
+                .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
 }
 
 impl AioConnection {
@@ -235,6 +264,34 @@ impl AioConnection {
         py: Python<'_>,
         operation: impl FnOnce(Box<Link>) -> Operation,
     ) -> PyResult<Py<PyAny>> {
+        self.start_as(py, None, operation)
+    }
+
+    /// Starts `operation`: a command (`stream` is `None`) first warns that
+    /// it discards the rows of a streamed result set the user has not all
+    /// fetched (before anything changes, so a warning turned into an error
+    /// leaves them as they are) and starts a new generation; a stream's own
+    /// read (`stream` is its generation) fails if another command ran.
+    fn start_as(
+        &self,
+        py: Python<'_>,
+        stream: Option<u64>,
+        operation: impl FnOnce(Box<Link>) -> Operation,
+    ) -> PyResult<Py<PyAny>> {
+        match stream {
+            None => {
+                if self.counters.open_stream.load(Ordering::SeqCst) != 0
+                    && matches!(self.lock().state, State::Idle(_))
+                {
+                    warn_abandoned_stream(py)?;
+                }
+            }
+            Some(generation) => {
+                if self.counters.generation.load(Ordering::SeqCst) != generation {
+                    return Err(abort_error(Abort::Discarded));
+                }
+            }
+        }
         let mut inner = self.lock();
         let link = match std::mem::replace(&mut inner.state, State::Closed) {
             State::Idle(link) => link,
@@ -250,9 +307,55 @@ impl AioConnection {
             .call_method0("create_future")?
             .unbind();
         inner.waiter = Some(waiter.clone_ref(py));
+        if stream.is_none() {
+            // Any pending streamed rows are about to be discarded.
+            self.counters.generation.fetch_add(1, Ordering::SeqCst);
+            self.counters.open_stream.store(0, Ordering::SeqCst);
+        }
         inner.state = State::Running(operation(link));
         self.advance(py, &mut inner)?;
         Ok(waiter)
+    }
+
+    /// Starts a statement whose rows stay on the wire: the future gives
+    /// `(description, stream, rowcount, last_insert_id, warnings)`, as
+    /// `Connection.execute_streamed` returns it (rowcount -1 for a result
+    /// set), or `None` when `start` finds nothing (no next result).
+    fn stream_command<F>(slf: &Bound<'_, Self>, as_dict: bool, start: F) -> PyResult<Py<PyAny>>
+    where
+        F: for<'a> FnOnce(&'a mut Client, &'a mut MaybeTls<LoopIo>) -> StartFuture<'a>
+            + Send
+            + 'static,
+    {
+        let this = slf.get();
+        let codec = this.codec();
+        let custom = this.custom();
+        let target = Arc::clone(&this.target);
+        let counters = Arc::clone(&this.counters);
+        let conn = slf.clone().unbind();
+        this.start(slf.py(), move |mut link| {
+            Box::pin(async move {
+                let Link { client, io } = &mut *link;
+                let value = match start(client, io).await {
+                    Ok(Some((head, id))) => Python::attach(|py| {
+                        stream_head(
+                            py,
+                            conn,
+                            head,
+                            id,
+                            as_dict,
+                            &codec,
+                            custom.as_deref(),
+                            &counters,
+                        )
+                    })
+                    .map_err(Failure::Python),
+                    Ok(None) => Ok(none()),
+                    Err(err) => Err(err.into()),
+                };
+                outcome(link, value, &codec, &target)
+            })
+        })
     }
 
     fn closed_error(&self) -> PyErr {
@@ -437,6 +540,61 @@ fn outcome(
     }
 }
 
+/// `(description, stream, rowcount, last_insert_id, warnings)` for a
+/// streamed statement: the stream reads the rows of the result set `id`
+/// (when there is one) as they are fetched.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parts of a stream, handed over once"
+)]
+fn stream_head(
+    py: Python<'_>,
+    conn: Py<AioConnection>,
+    head: QueryResult,
+    id: Option<StreamId>,
+    as_dict: bool,
+    codec: &Arc<Codec>,
+    custom: Option<&Custom>,
+    counters: &Arc<Counters>,
+) -> PyResult<Py<PyAny>> {
+    let Some(id) = id else {
+        return (
+            py.None(),
+            py.None(),
+            head.affected_rows,
+            head.last_insert_id,
+            head.warnings,
+        )
+            .into_py_any(py);
+    };
+    let converter = Converter::new(py, &head.columns, as_dict, codec, custom)?;
+    let generation = counters.generation.load(Ordering::SeqCst);
+    counters.open_stream.store(generation, Ordering::SeqCst);
+    let stream = AioStream {
+        conn,
+        counters: Arc::clone(counters),
+        state: Arc::new(Mutex::new(StreamState {
+            id,
+            generation,
+            converter,
+            raw: head.rows,
+            batch: VecDeque::new(),
+            done: false,
+            error: None,
+            abort: None,
+            rownumber: 0,
+        })),
+    };
+    (
+        description(py, &head.columns, codec)?,
+        Py::new(py, stream)?,
+        -1_i64,
+        head.last_insert_id,
+        head.warnings,
+    )
+        .into_py_any(py)
+}
+
 /// Reads the rows of the result set `head` started (the result itself
 /// without one) in batches, converting each as it comes:
 /// `(description, rows, rowcount, last_insert_id, warnings)`, as
@@ -612,6 +770,7 @@ impl AioConnection {
             custom: Mutex::new(None),
             target,
             binary_prefix,
+            counters: Arc::new(Counters::default()),
         })
     }
 
@@ -706,6 +865,30 @@ impl AioConnection {
                 }
                 .map(Some)
             })
+        })
+    }
+
+    /// As `execute`, leaving the rows on the wire for the stream the
+    /// future gives (as `Connection.execute_streamed`).
+    #[pyo3(signature = (query, args = None, as_dict = false))]
+    fn execute_streamed(
+        slf: &Bound<'_, Self>,
+        query: &Bound<'_, PyString>,
+        args: Option<&Bound<'_, PyAny>>,
+        as_dict: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let sql = statement(&slf.get().encoder()?, query, args)?.into_owned();
+        Self::stream_command(slf, as_dict, move |client, io| {
+            Box::pin(async move { client.query_streamed(io, &sql).await.map(Some) })
+        })
+    }
+
+    /// As `next_result`, leaving the rows on the wire (the future gives
+    /// what `execute_streamed` gives, or `None`).
+    #[pyo3(signature = (as_dict = false))]
+    fn next_result_streamed(slf: &Bound<'_, Self>, as_dict: bool) -> PyResult<Py<PyAny>> {
+        Self::stream_command(slf, as_dict, |client, io| {
+            Box::pin(async move { client.next_result_streamed(io).await })
         })
     }
 
@@ -909,5 +1092,286 @@ impl AioConnection {
         self.flush(py, &inner)?;
         inner.transport = None;
         Ok(())
+    }
+}
+
+/// Why a stream stopped handing out rows before the end of its result set.
+#[derive(Debug, Clone, Copy)]
+enum Abort {
+    /// Another command discarded the rows still on the wire.
+    Discarded,
+    /// A row could not be converted; the rest of the result set is dropped.
+    Conversion,
+}
+
+fn abort_error(abort: Abort) -> PyErr {
+    match abort {
+        Abort::Discarded => ProgrammingError::new_err((
+            0,
+            "result set discarded: another command ran on this connection before \
+             all its rows were fetched",
+        )),
+        Abort::Conversion => {
+            InterfaceError::new_err((0, "result set aborted by an earlier conversion error"))
+        }
+    }
+}
+
+struct StreamState {
+    id: StreamId,
+    /// Connection generation the result set belongs to.
+    generation: u64,
+    converter: Converter,
+    /// Raw rows of the batch being converted (kept for its allocations).
+    raw: RowSet,
+    /// Converted rows not handed out yet.
+    batch: VecDeque<Py<PyAny>>,
+    /// The terminator (or an error) has been read: no rows left on the wire.
+    done: bool,
+    /// Error that ended the result set, raised once the rows read before it
+    /// have been handed out.
+    error: Option<PyErr>,
+    abort: Option<Abort>,
+    /// Rows handed out or skipped so far.
+    rownumber: usize,
+}
+
+impl StreamState {
+    fn exhausted(&self) -> bool {
+        self.done && self.batch.is_empty() && self.error.is_none()
+    }
+
+    fn abort(&mut self, counters: &Counters, abort: Abort) {
+        self.abort = Some(abort);
+        self.batch.clear();
+        self.error = None;
+        self.done = true;
+        counters.stream_finished(self.generation);
+    }
+
+    /// Fails if the rows were discarded by another command (checked before
+    /// every fetch, even with rows at hand, so the outcome never depends on
+    /// the batch size) or the stream was aborted.
+    fn check(&mut self, counters: &Counters) -> PyResult<()> {
+        if let Some(abort) = self.abort {
+            return Err(abort_error(abort));
+        }
+        if self.exhausted() || counters.generation.load(Ordering::SeqCst) == self.generation {
+            return Ok(());
+        }
+        self.abort(counters, Abort::Discarded);
+        Err(abort_error(Abort::Discarded))
+    }
+
+    fn finish_if_exhausted(&self, counters: &Counters) {
+        if self.exhausted() {
+            counters.stream_finished(self.generation);
+        }
+    }
+
+    /// Handles a batch just read (or the error reading it).
+    fn read(
+        &mut self,
+        py: Python<'_>,
+        counters: &Counters,
+        read: Result<ReadOutcome, PyErr>,
+        discarded: bool,
+    ) -> PyResult<()> {
+        if discarded {
+            self.raw.clear();
+            self.abort(counters, Abort::Discarded);
+            return Err(abort_error(Abort::Discarded));
+        }
+        match read {
+            Ok(ReadOutcome::More) => {}
+            Ok(ReadOutcome::Done { .. }) => self.done = true,
+            // A server error (or a lost connection) ends the result set;
+            // the rows read before it are still handed out first.
+            Err(err) => {
+                self.done = true;
+                self.error = Some(err);
+            }
+        }
+        let batch = &mut self.batch;
+        let converted = self
+            .converter
+            .convert(py, &self.raw, |row| batch.push_back(row.unbind()));
+        self.raw.clear();
+        if let Err(err) = converted {
+            self.abort(counters, Abort::Conversion);
+            return Err(err);
+        }
+        Ok(())
+    }
+}
+
+/// The rows of a streamed result set (`execute_streamed`), read from the
+/// event loop one batch at a time, only when the user asks for more than
+/// the rows at hand (the server waits meanwhile: memory stays flat).
+///
+/// Fetching is two steps, so no future is created while rows are at hand:
+/// `take` hands out rows without I/O (or says a read is needed), and `read`
+/// starts reading the next batch, its future giving `None`.
+#[pyclass(module = "rustmy._core", frozen)]
+pub(crate) struct AioStream {
+    conn: Py<AioConnection>,
+    counters: Arc<Counters>,
+    state: Arc<Mutex<StreamState>>,
+}
+
+impl AioStream {
+    fn lock(&self) -> MutexGuard<'_, StreamState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Starts reading (and dropping) up to `count` rows on the wire; the
+    /// future gives how many.
+    fn skip_on_wire(&self, py: Python<'_>, count: usize) -> PyResult<Py<PyAny>> {
+        let (id, generation) = {
+            let state = self.lock();
+            (state.id, state.generation)
+        };
+        let conn = self.conn.get();
+        let codec = conn.codec();
+        let target = Arc::clone(&conn.target);
+        let counters = Arc::clone(&self.counters);
+        let state = Arc::clone(&self.state);
+        conn.start_as(py, Some(generation), move |mut link| {
+            Box::pin(async move {
+                let Link { client, io } = &mut *link;
+                let skipped = client.skip_rows(io, id, count).await;
+                let mut stream = state.lock().unwrap_or_else(PoisonError::into_inner);
+                let value = match skipped {
+                    Ok((n, outcome)) => {
+                        stream.done = matches!(outcome, ReadOutcome::Done { .. });
+                        stream.rownumber += n;
+                        stream.finish_if_exhausted(&counters);
+                        Python::attach(|py| n.into_py_any(py)).map_err(Failure::Python)
+                    }
+                    Err(ProtoError::ResultDiscarded) => {
+                        stream.abort(&counters, Abort::Discarded);
+                        Err(Failure::Python(abort_error(Abort::Discarded)))
+                    }
+                    Err(err) => {
+                        stream.done = true;
+                        counters.stream_finished(stream.generation);
+                        Err(Failure::Proto(err))
+                    }
+                };
+                outcome(link, value, &codec, &target)
+            })
+        })
+    }
+}
+
+#[pymethods]
+impl AioStream {
+    /// Up to `size` rows at hand, without I/O: `None` while fewer are at
+    /// hand and more may come (call `read` first). An error that ended the
+    /// result set is raised once no rows are left to hand out.
+    fn take<'py>(&self, py: Python<'py>, size: usize) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        let mut state = self.lock();
+        state.check(&self.counters)?;
+        if state.batch.len() < size && !state.done {
+            return Ok(None);
+        }
+        let n = size.min(state.batch.len());
+        if n == 0
+            && let Some(err) = state.error.take()
+        {
+            self.counters.stream_finished(state.generation);
+            return Err(err);
+        }
+        let rows: Vec<Py<PyAny>> = state.batch.drain(..n).collect();
+        state.rownumber += n;
+        state.finish_if_exhausted(&self.counters);
+        Ok(Some(PyTuple::new(py, rows)?))
+    }
+
+    /// Starts reading the next batch of rows; the future gives `None`.
+    fn read(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let (id, generation) = {
+            let state = self.lock();
+            (state.id, state.generation)
+        };
+        let conn = self.conn.get();
+        let codec = conn.codec();
+        let target = Arc::clone(&conn.target);
+        let counters = Arc::clone(&self.counters);
+        let state = Arc::clone(&self.state);
+        conn.start_as(py, Some(generation), move |mut link| {
+            Box::pin(async move {
+                let Link { client, io } = &mut *link;
+                // The batch is read outside the lock (no guard across an
+                // await), then handed back.
+                let mut raw =
+                    std::mem::take(&mut state.lock().unwrap_or_else(PoisonError::into_inner).raw);
+                let read = client.read_rows(io, id, &mut raw, BATCH_BYTES).await;
+                let mut stream = state.lock().unwrap_or_else(PoisonError::into_inner);
+                stream.raw = raw;
+                let discarded = matches!(read, Err(ProtoError::ResultDiscarded));
+                // An I/O failure or protocol violation also leaves the
+                // connection unusable, as for any command.
+                let broken = matches!(read, Err(ProtoError::Io(_) | ProtoError::Protocol(_)));
+                let read = read.map_err(|err| to_pyerr(err, Phase::Command, &target, &codec));
+                let value = Python::attach(|py| {
+                    stream
+                        .read(py, &counters, read, discarded)
+                        .map(|()| py.None())
+                });
+                drop(stream);
+                Outcome {
+                    link: (!broken).then_some(link),
+                    value,
+                }
+            })
+        })
+    }
+
+    /// Hands out up to `count` rows at hand as skipped; the rest must be
+    /// read off the wire (`skip_wire`). Returns how many were skipped.
+    fn skip_ready(&self, count: usize) -> PyResult<usize> {
+        let mut state = self.lock();
+        state.check(&self.counters)?;
+        let n = count.min(state.batch.len());
+        state.batch.drain(..n);
+        state.rownumber += n;
+        state.finish_if_exhausted(&self.counters);
+        Ok(n)
+    }
+
+    /// Starts dropping up to `count` rows still on the wire, unconverted;
+    /// the future gives how many.
+    fn skip_wire(&self, py: Python<'_>, count: usize) -> PyResult<Py<PyAny>> {
+        self.skip_on_wire(py, count)
+    }
+
+    /// Whether rows may still come off the wire.
+    #[getter]
+    fn pending(&self) -> bool {
+        let state = self.lock();
+        !state.done && state.abort.is_none()
+    }
+
+    /// Drops the rest of the result set: the future (or `None`, when no
+    /// rows are left on the wire) ends once they are read.
+    fn close(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let (done, generation) = {
+            let mut state = self.lock();
+            state.batch.clear();
+            state.error = None;
+            (state.done || state.abort.is_some(), state.generation)
+        };
+        if done || self.counters.generation.load(Ordering::SeqCst) != generation {
+            self.counters.stream_finished(generation);
+            return Ok(None);
+        }
+        self.skip_on_wire(py, usize::MAX).map(Some)
+    }
+
+    /// Index of the next row: rows handed out or skipped so far.
+    #[getter]
+    fn rownumber(&self) -> usize {
+        self.lock().rownumber
     }
 }

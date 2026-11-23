@@ -1526,7 +1526,7 @@ pub(crate) fn connect(
 
 /// Warns that a command is discarding rows the user never fetched, pointing
 /// at the first caller outside the `rustmy` package.
-fn warn_abandoned_stream(py: Python<'_>) -> PyResult<()> {
+pub(crate) fn warn_abandoned_stream(py: Python<'_>) -> PyResult<()> {
     let mut stacklevel = 1;
     let mut frame = py
         .import("sys")

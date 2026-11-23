@@ -18,6 +18,8 @@ from rustmy.aio.cursors import Cursor
 from rustmy.aio.cursors import DictCursor
 from rustmy.aio.cursors import PreparedCursor
 from rustmy.aio.cursors import PreparedDictCursor
+from rustmy.aio.cursors import SSCursor
+from rustmy.aio.cursors import SSDictCursor
 from rustmy.err import DatabaseError
 from rustmy.err import DataError
 from rustmy.err import Error
@@ -45,6 +47,8 @@ __all__ = [
     "PreparedCursor",
     "PreparedDictCursor",
     "ProgrammingError",
+    "SSCursor",
+    "SSDictCursor",
     "Warning",
     "connect",
 ]
