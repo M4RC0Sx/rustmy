@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
     from typing_extensions import Self
 
+    from rustmy._core import AioMany
     from rustmy._core import AioStream
     from rustmy._core import AioStreamedResult
     from rustmy._core import QueryResult
@@ -40,6 +41,14 @@ class Cursor:
 
     #: Rows :meth:`fetchmany` returns by default (PEP 249).
     arraysize = 1
+
+    #: Largest statement :meth:`executemany` builds when batching inserts.
+    max_stmt_length = 256 * 1024
+
+    #: Statements :meth:`executemany` sends before reading their replies,
+    #: when it cannot batch them into one (anything but ``INSERT … VALUES``).
+    #: ``1`` sends each one after the previous reply.
+    max_pipeline = 256
 
     def __init__(self, connection: Connection) -> None:
         self._connection: Connection | None = connection
@@ -115,11 +124,48 @@ class Cursor:
     def _start(self, connection: Connection, query: str, args: Params) -> Any:
         return connection._core.execute(query, args, self._as_dict)  # noqa: SLF001
 
-    async def executemany(self, query: str, seq_of_args: Iterable[Params]) -> int:  # noqa: ARG002
-        """Run ``query`` once per item of ``seq_of_args`` (not available yet
-        on asyncio connections)."""
-        msg = "executemany on asyncio connections"
-        raise NotSupportedError(0, msg)
+    async def executemany(self, query: str, seq_of_args: Iterable[Params]) -> int:
+        """Run ``query`` once per item of ``seq_of_args``; as
+        :meth:`rustmy.cursors.Cursor.executemany`.
+
+        A single-row ``INSERT``/``REPLACE … VALUES (…)`` is sent as multi-row
+        statements of at most :attr:`max_stmt_length` bytes; anything else
+        runs once per item, pipelined in windows of up to
+        :attr:`max_pipeline` statements (and 16 KiB). Items are taken from
+        ``seq_of_args`` as each statement or window is built, and an error
+        stops the batch at the end of its window. Returns the total number
+        of affected rows; the cursor keeps the last statement's result.
+        """
+        connection = self._get_connection()
+        self._clear()
+        many = self._many(connection, query, seq_of_args)
+        result = None
+        while (step := many.step()) is not None:
+            result = await connection._run(step)  # noqa: SLF001
+        if many.batched:
+            self.rowcount = many.rowcount
+            if many.lastrowid is not None:
+                self.lastrowid = many.lastrowid
+        elif many.statement is None:
+            self.rowcount = 0
+        else:
+            self._set_many_result(result, many.rowcount)
+        if many.statement is not None:
+            self._last = many.statement
+        return self.rowcount
+
+    def _many(
+        self, connection: Connection, query: str, seq_of_args: Iterable[Params]
+    ) -> AioMany:
+        return connection._core.executemany(  # noqa: SLF001
+            query, seq_of_args, self.max_stmt_length, self.max_pipeline, self._as_dict
+        )
+
+    def _set_many_result(self, result: Any, before: int) -> None:
+        """The last statement's result of a pipelined ``executemany``;
+        ``before``: the rows the others affected."""
+        self._set_result(result)
+        self.rowcount += before
 
     async def callproc(self, procname: str, args: Sequence[Any] = ()) -> Sequence[Any]:
         """Call the stored procedure ``procname`` with ``args``; as
@@ -223,6 +269,13 @@ class PreparedCursor(Cursor):
     """Buffered cursor running server-side prepared statements; as
     :class:`rustmy.cursors.PreparedCursor`."""
 
+    def _many(
+        self, connection: Connection, query: str, seq_of_args: Iterable[Params]
+    ) -> AioMany:
+        return connection._core.executemany_prepared(  # noqa: SLF001
+            query, seq_of_args, self.max_stmt_length, self.max_pipeline, self._as_dict
+        )
+
     def _start(self, connection: Connection, query: str, args: Params) -> Any:
         return connection._core.execute_prepared(query, args, self._as_dict)  # noqa: SLF001
 
@@ -288,6 +341,25 @@ class SSCursor(Cursor):
             )
         )
         return self.rowcount
+
+    async def executemany(self, query: str, seq_of_args: Iterable[Params]) -> int:
+        """As :meth:`Cursor.executemany`; the last statement's rows are
+        streamed. Its rowcount is -1 when it returns a result set."""
+        await self._discard()
+        return await super().executemany(query, seq_of_args)
+
+    def _many(
+        self, connection: Connection, query: str, seq_of_args: Iterable[Params]
+    ) -> AioMany:
+        return connection._core.executemany_streamed(  # noqa: SLF001
+            query, seq_of_args, self.max_stmt_length, self.max_pipeline, self._as_dict
+        )
+
+    def _set_many_result(self, result: Any, before: int) -> None:
+        self._set_stream(result)
+        # A result set's size is unknown until the end, as for execute().
+        if self.rowcount != -1:
+            self.rowcount += before
 
     async def nextset(self) -> bool | None:
         """Skip what is left of this result set and move to the next one."""

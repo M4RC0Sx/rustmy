@@ -308,8 +308,10 @@ errors included). Unbuffered cursors (`AioStream`) apply backpressure: `take`
 hands out the rows already converted without I/O (no future is created
 while rows are at hand), and `read` reads one more batch off the loop only
 when more are asked for; the command generation, the discard warning and
-the errors follow the blocking `ResultStream`. `executemany` is not there
-yet.
+the errors follow the blocking `ResultStream`. `executemany` groups its
+items with the blocking connection's builders (`batch.rs`) and runs each
+group as a command of its own (`AioMany.step`): one `await` per statement
+or window, not per item.
 
 **TLS and authentication.** TLS through `rustls`; `ssl_mode` is disabled /
 preferred (default) / required / verify_ca / verify_identity. With `ssl_ca`,
@@ -378,8 +380,9 @@ and regenerate it when the supported versions change (an integration test
 compares it with each MySQL server's catalogue). `multi_statements` is off by
 default.
 
-**Pipelined `executemany`.** A batchable `INSERT … VALUES` becomes multi-row
-statements; anything else is sent in windows of up to `Cursor.max_pipeline`
+**Pipelined `executemany`.** How the items are grouped is in `batch.rs`,
+without I/O, for both connections. A batchable `INSERT … VALUES` becomes
+multi-row statements; anything else is sent in windows of up to `Cursor.max_pipeline`
 statements (256) and `Conn::pipeline_budget()` bytes (16 KiB over TCP/TLS,
 8 KiB over Unix sockets, so a window always fits in the send buffer: the
 server may stop reading while it sends a large reply, a deadlock reproduced
