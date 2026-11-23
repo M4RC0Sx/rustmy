@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING
+from typing import Any
 
 import pytest
 
@@ -140,3 +143,81 @@ async def test_a_cancelled_command_closes_the_connection(server: Server) -> None
         # Its reply would arrive in the middle of the next command's.
         with pytest.raises(rustmy.OperationalError):
             await cur.execute("SELECT 4")
+
+
+CERTS = Path(__file__).parent / "docker" / "certs"
+
+
+async def _status(conn: _aio.Connection, name: str) -> str:
+    async with conn.cursor() as cur:
+        await cur.execute(f"SHOW SESSION STATUS LIKE '{name}'")
+        row = cur.fetchone()
+    return "" if row is None else str(row[1])
+
+
+@pytest.mark.parametrize(
+    ("options", "encrypted"),
+    [
+        ({}, True),  # preferred, and the test servers offer TLS
+        ({"ssl_mode": "disabled"}, False),
+        ({"ssl_mode": "required"}, True),
+        ({"ssl_mode": "verify_identity", "ssl_ca": CERTS / "ca.pem"}, True),
+    ],
+    ids=["preferred", "disabled", "required", "verify_identity"],
+)
+async def test_tls(server: Server, options: dict[str, Any], *, encrypted: bool) -> None:
+    async with await connect(server, **options) as conn:
+        assert bool(await _status(conn, "Ssl_cipher")) is encrypted
+
+
+async def test_tls_verification_failures(server: Server) -> None:
+    with pytest.raises(rustmy.OperationalError) as info:
+        await connect(server, ssl_mode="verify_ca", ssl_ca=CERTS / "other-ca.pem")
+    assert info.value.args[0] == 2026
+
+
+async def test_tls_client_certificate(server: Server) -> None:
+    async with await connect(
+        server,
+        user="rustmy_x509",
+        ssl_mode="verify_identity",
+        ssl_ca=CERTS / "ca.pem",
+        ssl_cert=CERTS / "client.pem",
+        ssl_key=CERTS / "client-key.pem",
+    ) as conn:
+        assert await _status(conn, "Ssl_cipher")
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"ssl_mode": "required"},
+        {"ssl_mode": "disabled", "compress": "zlib"},
+        {"ssl_mode": "disabled", "compress": "zstd"},
+        {"ssl_mode": "required", "compress": "zstd"},
+    ],
+    ids=["tls", "zlib", "zstd", "tls-zstd"],
+)
+async def test_many_records_both_ways(server: Server, options: dict[str, Any]) -> None:
+    async with await connect(server, **options) as conn, conn.cursor() as cur:
+        if "compress" in options:
+            assert await _status(conn, "Compression") == "ON"
+        # A large parameter goes out in many records (or compressed
+        # packets), a large result comes back in many.
+        blob = bytes(range(256)) * (16 * 1024)
+        await cur.execute("SELECT LENGTH(%s), SHA2(%s, 256)", (blob, blob))
+        assert cur.fetchone() == (len(blob), hashlib.sha256(blob).hexdigest())
+        limit = (
+            "cte_max_recursion_depth"
+            if server.name == "mysql"
+            else "max_recursive_iterations"
+        )
+        await cur.execute(f"SET SESSION {limit} = 100000")
+        count = await cur.execute(
+            "WITH RECURSIVE n (i) AS "
+            "(SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 50000) "
+            "SELECT i, REPEAT('y', i % 300) FROM n"
+        )
+        rows = cur.fetchall()
+        assert count == len(rows) == 50000
+        assert rows[298] == (299, "y" * 299)

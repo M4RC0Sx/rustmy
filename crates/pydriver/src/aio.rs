@@ -11,6 +11,7 @@
 
 use std::future::Future;
 use std::io;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -30,21 +31,20 @@ use pyo3::types::PyTuple;
 use rustmy_proto::Client;
 use rustmy_proto::Error as ProtoError;
 use rustmy_proto::Input;
-use rustmy_proto::Opts;
+use rustmy_proto::MaybeTls;
 use rustmy_proto::ReadOutcome;
-use rustmy_proto::SslMode;
-use rustmy_proto::TlsOpts;
 use rustmy_proto::Transport;
 use rustmy_proto::constants::status;
 
 use crate::charset::Codec;
-use crate::connection::utf8_encoder;
+use crate::connection::connect_opts;
 use crate::convert::Converter;
 use crate::convert::description;
 use crate::convert::result_to_py;
 use crate::errors::Phase;
 use crate::errors::from_proto;
 use crate::params::Args;
+use crate::params::Encoder;
 
 /// Size of the buffer the event loop reads into.
 const LOOP_BUFFER: usize = 256 * 1024;
@@ -125,10 +125,17 @@ impl Transport for LoopIo {
     }
 }
 
+/// An open session: the protocol's state and the transport under it (TLS
+/// keeps state of its own between commands).
+struct Link {
+    client: Client,
+    io: MaybeTls<LoopIo>,
+}
+
 /// What an operation ends with: the connection to go on with (none once it
 /// is unusable) and the value for the command's future.
 struct Outcome {
-    client: Option<Box<Client>>,
+    link: Option<Box<Link>>,
     value: PyResult<Py<PyAny>>,
 }
 
@@ -136,7 +143,7 @@ type Operation = Pin<Box<dyn Future<Output = Outcome> + Send>>;
 
 enum State {
     /// Waiting for a command.
-    Idle(Box<Client>),
+    Idle(Box<Link>),
     /// A command (or the handshake) is running.
     Running(Operation),
     Closed,
@@ -165,6 +172,8 @@ pub(crate) struct AioConnection {
     event_loop: Py<PyAny>,
     codec: Arc<Codec>,
     target: Arc<str>,
+    /// Whether `bytes` parameters carry the `_binary` introducer.
+    binary_prefix: bool,
 }
 
 impl AioConnection {
@@ -180,7 +189,7 @@ impl AioConnection {
                 .as_mut()
                 .poll(&mut Context::from_waker(Waker::noop()))
         {
-            inner.state = outcome.client.map_or(State::Closed, State::Idle);
+            inner.state = outcome.link.map_or(State::Closed, State::Idle);
             if let Some(waiter) = inner.waiter.take() {
                 resolve(py, waiter.bind(py), outcome.value)?;
             }
@@ -210,11 +219,11 @@ impl AioConnection {
     fn start(
         &self,
         py: Python<'_>,
-        operation: impl FnOnce(Box<Client>, LoopIo) -> Operation,
+        operation: impl FnOnce(Box<Link>) -> Operation,
     ) -> PyResult<Py<PyAny>> {
         let mut inner = self.lock();
-        let client = match std::mem::replace(&mut inner.state, State::Closed) {
-            State::Idle(client) => client,
+        let link = match std::mem::replace(&mut inner.state, State::Closed) {
+            State::Idle(link) => link,
             State::Running(running) => {
                 inner.state = State::Running(running);
                 return Err(PyRuntimeError::new_err(
@@ -229,7 +238,7 @@ impl AioConnection {
             .call_method0("create_future")?
             .unbind();
         inner.waiter = Some(waiter.clone_ref(py));
-        inner.state = State::Running(operation(client, LoopIo(Arc::clone(&self.shared))));
+        inner.state = State::Running(operation(link));
         self.advance(py, &mut inner)?;
         Ok(waiter)
     }
@@ -279,24 +288,24 @@ impl From<PyErr> for Failure {
 /// violation leaves the stream in an unknown state, so the connection is
 /// not used again.
 fn outcome(
-    client: Box<Client>,
+    link: Box<Link>,
     value: Result<Py<PyAny>, Failure>,
     codec: &Codec,
     target: &str,
 ) -> Outcome {
     match value {
         Ok(value) => Outcome {
-            client: Some(client),
+            link: Some(link),
             value: Ok(value),
         },
         Err(Failure::Python(err)) => Outcome {
-            client: Some(client),
+            link: Some(link),
             value: Err(err),
         },
         Err(Failure::Proto(err)) => {
             let broken = matches!(err, ProtoError::Io(_) | ProtoError::Protocol(_));
             Outcome {
-                client: (!broken).then_some(client),
+                link: (!broken).then_some(link),
                 value: Err(to_pyerr(err, Phase::Command, target, codec)),
             }
         }
@@ -308,7 +317,7 @@ fn outcome(
 /// `Connection.execute` returns it.
 async fn execute(
     client: &mut Client,
-    io: &mut LoopIo,
+    io: &mut MaybeTls<LoopIo>,
     sql: &[u8],
     as_dict: bool,
     codec: &Arc<Codec>,
@@ -353,48 +362,111 @@ async fn execute(
 
 #[pymethods]
 impl AioConnection {
-    /// A connection about to be opened on `event_loop`: the handshake starts
-    /// once the loop's transport is connected (`connection_made`), and the
-    /// future `connected()` returns resolves when it ends. `unix` says
-    /// whether the stream is a Unix socket.
+    /// A connection about to be opened on `event_loop`, with the options of
+    /// `connect()`: the handshake starts once the loop's transport is
+    /// connected (`connection_made`), and the future `connected()` returns
+    /// resolves when it ends.
     #[new]
-    #[pyo3(signature = (event_loop, target, user, password, database = None, unix = false))]
+    #[pyo3(signature = (
+        event_loop,
+        *,
+        host,
+        port,
+        user,
+        password,
+        database = None,
+        unix_socket = None,
+        connect_timeout = None,
+        read_timeout = None,
+        write_timeout = None,
+        client_flag = 0,
+        charset = "utf8mb4",
+        ssl_mode = "preferred",
+        ssl_ca = None,
+        ssl_cert = None,
+        ssl_key = None,
+        server_public_key = None,
+        get_server_public_key = true,
+        binary_prefix = true,
+        statement_cache_size = 32,
+        compress = None,
+        zstd_level = 3,
+        local_infile = false,
+        local_infile_dir = None,
+    ))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the keyword-only Python signature one to one"
+    )]
     fn new(
         py: Python<'_>,
         event_loop: Py<PyAny>,
-        target: &str,
+        host: String,
+        port: u16,
         user: &str,
-        password: &str,
+        password: String,
         database: Option<&str>,
-        unix: bool,
+        unix_socket: Option<PathBuf>,
+        connect_timeout: Option<f64>,
+        read_timeout: Option<f64>,
+        write_timeout: Option<f64>,
+        client_flag: u32,
+        charset: &str,
+        ssl_mode: &str,
+        ssl_ca: Option<PathBuf>,
+        ssl_cert: Option<PathBuf>,
+        ssl_key: Option<PathBuf>,
+        server_public_key: Option<PathBuf>,
+        get_server_public_key: bool,
+        binary_prefix: bool,
+        statement_cache_size: usize,
+        compress: Option<&str>,
+        zstd_level: u8,
+        local_infile: bool,
+        local_infile_dir: Option<PathBuf>,
     ) -> PyResult<Self> {
-        let codec = Codec::new(py, "utf8mb4")?;
-        let opts = Opts {
-            user: user.as_bytes().to_vec(),
-            password: password.to_owned(),
-            database: database.map(|d| d.as_bytes().to_vec()),
-            tls: TlsOpts {
-                mode: SslMode::Disabled,
-                ..TlsOpts::default()
-            },
-            ..Opts::default()
-        };
+        let unix = unix_socket.is_some();
+        let (opts, codec, target) = connect_opts(
+            py,
+            host,
+            port,
+            user,
+            password,
+            database,
+            unix_socket,
+            connect_timeout,
+            read_timeout,
+            write_timeout,
+            client_flag,
+            charset,
+            ssl_mode,
+            ssl_ca,
+            ssl_cert,
+            ssl_key,
+            server_public_key,
+            get_server_public_key,
+            statement_cache_size,
+            compress,
+            zstd_level,
+            local_infile,
+            local_infile_dir,
+        )?;
         let shared = Arc::new(Mutex::new(Shared::default()));
         let target: Arc<str> = Arc::from(target);
         let waiter = event_loop.bind(py).call_method0("create_future")?.unbind();
         let handshake: Operation = {
-            let mut io = LoopIo(Arc::clone(&shared));
+            let mut io = MaybeTls::new(LoopIo(Arc::clone(&shared)));
             let codec = Arc::clone(&codec);
             let target = Arc::clone(&target);
             let none = py.None();
             Box::pin(async move {
                 match Client::connect(&mut io, &opts, unix).await {
                     Ok(client) => Outcome {
-                        client: Some(Box::new(client)),
+                        link: Some(Box::new(Link { client, io })),
                         value: Ok(none),
                     },
                     Err(err) => Outcome {
-                        client: None,
+                        link: None,
                         value: Err(to_pyerr(err, Phase::Connect, &target, &codec)),
                     },
                 }
@@ -411,6 +483,7 @@ impl AioConnection {
             event_loop,
             codec,
             target,
+            binary_prefix,
         })
     }
 
@@ -472,29 +545,38 @@ impl AioConnection {
         as_dict: bool,
     ) -> PyResult<Py<PyAny>> {
         let no_backslash_escapes = match &self.lock().state {
-            State::Idle(client) => client.status_flags() & status::NO_BACKSLASH_ESCAPES != 0,
+            State::Idle(link) => link.client.status_flags() & status::NO_BACKSLASH_ESCAPES != 0,
             _ => false,
+        };
+        let encoder = Encoder {
+            no_backslash_escapes,
+            binary_prefix: self.binary_prefix,
+            codec: Arc::clone(&self.codec),
+            custom: None,
         };
         let template = query.to_str()?;
         let sql = match args.filter(|a| !a.is_none()) {
-            None => template.as_bytes().to_vec(),
+            None if encoder.codec.is_utf8mb4() || template.is_ascii() => {
+                template.as_bytes().to_vec()
+            }
+            None => {
+                let mut out = Vec::with_capacity(template.len() + 16);
+                encoder.codec.encode_into(py, &mut out, template)?;
+                out
+            }
             Some(args) => {
                 let mut out = Vec::with_capacity(template.len() + 64);
-                utf8_encoder(no_backslash_escapes).interpolate(
-                    py,
-                    &mut out,
-                    template,
-                    &Args::from_py(args),
-                )?;
+                encoder.interpolate(py, &mut out, template, &Args::from_py(args))?;
                 out
             }
         };
         let codec = Arc::clone(&self.codec);
         let target = Arc::clone(&self.target);
-        self.start(py, move |mut client, mut io| {
+        self.start(py, move |mut link| {
             Box::pin(async move {
-                let value = execute(&mut client, &mut io, &sql, as_dict, &codec).await;
-                outcome(client, value, &codec, &target)
+                let Link { client, io } = &mut *link;
+                let value = execute(client, io, &sql, as_dict, &codec).await;
+                outcome(link, value, &codec, &target)
             })
         })
     }
@@ -505,10 +587,13 @@ impl AioConnection {
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         let mut inner = self.lock();
         inner.waiter = None;
-        if let State::Idle(mut client) = std::mem::replace(&mut inner.state, State::Closed) {
-            let mut io = LoopIo(Arc::clone(&self.shared));
-            let mut quit = std::pin::pin!(client.quit(&mut io));
-            let _ = quit.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+        if let State::Idle(mut link) = std::mem::replace(&mut inner.state, State::Closed) {
+            let Link { client, io } = &mut *link;
+            {
+                let mut quit = std::pin::pin!(client.quit(io));
+                let _ = quit.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            }
+            io.shutdown();
         }
         lock(&self.shared).shutdown = true;
         self.flush(py, &inner)?;

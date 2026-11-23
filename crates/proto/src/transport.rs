@@ -8,6 +8,7 @@
 //! no thread; an event loop drives the same operations with a transport of
 //! its own, polling them again as bytes arrive.
 
+use std::fmt;
 use std::future::Future;
 use std::io;
 use std::io::Read;
@@ -20,6 +21,10 @@ use std::task::Waker;
 use crate::error::Error;
 use crate::error::Result;
 use crate::packet::Input;
+use crate::tls::TlsOpts;
+use crate::tls::client_config;
+use crate::tls::server_name;
+use crate::tls::tls_error;
 
 /// Bytes read from the stream per refill, at most.
 pub(crate) const READ_BUFFER_CAPACITY: usize = 64 * 1024;
@@ -113,5 +118,205 @@ pub(crate) fn block_on<T>(operation: impl Future<Output = Result<T>>) -> Result<
     {
         Poll::Ready(output) => output,
         Poll::Pending => Err(Error::protocol("a blocking operation was left pending")),
+    }
+}
+
+/// A transport that starts plain and may turn to TLS ([`StartTls`]): the
+/// records are encrypted and decrypted in memory (`rustls`), so it works
+/// over any transport, an event loop's included, with the configuration
+/// the blocking connection uses (the same verification and cache).
+pub struct MaybeTls<T> {
+    inner: T,
+    tls: Option<Box<rustls::ClientConnection>>,
+    /// TLS records received and not yet given to `rustls`.
+    records: Input,
+}
+
+impl<T: fmt::Debug> fmt::Debug for MaybeTls<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MaybeTls")
+            .field("inner", &self.inner)
+            .field("tls", &self.tls.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A transport that can switch to TLS in the middle of the handshake,
+/// right after the client's `SSLRequest`.
+pub trait StartTls: Transport {
+    /// Runs the TLS handshake with `host` over the stream; from then on,
+    /// everything read and written is encrypted.
+    fn start_tls(&mut self, tls: &TlsOpts, host: &str) -> impl Future<Output = Result<()>>;
+
+    /// Whether TLS is on.
+    fn is_tls(&self) -> bool;
+}
+
+/// A TLS error as the I/O error reads and writes report it.
+fn tls_io_error(err: rustls::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, err)
+}
+
+impl<T: Transport> MaybeTls<T> {
+    /// `inner`, plain until [`StartTls::start_tls`].
+    pub const fn new(inner: T) -> Self {
+        Self {
+            inner,
+            tls: None,
+            records: Input::new(),
+        }
+    }
+
+    pub const fn get_ref(&self) -> &T {
+        &self.inner
+    }
+
+    pub const fn get_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    /// Sends the records `rustls` has ready.
+    async fn send_records(&mut self) -> io::Result<()> {
+        let Some(tls) = &mut self.tls else {
+            return Ok(());
+        };
+        let mut records = Vec::new();
+        while tls.wants_write() {
+            tls.write_tls(&mut records)?;
+        }
+        if !records.is_empty() {
+            self.inner.write(&[&records]).await?;
+            self.inner.flush().await?;
+        }
+        Ok(())
+    }
+
+    /// Hands `rustls` the next records from the stream: false at its end.
+    async fn receive_records(&mut self) -> io::Result<bool> {
+        if self.records.is_empty() && self.inner.fill(&mut self.records).await? == 0 {
+            return Ok(false);
+        }
+        let Some(tls) = &mut self.tls else {
+            return Ok(true);
+        };
+        let mut data = self.records.data();
+        let before = data.len();
+        let read = tls.read_tls(&mut data);
+        let used = before - data.len();
+        self.records.consume(used);
+        read?;
+        if let Err(err) = tls.process_new_packets() {
+            // Tell the server why, if it still listens.
+            let _ = self.send_records().await;
+            return Err(tls_io_error(err));
+        }
+        Ok(true)
+    }
+
+    async fn fill_tls(&mut self, input: &mut Input) -> io::Result<usize> {
+        loop {
+            if let Some(tls) = &mut self.tls {
+                match Read::read(&mut tls.reader(), input.spare(READ_BUFFER_CAPACITY)) {
+                    Ok(n) => {
+                        input.filled(n);
+                        return Ok(n);
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(err) => return Err(err),
+                }
+            }
+            // Alerts and key updates `rustls` answers.
+            self.send_records().await?;
+            if !self.receive_records().await? {
+                return Ok(0);
+            }
+        }
+    }
+
+    async fn write_tls(&mut self, parts: &[&[u8]]) -> io::Result<()> {
+        if let Some(tls) = &mut self.tls {
+            for part in parts {
+                Write::write_all(&mut tls.writer(), part)?;
+            }
+        }
+        self.send_records().await
+    }
+}
+
+impl<T: Transport> Transport for MaybeTls<T> {
+    async fn fill(&mut self, input: &mut Input) -> io::Result<usize> {
+        if self.tls.is_none() {
+            return self.inner.fill(input).await;
+        }
+        self.fill_tls(input).await
+    }
+
+    async fn read_body(&mut self, out: &mut Vec<u8>, len: usize) -> Option<io::Result<usize>> {
+        if self.tls.is_some() {
+            return None;
+        }
+        self.inner.read_body(out, len).await
+    }
+
+    async fn write(&mut self, parts: &[&[u8]]) -> io::Result<()> {
+        if self.tls.is_none() {
+            return self.inner.write(parts).await;
+        }
+        self.write_tls(parts).await
+    }
+
+    fn flush(&mut self) -> impl Future<Output = io::Result<()>> {
+        self.inner.flush()
+    }
+
+    fn shutdown(&mut self) {
+        if let Some(tls) = &mut self.tls {
+            tls.send_close_notify();
+            let mut records = Vec::new();
+            while tls.wants_write() && tls.write_tls(&mut records).is_ok() {}
+            // Best effort: sent if the transport takes it right away.
+            let _ = block_on(async {
+                self.inner.write(&[&records]).await?;
+                self.inner.flush().await?;
+                Ok(())
+            });
+        }
+        self.inner.shutdown();
+    }
+}
+
+impl<T: Transport> StartTls for MaybeTls<T> {
+    fn start_tls(&mut self, tls: &TlsOpts, host: &str) -> impl Future<Output = Result<()>> {
+        let session = client_config(tls).and_then(|config| {
+            rustls::ClientConnection::new(config, server_name(host)?).map_err(tls_error)
+        });
+        async move {
+            let mut session = session?;
+            // Everything written goes out at once: no plaintext limit.
+            session.set_buffer_limit(None);
+            self.tls = Some(Box::new(session));
+            loop {
+                self.send_records().await?;
+                let Some(tls) = &self.tls else {
+                    return Ok(());
+                };
+                if !tls.is_handshaking() {
+                    return Ok(());
+                }
+                match self.receive_records().await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err(Error::Tls(
+                            "the server closed the connection during the TLS handshake".to_owned(),
+                        ));
+                    }
+                    Err(err) => return Err(tls_error(err)),
+                }
+            }
+        }
+    }
+
+    fn is_tls(&self) -> bool {
+        self.tls.is_some()
     }
 }

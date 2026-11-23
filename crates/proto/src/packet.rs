@@ -86,6 +86,14 @@ pub struct Input {
 }
 
 impl Input {
+    pub(crate) const fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            pos: 0,
+            end: 0,
+        }
+    }
+
     /// Room for at least `min` more bytes; report how many were written at
     /// its start with [`Input::filled`].
     pub fn spare(&mut self, min: usize) -> &mut [u8] {
@@ -477,7 +485,7 @@ impl Wire {
     }
 
     /// Whether nothing was read that the caller has not had.
-    fn is_idle(&self) -> bool {
+    pub(crate) fn is_idle(&self) -> bool {
         self.input.is_empty() && self.framer.is_idle()
     }
 

@@ -123,12 +123,21 @@ async def connect(
     password: str = "",
     database: str | None = None,
     unix_socket: str | None = None,
+    **options: Any,
 ) -> Connection:
-    """Opens a connection on the running event loop."""
+    """Opens a connection on the running event loop. ``options`` are those
+    of :func:`rustmy.connect` that the core takes (``ssl_mode``, ``ssl_ca``,
+    ``compress``, ``charset``...)."""
     loop = asyncio.get_running_loop()
-    target = unix_socket or f"{host}:{port}"
     core = _core.AioConnection(
-        loop, target, user, password, database, unix_socket is not None
+        loop,
+        host=host,
+        port=port,
+        user=user,
+        password=password,
+        database=database,
+        unix_socket=unix_socket,
+        **options,
     )
     connected = core.connected()
     if unix_socket is not None:

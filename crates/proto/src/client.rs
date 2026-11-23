@@ -41,6 +41,7 @@ use crate::session::ReplyStep;
 use crate::session::Session;
 use crate::session::StreamId;
 use crate::sql::local_infile_names;
+use crate::transport::StartTls;
 use crate::transport::Transport;
 
 /// The server could not re-prepare a statement after a schema change.
@@ -87,26 +88,30 @@ impl Client {
     }
 
     /// Opens a session over `io`, a stream just connected to the server:
-    /// greeting, handshake and authentication, as [`crate::Conn::connect`]
-    /// does over its own. `secure` says whether the stream is already
-    /// confidential (a Unix socket). TLS is not available over a transport
-    /// yet: a session that would use it fails before answering the greeting.
+    /// greeting, TLS when agreed on, handshake and authentication, as
+    /// [`crate::Conn::connect`] does over its own. `secure` says whether the
+    /// stream is already confidential (a Unix socket).
     ///
     /// # Errors
     ///
-    /// As [`crate::Conn::connect`], and [`Error::Unsupported`] for TLS.
-    pub async fn connect<T: Transport>(io: &mut T, opts: &Opts, secure: bool) -> Result<Self> {
+    /// As [`crate::Conn::connect`].
+    pub async fn connect<T: StartTls>(io: &mut T, opts: &Opts, secure: bool) -> Result<Self> {
         // Settings first: a bad one fails before anything goes on the wire.
         let local_infile_dir = local_infile_dir(opts)?;
         let mut wire = Wire::default();
         let mut buf = Vec::new();
         wire.read_into(io, &mut buf).await?;
         let login = Login::new(opts, &buf, local_infile_dir.is_some())?;
-        if login.tls {
-            return Err(Error::unsupported(
-                "TLS over an event loop transport (use ssl_mode=\"disabled\" for now)",
-            ));
+        if let Some(request) = login.ssl_request() {
+            // SSLRequest goes out in plain text, then TLS starts on the same
+            // stream and the sequence continues inside it.
+            wire.write_packet(io, &request).await?;
+            if !wire.is_idle() {
+                return Err(Error::protocol("unexpected data before the TLS handshake"));
+            }
+            io.start_tls(&opts.tls, &opts.host).await?;
         }
+        let secure = secure || io.is_tls();
         Self::authenticate(io, wire, login, opts, buf, local_infile_dir, secure).await
     }
 

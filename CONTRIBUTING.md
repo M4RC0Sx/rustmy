@@ -290,7 +290,12 @@ more; what it writes goes to the loop's transport after each poll, and its
 result resolves the command's future. Rows are converted every 64 KiB as
 they arrive. A command whose task is cancelled closes the connection (the
 reply would arrive in the middle of the next command's); an I/O failure or a
-protocol violation leaves it closed too. No TLS or compression yet.
+protocol violation leaves it closed too. It takes `connect()`'s options
+(`connect_opts` in `connection.rs`, shared with the blocking connection).
+TLS runs in memory over any transport (`transport::MaybeTls`, `rustls`'s
+`ClientConnection`, with the blocking connection's configuration and
+cache): `Client::connect` starts it right after the `SSLRequest`, as the
+blocking handshake does. Compression is the same layer as everywhere.
 
 **TLS and authentication.** TLS through `rustls`; `ssl_mode` is disabled /
 preferred (default) / required / verify_ca / verify_identity. With `ssl_ca`,
