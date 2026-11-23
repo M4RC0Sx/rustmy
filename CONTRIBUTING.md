@@ -217,6 +217,9 @@ done; docker compose down -v
   Python objects.
 - `python/rustmy/`: the Python package (maturin `python-source`): the public
   DB-API surface, constants, the SQLAlchemy dialect and the `MySQLdb` alias.
+  `connect()`'s arguments are resolved once for both connections, blocking
+  and asyncio (`_connect_args.py`: aliases, option files, TLS, defaults, and
+  the statements that apply the session settings).
   `_core.pyi` must stay in sync with what `crates/pydriver` exports.
 - The version has a single source, `[workspace.package]` in `Cargo.toml`.
 
