@@ -205,8 +205,8 @@ async def test_many_records_both_ways(server: Server, options: dict[str, Any]) -
         # A large parameter goes out in many records (or compressed
         # packets), a large result comes back in many.
         blob = bytes(range(256)) * (16 * 1024)
-        await cur.execute("SELECT LENGTH(%s), MD5(%s)", (blob, blob))
-        assert cur.fetchone() == (len(blob), hashlib.md5(blob).hexdigest())  # noqa: S324
+        await cur.execute("SELECT LENGTH(%s), SHA2(%s, 256)", (blob, blob))
+        assert cur.fetchone() == (len(blob), hashlib.sha256(blob).hexdigest())
         limit = (
             "cte_max_recursion_depth"
             if server.name == "mysql"
