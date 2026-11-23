@@ -304,7 +304,12 @@ and asyncmy's API: `execute`, the `fetch*` methods, `nextset`, `callproc`,
 `commit`... are coroutines): `connect()` resolves its arguments with
 `_connect_args`, applies the session settings with the same plan, and the
 buffered and prepared cursors keep the blocking cursors' behaviour (PEP 249
-errors included). Streaming cursors and `executemany` are not there yet.
+errors included). Unbuffered cursors (`AioStream`) apply backpressure: `take`
+hands out the rows already converted without I/O (no future is created
+while rows are at hand), and `read` reads one more batch off the loop only
+when more are asked for; the command generation, the discard warning and
+the errors follow the blocking `ResultStream`. `executemany` is not there
+yet.
 
 **TLS and authentication.** TLS through `rustls`; `ssl_mode` is disabled /
 preferred (default) / required / verify_ca / verify_identity. With `ssl_ca`,

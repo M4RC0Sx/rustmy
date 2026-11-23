@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
     from typing_extensions import Self
 
+    from rustmy._core import AioStream
+    from rustmy._core import AioStreamedResult
     from rustmy._core import QueryResult
     from rustmy.aio.connections import Connection
     from rustmy.converters import Params
@@ -235,6 +237,144 @@ class PreparedDictCursor(PreparedCursor):
         async def fetchone(self) -> DictRow | None: ...  # type: ignore[override]
         async def fetchmany(self, size: int | None = None) -> tuple[DictRow, ...]: ...  # type: ignore[override]
         async def fetchall(self) -> tuple[DictRow, ...]: ...  # type: ignore[override]
+
+
+class SSCursor(Cursor):
+    """Unbuffered cursor: rows stay on the server until they are fetched;
+    as :class:`rustmy.cursors.SSCursor`.
+
+    Rows are read off the event loop one batch at a time, and only when more
+    are asked for than the batch at hand: memory stays flat whatever the size
+    of the result set, and a slow consumer keeps the server waiting (past its
+    ``net_write_timeout``, 60 seconds by default, it drops the connection).
+    Another command on the connection discards the rows not yet fetched,
+    with a :class:`UserWarning`; fetching afterwards raises
+    :class:`~rustmy.err.ProgrammingError`. :attr:`rowcount` is -1 for result
+    sets, and :meth:`scroll` only moves forward.
+    """
+
+    def __init__(self, connection: Connection) -> None:
+        super().__init__(connection)
+        self._stream: AioStream | None = None
+
+    @property
+    def rownumber(self) -> int | None:
+        if self.description is None:
+            return None
+        return 0 if self._stream is None else self._stream.rownumber
+
+    async def _discard(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            closing = stream.close()
+            if closing is not None:
+                await self._get_connection()._run(closing)  # noqa: SLF001
+
+    async def close(self) -> None:
+        if self._connection is not None:
+            await self._discard()
+        await super().close()
+
+    async def execute(self, query: str, args: Params = None) -> int:
+        """Run ``query``, interpolating ``args`` if given; return the rowcount
+        (-1 for a result set, whose size is unknown until the end)."""
+        connection = self._get_connection()
+        await self._discard()
+        self._clear()
+        self._last = (query, args)
+        self._set_stream(
+            await connection._run(  # noqa: SLF001
+                connection._core.execute_streamed(query, args, self._as_dict)  # noqa: SLF001
+            )
+        )
+        return self.rowcount
+
+    async def nextset(self) -> bool | None:
+        """Skip what is left of this result set and move to the next one."""
+        connection = self._get_connection()
+        await self._discard()
+        result = await connection._run(  # noqa: SLF001
+            connection._core.next_result_streamed(self._as_dict)  # noqa: SLF001
+        )
+        if result is None:
+            return None
+        self._set_stream(result)
+        return True
+
+    def _set_stream(self, result: AioStreamedResult) -> None:
+        description, stream, rowcount, lastrowid, _warnings = result
+        self.description = description
+        self._stream = stream
+        self.rowcount = rowcount
+        self.lastrowid = None if description is not None else lastrowid
+
+    def _active(self) -> AioStream:
+        self._check_result()
+        if self._stream is None:
+            raise ProgrammingError(0, "result set closed")
+        return self._stream
+
+    async def _take(self, size: int) -> tuple[Any, ...]:
+        """Up to ``size`` rows, reading batches only while fewer are at hand."""
+        stream = self._active()
+        rows = stream.take(size)
+        while rows is None:
+            await self._get_connection()._run(stream.read())  # noqa: SLF001
+            rows = stream.take(size)
+        return rows
+
+    async def fetchone(self) -> Row | None:
+        rows = await self._take(1)
+        return rows[0] if rows else None
+
+    async def fetchmany(self, size: int | None = None) -> tuple[Row, ...]:
+        return await self._take(self.arraysize if size is None else size)
+
+    async def fetchall(self) -> tuple[Row, ...]:
+        """Fetch every remaining row (iterate the cursor instead to keep
+        memory flat)."""
+        return await self._take(_EVERY_ROW)
+
+    def fetchall_unbuffered(self) -> AsyncIterator[Row]:
+        """Iterate the remaining rows one by one, as iterating the cursor
+        does (aiomysql's and PyMySQL's name)."""
+        return self
+
+    async def scroll(self, value: int, mode: str = "relative") -> None:  # type: ignore[override]
+        """Skip forward to another row (see
+        :meth:`rustmy.cursors.SSCursor.scroll`): a coroutine here, since
+        skipping may read from the server."""
+        stream = self._active()
+        current = stream.rownumber
+        target = _scroll_target(current, value, mode)
+        if target < current:
+            raise NotSupportedError(0, "unbuffered cursors cannot scroll backwards")
+        wanted = target - current
+        skipped = stream.skip_ready(wanted)
+        if skipped < wanted and stream.pending:
+            skipped += await self._get_connection()._run(  # noqa: SLF001
+                stream.skip_wire(wanted - skipped)
+            )
+        if skipped < wanted:
+            msg = "out of range"
+            raise IndexError(msg)
+
+
+class SSDictCursor(SSCursor):
+    """Unbuffered cursor returning each row as a dict (see :class:`SSCursor`
+    and :class:`DictCursor`)."""
+
+    _as_dict = True
+
+    if TYPE_CHECKING:
+
+        async def fetchone(self) -> DictRow | None: ...  # type: ignore[override]
+        async def fetchmany(self, size: int | None = None) -> tuple[DictRow, ...]: ...  # type: ignore[override]
+        async def fetchall(self) -> tuple[DictRow, ...]: ...  # type: ignore[override]
+
+
+#: ``take``'s size for "every row".
+_EVERY_ROW = 2**62
 
 
 def prepared_variant(cursorclass: type[Cursor]) -> type[Cursor]:
