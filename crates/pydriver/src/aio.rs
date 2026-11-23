@@ -43,8 +43,8 @@ use crate::convert::description;
 use crate::convert::result_to_py;
 use crate::errors::Phase;
 use crate::errors::from_proto;
-use crate::params::Args;
 use crate::params::Encoder;
+use crate::params::statement;
 
 /// Size of the buffer the event loop reads into.
 const LOOP_BUFFER: usize = 256 * 1024;
@@ -554,22 +554,7 @@ impl AioConnection {
             codec: Arc::clone(&self.codec),
             custom: None,
         };
-        let template = query.to_str()?;
-        let sql = match args.filter(|a| !a.is_none()) {
-            None if encoder.codec.is_utf8mb4() || template.is_ascii() => {
-                template.as_bytes().to_vec()
-            }
-            None => {
-                let mut out = Vec::with_capacity(template.len() + 16);
-                encoder.codec.encode_into(py, &mut out, template)?;
-                out
-            }
-            Some(args) => {
-                let mut out = Vec::with_capacity(template.len() + 64);
-                encoder.interpolate(py, &mut out, template, &Args::from_py(args))?;
-                out
-            }
-        };
+        let sql = statement(&encoder, query, args)?.into_owned();
         let codec = Arc::clone(&self.codec);
         let target = Arc::clone(&self.target);
         self.start(py, move |mut link| {

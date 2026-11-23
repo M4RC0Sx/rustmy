@@ -49,6 +49,7 @@ use crate::errors::from_proto;
 use crate::params::Args;
 use crate::params::Encoder;
 use crate::params::has_placeholder;
+use crate::params::statement;
 use crate::params::unescape_percent;
 use crate::stream::ResultStream;
 
@@ -474,23 +475,7 @@ impl Connection {
         query: &'a Bound<'_, PyString>,
         args: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Cow<'a, [u8]>> {
-        let template = query.to_str()?;
-        let encoder = self.encoder()?;
-        Ok(match args.filter(|a| !a.is_none()) {
-            None if encoder.codec.is_utf8mb4() || template.is_ascii() => {
-                Cow::Borrowed(template.as_bytes())
-            }
-            None => {
-                let mut out = Vec::with_capacity(template.len() + 16);
-                encoder.codec.encode_into(query.py(), &mut out, template)?;
-                Cow::Owned(out)
-            }
-            Some(args) => {
-                let mut out = Vec::with_capacity(template.len() + 64);
-                encoder.interpolate(query.py(), &mut out, template, &Args::from_py(args))?;
-                Cow::Owned(out)
-            }
-        })
+        statement(&self.encoder()?, query, args)
     }
 
     /// Reads connection state that needs no I/O, keeping the GIL.

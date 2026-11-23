@@ -12,6 +12,8 @@ import pytest
 
 import rustmy
 
+from rustmy import _connect_args
+
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -119,8 +121,8 @@ def test_connect_timeout_covers_the_greeting(silent_port: int) -> None:
 def test_connect_timeout_has_a_default(
     silent_port: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert rustmy.connections._DEFAULT_CONNECT_TIMEOUT == 15  # noqa: SLF001
-    monkeypatch.setattr(rustmy.connections, "_DEFAULT_CONNECT_TIMEOUT", 0.3)
+    assert _connect_args.DEFAULT_CONNECT_TIMEOUT == 15
+    monkeypatch.setattr(_connect_args, "DEFAULT_CONNECT_TIMEOUT", 0.3)
     start = time.perf_counter()
     with pytest.raises(rustmy.OperationalError) as info:
         rustmy.connect(host="127.0.0.1", port=silent_port)
