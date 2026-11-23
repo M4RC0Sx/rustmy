@@ -20,6 +20,8 @@ use std::task::Waker;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::infile;
+use crate::infile::LocalFile;
 use crate::packet::Input;
 use crate::tls::TlsOpts;
 use crate::tls::client_config;
@@ -51,6 +53,18 @@ pub trait Transport {
 
     /// Closes the stream, best effort: the peer may already be gone.
     fn shutdown(&mut self);
+
+    /// Replaces what `buf` holds with the next piece of `file`, a local
+    /// file being sent (`LOAD DATA LOCAL INFILE`): empty at its end. The
+    /// default reads a packet's worth right here; an event loop's
+    /// transport reads it elsewhere, so the loop never waits on the disk.
+    fn read_file(
+        &mut self,
+        file: &LocalFile,
+        buf: &mut Vec<u8>,
+    ) -> impl Future<Output = io::Result<()>> {
+        std::future::ready(file.read_into(buf, infile::CHUNK))
+    }
 }
 
 /// A blocking byte stream: every operation completes before it returns.
@@ -267,6 +281,14 @@ impl<T: Transport> Transport for MaybeTls<T> {
 
     fn flush(&mut self) -> impl Future<Output = io::Result<()>> {
         self.inner.flush()
+    }
+
+    fn read_file(
+        &mut self,
+        file: &LocalFile,
+        buf: &mut Vec<u8>,
+    ) -> impl Future<Output = io::Result<()>> {
+        self.inner.read_file(file, buf)
     }
 
     fn shutdown(&mut self) {

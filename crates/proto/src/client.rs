@@ -25,6 +25,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::infile;
 use crate::infile::Infile;
+use crate::infile::LocalFile;
 use crate::login::Auth;
 use crate::login::AuthSettings;
 use crate::login::AuthStep;
@@ -784,31 +785,24 @@ impl Client {
     /// Sends `file` in packets and the empty packet that ends it. If the
     /// file cannot be read to the end, the connection is closed instead,
     /// so the server aborts the statement rather than loading part of it.
-    async fn send_file<T: Transport>(
-        &mut self,
-        io: &mut T,
-        path: &Path,
-        mut file: File,
-    ) -> Result<()> {
-        let mut chunk = vec![0; infile::CHUNK];
+    async fn send_file<T: Transport>(&mut self, io: &mut T, path: &Path, file: File) -> Result<()> {
+        let file = LocalFile::new(file);
+        let mut piece = Vec::new();
         loop {
-            let len = match infile::read_full(&mut file, &mut chunk) {
-                Ok(len) => len,
-                Err(err) => {
-                    io.shutdown();
-                    return Err(io::Error::new(
-                        err.kind(),
-                        format!("reading {}: {err}", path.display()),
-                    )
-                    .into());
-                }
-            };
-            if len == 0 {
+            if let Err(err) = io.read_file(&file, &mut piece).await {
+                io.shutdown();
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!("reading {}: {err}", path.display()),
+                )
+                .into());
+            }
+            if piece.is_empty() {
                 return self.wire.write_packet(io, &[]).await;
             }
-            self.wire
-                .write_packet(io, chunk.get(..len).unwrap_or_default())
-                .await?;
+            for packet in piece.chunks(infile::CHUNK) {
+                self.wire.write_packet(io, packet).await?;
+            }
         }
     }
 

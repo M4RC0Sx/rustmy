@@ -42,6 +42,7 @@ pub use conn::PipelineTotals;
 pub use conn::Statement;
 pub use error::Error;
 pub use error::Result;
+pub use infile::LocalFile;
 pub use packet::Input;
 pub use result::QueryResult;
 pub use result::RowRef;

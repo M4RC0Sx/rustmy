@@ -8,6 +8,9 @@ use std::io;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -82,6 +85,33 @@ pub(crate) fn open(
         return Err(format!("{path} is not a regular file"));
     }
     Ok((resolved, file))
+}
+
+/// A local file being sent to the server (`LOAD DATA LOCAL INFILE`), read
+/// a piece at a time ([`crate::Transport::read_file`]); shareable with the
+/// thread that reads it.
+#[derive(Debug, Clone)]
+pub struct LocalFile(Arc<Mutex<File>>);
+
+impl LocalFile {
+    pub(crate) fn new(file: File) -> Self {
+        Self(Arc::new(Mutex::new(file)))
+    }
+
+    /// Replaces what `buf` holds with the next `max` bytes of the file
+    /// (fewer only at its end, none past it).
+    ///
+    /// # Errors
+    ///
+    /// The file could not be read.
+    pub fn read_into(&self, buf: &mut Vec<u8>, max: usize) -> io::Result<()> {
+        let mut file = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        buf.clear();
+        buf.resize(max, 0);
+        let read = read_full(&mut file, buf);
+        buf.truncate(*read.as_ref().unwrap_or(&0));
+        read.map(|_| ())
+    }
 }
 
 /// Fills `buf` from `file` unless it ends first; returns the bytes read.
