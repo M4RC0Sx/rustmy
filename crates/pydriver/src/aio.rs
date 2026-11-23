@@ -22,29 +22,40 @@ use std::task::Poll;
 use std::task::Waker;
 
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyByteArray;
 use pyo3::types::PyBytes;
+use pyo3::types::PyDict;
+use pyo3::types::PyNone;
 use pyo3::types::PyString;
 use pyo3::types::PyTuple;
 use rustmy_proto::Client;
+use rustmy_proto::Compression;
 use rustmy_proto::Error as ProtoError;
 use rustmy_proto::Input;
 use rustmy_proto::MaybeTls;
+use rustmy_proto::QueryResult;
 use rustmy_proto::ReadOutcome;
+use rustmy_proto::StartTls;
+use rustmy_proto::StreamId;
 use rustmy_proto::Transport;
 use rustmy_proto::constants::status;
 
 use crate::charset::Codec;
+use crate::connection::Plan;
 use crate::connection::connect_opts;
+use crate::connection::names_clause;
+use crate::connection::prepared_plan;
 use crate::convert::Converter;
+use crate::convert::Custom;
 use crate::convert::description;
 use crate::convert::result_to_py;
 use crate::errors::Phase;
+use crate::errors::ProgrammingError;
 use crate::errors::from_proto;
 use crate::params::Encoder;
 use crate::params::statement;
+use rustmy_proto::charset::charset_of;
 
 /// Size of the buffer the event loop reads into.
 const LOOP_BUFFER: usize = 256 * 1024;
@@ -170,7 +181,10 @@ pub(crate) struct AioConnection {
     shared: Arc<Mutex<Shared>>,
     buffer: Py<PyByteArray>,
     event_loop: Py<PyAny>,
-    codec: Arc<Codec>,
+    /// The session's character set; `set_character_set` replaces it.
+    codec: Arc<Mutex<Arc<Codec>>>,
+    /// `conv=` decoders and encoders that differ from the defaults.
+    custom: Mutex<Option<Arc<Custom>>>,
     target: Arc<str>,
     /// Whether `bytes` parameters carry the `_binary` introducer.
     binary_prefix: bool,
@@ -226,9 +240,7 @@ impl AioConnection {
             State::Idle(link) => link,
             State::Running(running) => {
                 inner.state = State::Running(running);
-                return Err(PyRuntimeError::new_err(
-                    "another command is running on this connection",
-                ));
+                return Err(busy_error());
             }
             State::Closed => return Err(self.closed_error()),
         };
@@ -248,9 +260,122 @@ impl AioConnection {
             io::Error::from(io::ErrorKind::NotConnected).into(),
             Phase::Command,
             &self.target,
-            &self.codec,
+            &self.codec(),
         )
     }
+
+    fn codec(&self) -> Arc<Codec> {
+        Arc::clone(&lock_codec(&self.codec))
+    }
+
+    fn custom(&self) -> Option<Arc<Custom>> {
+        self.custom
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Reads connection state that needs no I/O.
+    fn peek<T>(&self, f: impl FnOnce(&Link) -> T) -> PyResult<T> {
+        match &self.lock().state {
+            State::Idle(link) => Ok(f(link)),
+            State::Running(_) => Err(busy_error()),
+            State::Closed => Err(self.closed_error()),
+        }
+    }
+
+    /// How statements are written for this session (its character set,
+    /// SQL mode and `conv=` encoders).
+    fn encoder(&self) -> PyResult<Encoder> {
+        let no_backslash_escapes =
+            self.peek(|link| link.client.status_flags() & status::NO_BACKSLASH_ESCAPES != 0)?;
+        Ok(Encoder {
+            no_backslash_escapes,
+            binary_prefix: self.binary_prefix,
+            codec: self.codec(),
+            custom: self.custom(),
+        })
+    }
+
+    /// Starts a command reading a result: `start` begins it, and the rows
+    /// are read and converted as they come (see [`read_result`]).
+    fn result_command<F>(&self, py: Python<'_>, as_dict: bool, start: F) -> PyResult<Py<PyAny>>
+    where
+        F: for<'a> FnOnce(&'a mut Client, &'a mut MaybeTls<LoopIo>) -> StartFuture<'a>
+            + Send
+            + 'static,
+    {
+        let codec = self.codec();
+        let custom = self.custom();
+        let target = Arc::clone(&self.target);
+        self.start(py, move |mut link| {
+            Box::pin(async move {
+                let Link { client, io } = &mut *link;
+                let value = match start(client, io).await {
+                    Ok(Some((head, id))) => {
+                        read_result(client, io, head, id, as_dict, &codec, custom.as_deref()).await
+                    }
+                    Ok(None) => Ok(none()),
+                    Err(err) => Err(err.into()),
+                };
+                outcome(link, value, &codec, &target)
+            })
+        })
+    }
+
+    /// Starts a command answered with OK or ERR: its future gives `None`.
+    fn simple_command<F>(&self, py: Python<'_>, breaks: bool, run: F) -> PyResult<Py<PyAny>>
+    where
+        F: for<'a> FnOnce(&'a mut Client, &'a mut MaybeTls<LoopIo>) -> UnitFuture<'a>
+            + Send
+            + 'static,
+    {
+        let codec = self.codec();
+        let target = Arc::clone(&self.target);
+        self.start(py, move |mut link| {
+            Box::pin(async move {
+                let Link { client, io } = &mut *link;
+                let value = run(client, io).await.map(|()| none());
+                match value {
+                    // A failed `COM_CHANGE_USER` makes MySQL drop the
+                    // connection while MariaDB keeps the old user: it is
+                    // treated as gone either way.
+                    Err(err) if breaks => Outcome {
+                        link: None,
+                        value: Err(to_pyerr(err, Phase::Command, &target, &codec)),
+                    },
+                    value => outcome(link, value.map_err(Failure::Proto), &codec, &target),
+                }
+            })
+        })
+    }
+}
+
+type StartFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = rustmy_proto::Result<Option<(QueryResult, Option<StreamId>)>>>
+            + Send
+            + 'a,
+    >,
+>;
+type UnitFuture<'a> = Pin<Box<dyn Future<Output = rustmy_proto::Result<()>> + Send + 'a>>;
+
+/// Python's `None`, as a command's value.
+fn none() -> Py<PyAny> {
+    Python::attach(|py| PyNone::get(py).to_owned().into_any().unbind())
+}
+
+fn lock_codec(codec: &Mutex<Arc<Codec>>) -> MutexGuard<'_, Arc<Codec>> {
+    codec.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Another command of this connection has not ended: one at a time, as the
+/// blocking connection refuses a second thread.
+fn busy_error() -> PyErr {
+    ProgrammingError::new_err((
+        0,
+        "another command is running on this connection; await it first",
+    ))
 }
 
 /// Resolves `waiter` with `value`, unless it was cancelled meanwhile.
@@ -312,23 +437,25 @@ fn outcome(
     }
 }
 
-/// Runs `sql` and reads its rows in batches, converting each as it comes:
+/// Reads the rows of the result set `head` started (the result itself
+/// without one) in batches, converting each as it comes:
 /// `(description, rows, rowcount, last_insert_id, warnings)`, as
 /// `Connection.execute` returns it.
-async fn execute(
+async fn read_result(
     client: &mut Client,
     io: &mut MaybeTls<LoopIo>,
-    sql: &[u8],
+    mut head: QueryResult,
+    id: Option<StreamId>,
     as_dict: bool,
     codec: &Arc<Codec>,
+    custom: Option<&Custom>,
 ) -> Result<Py<PyAny>, Failure> {
-    let (mut head, id) = client.query_streamed(io, sql).await?;
     let Some(id) = id else {
         return Ok(Python::attach(|py| {
             result_to_py(py, &head, as_dict, codec)
         })?);
     };
-    let converter = Python::attach(|py| Converter::new(py, &head.columns, as_dict, codec, None))?;
+    let converter = Python::attach(|py| Converter::new(py, &head.columns, as_dict, codec, custom))?;
     let mut rows: Vec<Py<PyAny>> = Vec::new();
     loop {
         let outcome = client
@@ -481,7 +608,8 @@ impl AioConnection {
             shared,
             buffer: PyByteArray::new_with(py, LOOP_BUFFER, |_| Ok(()))?.unbind(),
             event_loop,
-            codec,
+            codec: Arc::new(Mutex::new(codec)),
+            custom: Mutex::new(None),
             target,
             binary_prefix,
         })
@@ -534,8 +662,16 @@ impl AioConnection {
         Ok(())
     }
 
-    /// Starts `query` and returns the future of its result, as
-    /// `Connection.execute` returns it.
+    /// Runs `sql` as it is; the future gives what `execute` gives.
+    fn query(&self, py: Python<'_>, sql: &Bound<'_, PyString>) -> PyResult<Py<PyAny>> {
+        let sql = statement(&self.encoder()?, sql, None)?.into_owned();
+        self.result_command(py, false, move |client, io| {
+            Box::pin(async move { client.query_streamed(io, &sql).await.map(Some) })
+        })
+    }
+
+    /// Starts `query` (with `args` interpolated) and returns the future of
+    /// its result, as `Connection.execute` returns it.
     #[pyo3(signature = (query, args = None, as_dict = false))]
     fn execute(
         &self,
@@ -544,26 +680,215 @@ impl AioConnection {
         args: Option<&Bound<'_, PyAny>>,
         as_dict: bool,
     ) -> PyResult<Py<PyAny>> {
-        let no_backslash_escapes = match &self.lock().state {
-            State::Idle(link) => link.client.status_flags() & status::NO_BACKSLASH_ESCAPES != 0,
-            _ => false,
-        };
-        let encoder = Encoder {
-            no_backslash_escapes,
-            binary_prefix: self.binary_prefix,
-            codec: Arc::clone(&self.codec),
-            custom: None,
-        };
-        let sql = statement(&encoder, query, args)?.into_owned();
-        let codec = Arc::clone(&self.codec);
-        let target = Arc::clone(&self.target);
-        self.start(py, move |mut link| {
+        let sql = statement(&self.encoder()?, query, args)?.into_owned();
+        self.result_command(py, as_dict, move |client, io| {
+            Box::pin(async move { client.query_streamed(io, &sql).await.map(Some) })
+        })
+    }
+
+    /// As `execute`, as a prepared statement (as `Connection.execute_prepared`).
+    #[pyo3(signature = (query, args = None, as_dict = false))]
+    fn execute_prepared(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyString>,
+        args: Option<&Bound<'_, PyAny>>,
+        as_dict: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let plan = prepared_plan(py, &self.encoder()?, query, args)?;
+        self.result_command(py, as_dict, move |client, io| {
             Box::pin(async move {
-                let Link { client, io } = &mut *link;
-                let value = execute(client, io, &sql, as_dict, &codec).await;
-                outcome(link, value, &codec, &target)
+                match &plan {
+                    Plan::Text(sql) => client.query_streamed(io, sql).await,
+                    Plan::Prepared(sql, params) => {
+                        client.execute_cached_streamed(io, sql, params).await
+                    }
+                }
+                .map(Some)
             })
         })
+    }
+
+    /// The next result of a multi-result query: the future gives what
+    /// `execute` gives, or `None` when there is none.
+    #[pyo3(signature = (as_dict = false))]
+    fn next_result(&self, py: Python<'_>, as_dict: bool) -> PyResult<Py<PyAny>> {
+        self.result_command(py, as_dict, |client, io| {
+            Box::pin(async move { client.next_result_streamed(io).await })
+        })
+    }
+
+    fn ping(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.simple_command(py, false, |client, io| Box::pin(client.ping(io)))
+    }
+
+    fn select_db(&self, py: Python<'_>, database: &str) -> PyResult<Py<PyAny>> {
+        let database = self.codec().encode(py, database)?;
+        self.simple_command(py, false, move |client, io| {
+            Box::pin(async move { client.select_db(io, &database).await })
+        })
+    }
+
+    fn reset_connection(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.simple_command(py, false, |client, io| {
+            Box::pin(client.reset_connection(io))
+        })
+    }
+
+    #[pyo3(signature = (user, password, database = None))]
+    fn change_user(
+        &self,
+        py: Python<'_>,
+        user: &str,
+        password: String,
+        database: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        // The packet names the handshake's collation, and the server reads
+        // the user and database in its character set (which may not be the
+        // session's after set_character_set()).
+        let codec = match self.peek(|link| charset_of(link.client.collation()))? {
+            Some(name) if name != self.codec().name() => Codec::new(py, name)?,
+            _ => self.codec(),
+        };
+        let user = codec.encode(py, user)?;
+        let database = database.map(|db| codec.encode(py, db)).transpose()?;
+        self.simple_command(py, true, move |client, io| {
+            Box::pin(async move {
+                client
+                    .change_user(io, &user, &password, database.as_deref())
+                    .await
+            })
+        })
+    }
+
+    /// Switches the session to `charset` (`SET NAMES`, with `COLLATE` when
+    /// `collation` is given) and encodes and decodes with it once that ran.
+    #[pyo3(signature = (charset, collation = None))]
+    fn set_character_set(
+        &self,
+        py: Python<'_>,
+        charset: &str,
+        collation: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        let new_codec = Codec::new(py, charset)?;
+        let sql = format!("SET {}", names_clause(new_codec.name(), collation)?);
+        let session_codec = Arc::clone(&self.codec);
+        self.simple_command(py, false, move |client, io| {
+            Box::pin(async move {
+                client.query(io, sql.as_bytes()).await?;
+                *lock_codec(&session_codec) = new_codec;
+                Ok(())
+            })
+        })
+    }
+
+    /// The query exactly as `execute` would send it, as `str`.
+    #[pyo3(signature = (query, args = None))]
+    fn mogrify<'py>(
+        &self,
+        query: &Bound<'py, PyString>,
+        args: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if args.is_none_or(Bound::is_none) {
+            return Ok(query.clone().into_any());
+        }
+        let encoder = self.encoder()?;
+        let out = statement(&encoder, query, args)?;
+        encoder.codec.decode_statement(query.py(), &out)
+    }
+
+    /// `value` as an SQL literal for this connection, as `str`.
+    fn literal<'py>(&self, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let encoder = self.encoder()?;
+        let mut out = Vec::new();
+        encoder.literal(&mut out, value)?;
+        encoder.codec.decode_statement(value.py(), &out)
+    }
+
+    /// A statement this connection built, as `str`.
+    fn decode_statement<'py>(
+        &self,
+        py: Python<'py>,
+        statement: &[u8],
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.codec().decode_statement(py, statement)
+    }
+
+    /// Installs the `conv=` decoders and encoders that differ from the
+    /// defaults, as `Connection.set_converters` does.
+    #[pyo3(signature = (decoders, encoders, conv))]
+    fn set_converters(
+        &self,
+        decoders: Option<Bound<'_, PyDict>>,
+        encoders: Option<Bound<'_, PyDict>>,
+        conv: Bound<'_, PyAny>,
+    ) {
+        let custom = (decoders.is_some() || encoders.is_some()).then(|| {
+            Arc::new(Custom {
+                decoders: decoders.map(Bound::unbind),
+                encoders: encoders.map(Bound::unbind),
+                conv: conv.unbind(),
+            })
+        });
+        *self.custom.lock().unwrap_or_else(PoisonError::into_inner) = custom;
+    }
+
+    /// The session's character set, as MySQL names it.
+    #[getter]
+    fn charset(&self) -> &'static str {
+        self.codec().name()
+    }
+
+    /// The server's default character set (from its greeting), if known.
+    #[getter]
+    fn server_charset(&self) -> PyResult<Option<&'static str>> {
+        self.peek(|link| link.client.server_charset())
+    }
+
+    /// Python codec name of the session's character set.
+    #[getter]
+    fn encoding(&self) -> &'static str {
+        self.codec().python_name()
+    }
+
+    #[getter]
+    fn tls(&self) -> PyResult<bool> {
+        self.peek(|link| link.io.is_tls())
+    }
+
+    #[getter]
+    fn compression(&self) -> PyResult<Option<&'static str>> {
+        self.peek(|link| {
+            link.client.compression().map(|algorithm| match algorithm {
+                Compression::Zlib => "zlib",
+                Compression::Zstd { .. } => "zstd",
+            })
+        })
+    }
+
+    #[getter]
+    fn closed(&self) -> bool {
+        matches!(self.lock().state, State::Closed)
+    }
+
+    #[getter]
+    fn server_version(&self) -> PyResult<String> {
+        self.peek(|link| link.client.server_version().to_owned())
+    }
+
+    #[getter]
+    fn connection_id(&self) -> PyResult<u32> {
+        self.peek(|link| link.client.connection_id())
+    }
+
+    #[getter]
+    fn server_status(&self) -> PyResult<u16> {
+        self.peek(|link| link.client.status_flags())
+    }
+
+    #[getter]
+    fn has_more_results(&self) -> PyResult<bool> {
+        self.peek(|link| link.client.has_more_results())
     }
 
     /// Closes the stream, sending `COM_QUIT` first when no command is
