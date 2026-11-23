@@ -469,6 +469,20 @@ arguments win, `[client]` and the group in file order, `!include`/
 with a warning (outside Windows), as `my_print_defaults` does. Fetch methods
 return tuples, `()` when exhausted.
 
+**Pools** (`rustmy.Pool`; `python/rustmy/pool.py`): the accounts are
+`rustmy_proto::pool::PoolCore`, without I/O and with the time given by the
+caller: it counts connections by id (lent, idle, being opened, so the
+maximum holds while they open), lends idle ones most recently used first,
+serves waiters in order, and answers each call with what to do (connections
+to close, waiters to serve, how many to open for the minimum). Its tests run
+random sequences of calls against a model of the caller and check the
+accounts after every step. The facade holds the connections, does the
+waiting (`threading.Condition`, with the GIL released) and the I/O outside
+its lock: connections for the minimum open on threads of their own, so
+giving one back never waits for a new one. A connection given back with a
+transaction open (the status flag the server already sent) is rolled back;
+one that is closed or fails is not lent again.
+
 **SQLAlchemy**: `rustmy/dialect.py` holds `RustmyMySQLDialect` and
 `RustmyMariaDBDialect` (`mysql+rustmy`, `mariadb+rustmy`, through entry
 points; extra `rustmy[sqlalchemy]`). They subclass SQLAlchemy's mysqlclient

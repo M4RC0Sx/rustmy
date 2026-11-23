@@ -24,8 +24,10 @@ from rustmy.err import InterfaceError
 from rustmy.err import InternalError
 from rustmy.err import NotSupportedError
 from rustmy.err import OperationalError
+from rustmy.err import PoolTimeout
 from rustmy.err import ProgrammingError
 from rustmy.err import Warning  # noqa: A004  # PEP 249 mandates the name
+from rustmy.pool import Pool
 
 
 # PEP 249 module globals.
@@ -68,6 +70,8 @@ __all__ = [
     "InternalError",
     "NotSupportedError",
     "OperationalError",
+    "Pool",
+    "PoolTimeout",
     "ProgrammingError",
     "Time",
     "TimeFromTicks",

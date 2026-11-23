@@ -24,6 +24,7 @@ mod handshake;
 mod infile;
 mod login;
 mod packet;
+pub mod pool;
 mod result;
 mod session;
 pub mod sql;

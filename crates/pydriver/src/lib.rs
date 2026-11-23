@@ -7,6 +7,7 @@ mod connection;
 mod convert;
 mod errors;
 mod params;
+mod pool;
 mod stream;
 
 use pyo3::prelude::*;
@@ -25,6 +26,7 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<aio::AioConnection>()?;
     m.add_class::<aio::AioStream>()?;
     m.add_class::<aio::AioMany>()?;
+    m.add_class::<pool::PyPoolCore>()?;
     m.add_function(wrap_pyfunction!(connection::connect, m)?)?;
     m.add_function(wrap_pyfunction!(connection::literal, m)?)?;
     m.add_function(wrap_pyfunction!(connection::escape_string, m)?)?;
