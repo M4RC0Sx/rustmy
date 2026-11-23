@@ -295,6 +295,15 @@ they arrive. A command whose task is cancelled closes the connection (the
 reply would arrive in the middle of the next command's); an I/O failure or a
 protocol violation leaves it closed too. It takes `connect()`'s options
 (`connect_opts` in `connection.rs`, shared with the blocking connection).
+What the loop's callbacks need lives in `Core`. `read_timeout` and
+`write_timeout` are a single `call_later` check, not a timer per read: it
+fails a command (2013, the connection closed) that has waited that long for
+the server since its last progress (bytes received, a piece of a local
+file read), using `write_timeout` while the loop's transport holds unsent
+bytes, and otherwise schedules itself again; idle time between commands
+does not count. A local file (`LOAD DATA LOCAL INFILE`) is read in the
+loop's executor, 256 KiB per trip (`Transport::read_file`), so the loop
+never waits on the disk.
 TLS runs in memory over any transport (`transport::MaybeTls`, `rustls`'s
 `ClientConnection`, with the blocking connection's configuration and
 cache): `Client::connect` starts it right after the `SSLRequest`, as the
@@ -442,7 +451,7 @@ statement named that exact name and the canonicalized path is a regular file
 inside the directory; otherwise an empty file goes and `OperationalError` 2068
 is raised, the connection still in sync, with nothing on disk touched unless
 the statement named the file. The file goes in 16 KiB packets with the GIL
-released; a read error halfway closes the connection, so the server aborts
+released (read by `Transport::read_file`, here where the connection runs); a read error halfway closes the connection, so the server aborts
 instead of loading part of it. `crates/proto/tests/local_infile.rs` tests it
 against a fake, malicious server.
 

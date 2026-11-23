@@ -23,6 +23,8 @@ use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
+use std::time::Duration;
+use std::time::Instant;
 
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
@@ -36,6 +38,7 @@ use rustmy_proto::Client;
 use rustmy_proto::Compression;
 use rustmy_proto::Error as ProtoError;
 use rustmy_proto::Input;
+use rustmy_proto::LocalFile;
 use rustmy_proto::MaybeTls;
 use rustmy_proto::QueryResult;
 use rustmy_proto::ReadOutcome;
@@ -71,6 +74,9 @@ pub(crate) use many::AioMany;
 const LOOP_BUFFER: usize = 256 * 1024;
 /// Rows are converted every this many bytes of them.
 const BATCH_BYTES: usize = 64 * 1024;
+/// Bytes of a local file read per trip to the loop's executor (sent in
+/// packets of 16 KiB, as the blocking connection sends them).
+const FILE_PIECE: usize = 256 * 1024;
 
 /// What the event loop and the running operation share.
 #[derive(Debug, Default)]
@@ -84,6 +90,12 @@ struct Shared {
     outbox: Vec<u8>,
     /// The operation asked to close the stream.
     shutdown: bool,
+    /// A piece of a local file the operation waits for, to be read off the
+    /// loop's thread; then what was read.
+    file_request: Option<LocalFile>,
+    file_read: Option<io::Result<Vec<u8>>>,
+    /// From the request to the operation taking what was read.
+    file_pending: bool,
 }
 
 fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
@@ -144,6 +156,31 @@ impl Transport for LoopIo {
     fn shutdown(&mut self) {
         lock(&self.0).shutdown = true;
     }
+
+    fn read_file(
+        &mut self,
+        file: &LocalFile,
+        buf: &mut Vec<u8>,
+    ) -> impl Future<Output = io::Result<()>> {
+        let shared = Arc::clone(&self.0);
+        let mut request = Some(file.clone());
+        std::future::poll_fn(move |_| {
+            let mut shared = lock(&shared);
+            if let Some(file) = request.take() {
+                // The loop reads it in its executor (`Core::advance`).
+                shared.file_request = Some(file);
+                shared.file_pending = true;
+                return Poll::Pending;
+            }
+            match shared.file_read.take() {
+                Some(read) => {
+                    shared.file_pending = false;
+                    Poll::Ready(read.map(|piece| *buf = piece))
+                }
+                None => Poll::Pending,
+            }
+        })
+    }
 }
 
 /// An open session: the protocol's state and the transport under it (TLS
@@ -176,6 +213,34 @@ struct Inner {
     waiter: Option<Py<PyAny>>,
     /// The loop's transport, once connected.
     transport: Option<Py<PyAny>>,
+    /// When the running command last made progress, for the timeouts.
+    activity: Instant,
+    /// A timeout check is scheduled.
+    timer_armed: bool,
+}
+
+/// `read_timeout` and `write_timeout`.
+#[derive(Debug, Clone, Copy, Default)]
+struct Timeouts {
+    read: Option<Duration>,
+    write: Option<Duration>,
+}
+
+impl Timeouts {
+    const fn any(self) -> bool {
+        self.read.is_some() || self.write.is_some()
+    }
+}
+
+/// What the loop's callbacks (bytes received, a timer, a piece of a local
+/// file read) need to drive the running operation.
+struct Core {
+    inner: Mutex<Inner>,
+    shared: Arc<Mutex<Shared>>,
+    event_loop: Py<PyAny>,
+    timeouts: Timeouts,
+    codec: Arc<Mutex<Arc<Codec>>>,
+    target: Arc<str>,
 }
 
 /// Turns an error of the protocol into the driver's exception.
@@ -187,8 +252,7 @@ fn to_pyerr(err: ProtoError, phase: Phase, target: &str, codec: &Codec) -> PyErr
 
 #[pyclass(module = "rustmy._core", frozen)]
 pub(crate) struct AioConnection {
-    inner: Mutex<Inner>,
-    shared: Arc<Mutex<Shared>>,
+    core: Arc<Core>,
     buffer: Py<PyByteArray>,
     event_loop: Py<PyAny>,
     /// The session's character set; `set_character_set` replaces it.
@@ -223,25 +287,61 @@ impl Counters {
     }
 }
 
-impl AioConnection {
+impl Core {
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Polls the running operation once; resolves its future if it ended.
-    /// Then hands what it wrote to the loop's transport.
-    fn advance(&self, py: Python<'_>, inner: &mut Inner) -> PyResult<()> {
-        if let State::Running(operation) = &mut inner.state
-            && let Poll::Ready(outcome) = operation
-                .as_mut()
-                .poll(&mut Context::from_waker(Waker::noop()))
-        {
-            inner.state = outcome.link.map_or(State::Closed, State::Idle);
-            if let Some(waiter) = inner.waiter.take() {
-                resolve(py, waiter.bind(py), outcome.value)?;
+    /// Then hands what it wrote to the loop's transport, and a piece of a
+    /// local file it waits for to the loop's executor.
+    fn advance(self: &Arc<Self>, py: Python<'_>, inner: &mut Inner) -> PyResult<()> {
+        loop {
+            if let State::Running(operation) = &mut inner.state
+                && let Poll::Ready(outcome) = operation
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+            {
+                inner.state = outcome.link.map_or(State::Closed, State::Idle);
+                if let Some(waiter) = inner.waiter.take() {
+                    resolve(py, waiter.bind(py), outcome.value)?;
+                }
             }
+            let request = lock(&self.shared).file_request.take();
+            let Some(file) = request else {
+                break;
+            };
+            if let Err(err) = self.read_elsewhere(py, file) {
+                // The operation sees the failure as the file's.
+                lock(&self.shared).file_read = Some(Err(io::Error::other(err.to_string())));
+                continue;
+            }
+            break;
         }
         self.flush(py, inner)
+    }
+
+    /// Reads a piece of a local file in the loop's executor; the operation
+    /// goes on once it is read.
+    fn read_elsewhere(self: &Arc<Self>, py: Python<'_>, file: LocalFile) -> PyResult<()> {
+        let job = Py::new(
+            py,
+            FileRead {
+                file,
+                shared: Arc::clone(&self.shared),
+            },
+        )?;
+        let done = Py::new(
+            py,
+            FileDone {
+                core: Arc::clone(self),
+            },
+        )?;
+        self.event_loop
+            .bind(py)
+            .call_method1("run_in_executor", (py.None(), job))?
+            .call_method1("add_done_callback", (done,))?;
+        Ok(())
     }
 
     fn flush(&self, py: Python<'_>, inner: &Inner) -> PyResult<()> {
@@ -259,6 +359,170 @@ impl AioConnection {
             }
         }
         Ok(())
+    }
+
+    /// A command starts: it has made progress now, and a timeout check is
+    /// scheduled unless one already is.
+    fn command_started(self: &Arc<Self>, py: Python<'_>, inner: &mut Inner) -> PyResult<()> {
+        if !self.timeouts.any() {
+            return Ok(());
+        }
+        inner.activity = Instant::now();
+        if !inner.timer_armed {
+            let first = self
+                .timeouts
+                .read
+                .into_iter()
+                .chain(self.timeouts.write)
+                .min()
+                .unwrap_or_default();
+            self.arm(py, inner, first)?;
+        }
+        Ok(())
+    }
+
+    fn arm(self: &Arc<Self>, py: Python<'_>, inner: &mut Inner, delay: Duration) -> PyResult<()> {
+        let timer = Py::new(
+            py,
+            Timer {
+                core: Arc::clone(self),
+            },
+        )?;
+        self.event_loop
+            .bind(py)
+            .call_method1("call_later", (delay.as_secs_f64(), timer))?;
+        inner.timer_armed = true;
+        Ok(())
+    }
+
+    /// The timeout check: a running command that has waited longer than
+    /// the timeout for the server (`write_timeout` while the loop's
+    /// transport holds unsent bytes, `read_timeout` otherwise) fails and
+    /// closes the connection, as a socket's timeout does; otherwise the
+    /// check is scheduled again. A piece of a local file being read counts
+    /// as progress.
+    fn check_timeouts(self: &Arc<Self>, py: Python<'_>) -> PyResult<()> {
+        let mut inner = self.lock();
+        inner.timer_armed = false;
+        if !matches!(inner.state, State::Running(_)) || inner.transport.is_none() {
+            return Ok(());
+        }
+        if lock(&self.shared).file_pending {
+            inner.activity = Instant::now();
+        }
+        let writing = match &inner.transport {
+            Some(transport) => {
+                transport
+                    .bind(py)
+                    .call_method0("get_write_buffer_size")?
+                    .extract::<usize>()?
+                    > 0
+            }
+            None => false,
+        };
+        let limit = if writing {
+            self.timeouts.write
+        } else {
+            self.timeouts.read
+        };
+        let idle = inner.activity.elapsed();
+        match limit {
+            Some(limit) if idle >= limit => {
+                inner.state = State::Closed;
+                let err = to_pyerr(
+                    io::Error::from(io::ErrorKind::TimedOut).into(),
+                    Phase::Command,
+                    &self.target,
+                    &lock_codec(&self.codec),
+                );
+                if let Some(waiter) = inner.waiter.take() {
+                    resolve(py, waiter.bind(py), Err(err))?;
+                }
+                lock(&self.shared).shutdown = true;
+                self.flush(py, &inner)?;
+                inner.transport = None;
+                Ok(())
+            }
+            Some(limit) => self.arm(py, &mut inner, limit.saturating_sub(idle)),
+            // No limit in this state: look again later.
+            None => {
+                let again = self
+                    .timeouts
+                    .read
+                    .or(self.timeouts.write)
+                    .unwrap_or_default();
+                self.arm(py, &mut inner, again)
+            }
+        }
+    }
+}
+
+/// Reads a piece of a local file, in the loop's executor (with the GIL
+/// released), for the operation that waits for it.
+#[pyclass(module = "rustmy._core", frozen)]
+struct FileRead {
+    file: LocalFile,
+    shared: Arc<Mutex<Shared>>,
+}
+
+#[pymethods]
+impl FileRead {
+    fn __call__(&self, py: Python<'_>) {
+        let mut piece = Vec::new();
+        let read = py
+            .detach(|| self.file.read_into(&mut piece, FILE_PIECE))
+            .map(|()| piece);
+        lock(&self.shared).file_read = Some(read);
+    }
+}
+
+/// Goes on with the operation once [`FileRead`] has run (on the loop's
+/// thread).
+#[pyclass(module = "rustmy._core", frozen)]
+struct FileDone {
+    core: Arc<Core>,
+}
+
+#[pymethods]
+impl FileDone {
+    fn __call__(&self, py: Python<'_>, _future: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut inner = self.core.lock();
+        {
+            let mut shared = lock(&self.core.shared);
+            if shared.file_pending && shared.file_read.is_none() {
+                // The executor did not run it (the loop is closing).
+                shared.file_read = Some(Err(io::Error::other("the local file was not read")));
+            }
+        }
+        inner.activity = Instant::now();
+        self.core.advance(py, &mut inner)
+    }
+}
+
+/// A scheduled timeout check ([`Core::check_timeouts`]).
+#[pyclass(module = "rustmy._core", frozen)]
+struct Timer {
+    core: Arc<Core>,
+}
+
+#[pymethods]
+impl Timer {
+    fn __call__(&self, py: Python<'_>) -> PyResult<()> {
+        self.core.check_timeouts(py)
+    }
+}
+
+impl AioConnection {
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.core.lock()
+    }
+
+    fn advance(&self, py: Python<'_>, inner: &mut Inner) -> PyResult<()> {
+        self.core.advance(py, inner)
+    }
+
+    fn flush(&self, py: Python<'_>, inner: &Inner) -> PyResult<()> {
+        self.core.flush(py, inner)
     }
 
     /// Starts `operation`, which takes the idle connection, and returns the
@@ -317,6 +581,7 @@ impl AioConnection {
             self.counters.open_stream.store(0, Ordering::SeqCst);
         }
         inner.state = State::Running(operation(link));
+        self.core.command_started(py, &mut inner)?;
         self.advance(py, &mut inner)?;
         Ok(waiter)
     }
@@ -759,6 +1024,12 @@ impl AioConnection {
             local_infile,
             local_infile_dir,
         )?;
+        // Until authentication ends, `connect_timeout` bounds the handshake
+        // (`rustmy.aio.connect`); these apply to the commands after it.
+        let timeouts = Timeouts {
+            read: opts.read_timeout,
+            write: opts.write_timeout,
+        };
         let shared = Arc::new(Mutex::new(Shared::default()));
         let target: Arc<str> = Arc::from(target);
         let waiter = event_loop.bind(py).call_method0("create_future")?.unbind();
@@ -780,16 +1051,26 @@ impl AioConnection {
                 }
             })
         };
-        Ok(Self {
+        let codec = Arc::new(Mutex::new(codec));
+        let core = Arc::new(Core {
             inner: Mutex::new(Inner {
                 state: State::Running(handshake),
                 waiter: Some(waiter),
                 transport: None,
+                activity: Instant::now(),
+                timer_armed: false,
             }),
             shared,
+            event_loop: event_loop.clone_ref(py),
+            timeouts,
+            codec: Arc::clone(&codec),
+            target: Arc::clone(&target),
+        });
+        Ok(Self {
+            core,
             buffer: PyByteArray::new_with(py, LOOP_BUFFER, |_| Ok(()))?.unbind(),
             event_loop,
-            codec: Arc::new(Mutex::new(codec)),
+            codec,
             custom: Mutex::new(None),
             target,
             binary_prefix,
@@ -822,8 +1103,11 @@ impl AioConnection {
             // stays valid while it is copied.
             let received = unsafe { buffer.as_bytes() };
             let received = received.get(..nbytes).unwrap_or(received);
-            let mut shared = lock(&self.shared);
+            let mut shared = lock(&self.core.shared);
             shared.received.extend_from_slice(received);
+        }
+        if self.core.timeouts.any() {
+            inner.activity = Instant::now();
         }
         self.advance(py, &mut inner)
     }
@@ -836,7 +1120,7 @@ impl AioConnection {
     fn connection_lost(&self, py: Python<'_>, _exc: Option<Py<PyAny>>) -> PyResult<()> {
         let mut inner = self.lock();
         inner.transport = None;
-        lock(&self.shared).closed = true;
+        lock(&self.core.shared).closed = true;
         self.advance(py, &mut inner)?;
         if matches!(inner.state, State::Idle(_)) {
             inner.state = State::Closed;
@@ -1176,7 +1460,7 @@ impl AioConnection {
             }
             io.shutdown();
         }
-        lock(&self.shared).shutdown = true;
+        lock(&self.core.shared).shutdown = true;
         self.flush(py, &inner)?;
         inner.transport = None;
         Ok(())
