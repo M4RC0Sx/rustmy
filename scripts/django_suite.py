@@ -246,6 +246,25 @@ def clean_server(bindir: Path) -> None:
         sql(bindir, f"PURGE BINARY LOGS TO '{current}'")
 
 
+# Runs Django's runtests.py (the arguments after it) with the "fork" start
+# method where the platform's default is "forkserver" (Linux since Python
+# 3.14): Django before 6.0 prepares parallel workers for "fork" and "spawn"
+# only, and its workers die with AppRegistryNotReady under "forkserver".
+RUN_WITH_FORK = """\
+import multiprocessing, runpy, sys
+if multiprocessing.get_all_start_methods()[0] == "forkserver":
+    multiprocessing.set_start_method("fork")
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
+
+def runs_under_forkserver(source: Path) -> bool:
+    """Whether Django's parallel test runner supports the "forkserver"
+    start method (Django 6.0 and later)."""
+    return "forkserver" in (source / "django" / "test" / "runner.py").read_text()
+
+
 def run_suite(suite: Suite, driver: str) -> dict[str, str]:
     interpreter, source, workdir = suite.interpreter, suite.source, suite.workdir
     bindir, args = suite.bindir, suite.args
@@ -263,8 +282,9 @@ def run_suite(suite: Suite, driver: str) -> dict[str, str]:
         "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
         "PYTHONPATH": str(settings_dir),
     }
+    launcher = [] if runs_under_forkserver(source) else ["-c", RUN_WITH_FORK]
     command = [
-        str(interpreter), "runtests.py", "--settings", settings.stem,
+        str(interpreter), *launcher, "runtests.py", "--settings", settings.stem,
         "--noinput", "-v", "2", f"--parallel={args.parallel}", *args.labels,
     ]  # fmt: skip
     clean_server(bindir)
