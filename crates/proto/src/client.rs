@@ -87,6 +87,40 @@ impl Client {
         self.session.status
     }
 
+    /// Whether the server has more results queued for the last query.
+    #[must_use]
+    pub const fn has_more_results(&self) -> bool {
+        self.session.has_more_results()
+    }
+
+    /// Compression in use, if any.
+    #[must_use]
+    pub const fn compression(&self) -> Option<Compression> {
+        self.compression
+    }
+
+    #[must_use]
+    pub fn server_version(&self) -> &str {
+        &self.server_version
+    }
+
+    #[must_use]
+    pub const fn connection_id(&self) -> u32 {
+        self.connection_id
+    }
+
+    /// Collation id requested in the handshake.
+    #[must_use]
+    pub const fn collation(&self) -> u8 {
+        self.collation
+    }
+
+    /// The server's default character set, from its greeting.
+    #[must_use]
+    pub fn server_charset(&self) -> Option<&'static str> {
+        crate::charset::charset_of(self.server_collation)
+    }
+
     /// Opens a session over `io`, a stream just connected to the server:
     /// greeting, TLS when agreed on, handshake and authentication, as
     /// [`crate::Conn::connect`] does over its own. `secure` says whether the

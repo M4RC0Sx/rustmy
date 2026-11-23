@@ -108,9 +108,33 @@ type PipelinedMany<'py> = (Py<PyAny>, u64, Bound<'py, PyBytes>);
 /// no placeholders (DDL and introspection, some of which the server cannot
 /// prepare or answers differently when prepared).
 #[derive(Debug)]
-enum Plan {
+pub(crate) enum Plan {
     Text(Vec<u8>),
     Prepared(Vec<u8>, Execute),
+}
+
+/// How `query` with `args` runs on a `PreparedCursor`: prepared with its
+/// placeholders bound to `args`, or as text when there is nothing to bind.
+pub(crate) fn prepared_plan(
+    py: Python<'_>,
+    encoder: &Encoder,
+    query: &Bound<'_, PyString>,
+    args: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Plan> {
+    let Some(args) = args.filter(|a| !a.is_none()) else {
+        return Ok(Plan::Text(statement(encoder, query, None)?.into_owned()));
+    };
+    let prepared = encoder.prepared_sql(py, query.to_str()?)?;
+    if prepared.slots.is_empty() {
+        // Interpolation still turns `%%` into `%` and checks that no
+        // argument is left over.
+        return Ok(Plan::Text(
+            statement(encoder, query, Some(args))?.into_owned(),
+        ));
+    }
+    let mut params = Execute::default();
+    encoder.bind(py, &mut params, &prepared.slots, &Args::from_py(args))?;
+    Ok(Plan::Prepared(prepared.sql, params))
 }
 
 impl Plan {
@@ -587,19 +611,7 @@ impl Connection {
         query: &Bound<'_, PyString>,
         args: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Plan> {
-        let Some(args) = args.filter(|a| !a.is_none()) else {
-            return Ok(Plan::Text(self.statement(query, None)?.into_owned()));
-        };
-        let encoder = self.encoder()?;
-        let prepared = encoder.prepared_sql(py, query.to_str()?)?;
-        if prepared.slots.is_empty() {
-            // Interpolation still turns `%%` into `%` and checks that no
-            // argument is left over.
-            return Ok(Plan::Text(self.statement(query, Some(args))?.into_owned()));
-        }
-        let mut params = Execute::default();
-        encoder.bind(py, &mut params, &prepared.slots, &Args::from_py(args))?;
-        Ok(Plan::Prepared(prepared.sql, params))
+        prepared_plan(py, &self.encoder()?, query, args)
     }
 
     /// Runs one window of a prepared `executemany`; the first server error

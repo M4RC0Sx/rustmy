@@ -283,7 +283,7 @@ taken without any I/O (`Wire::try_read_into`); only a refill waits. A row that t
 and `compressed` fuzz targets read every input whole and in pieces, and the
 results must match.
 
-**asyncio** (first cut: `rustmy._aio`, `crates/pydriver/src/aio.rs`): the
+**asyncio** (`rustmy.aio`, `python/rustmy/aio/`, `crates/pydriver/src/aio.rs`): the
 same `Client` operations run on the event loop's thread, with no runtime and
 no other thread. `AioConnection` is the core of an `asyncio.BufferedProtocol`
 whose callbacks are bound to its methods (no Python frame per read):
@@ -299,6 +299,12 @@ TLS runs in memory over any transport (`transport::MaybeTls`, `rustls`'s
 `ClientConnection`, with the blocking connection's configuration and
 cache): `Client::connect` starts it right after the `SSLRequest`, as the
 blocking handshake does. Compression is the same layer as everywhere.
+The Python layer mirrors the blocking one with `await` (the shape of aiomysql's
+and asyncmy's API: `execute`, the `fetch*` methods, `nextset`, `callproc`,
+`commit`... are coroutines): `connect()` resolves its arguments with
+`_connect_args`, applies the session settings with the same plan, and the
+buffered and prepared cursors keep the blocking cursors' behaviour (PEP 249
+errors included). Streaming cursors and `executemany` are not there yet.
 
 **TLS and authentication.** TLS through `rustls`; `ssl_mode` is disabled /
 preferred (default) / required / verify_ca / verify_identity. With `ssl_ca`,
