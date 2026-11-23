@@ -481,7 +481,16 @@ waiting (`threading.Condition`, with the GIL released) and the I/O outside
 its lock: connections for the minimum open on threads of their own, so
 giving one back never waits for a new one. A connection given back with a
 transaction open (the status flag the server already sent) is rolled back;
-one that is closed or fails is not lent again.
+one that is closed or fails is not lent again. `rustmy.aio.create_pool`
+(`python/rustmy/aio/pool.py`) drives the same accounts on the loop's
+thread, serving waiters through futures; giving a connection back that
+needs no command (no transaction open, no `reset_on_release`) happens on
+the spot, with an already done future and no turn of the loop (a task per
+release cost 30 µs). Waiters are served strictly in order: under
+saturation that costs about 8% of throughput against asyncmy, whose
+releasing task takes the connection back ahead of the waiters, but bounds
+the wait (32 tasks over 8 connections: 2.6 ms at most against asyncmy's
+102 ms).
 
 **SQLAlchemy**: `rustmy/dialect.py` holds `RustmyMySQLDialect` and
 `RustmyMariaDBDialect` (`mysql+rustmy`, `mariadb+rustmy`, through entry

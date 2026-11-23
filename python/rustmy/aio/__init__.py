@@ -20,6 +20,8 @@ from rustmy.aio.cursors import PreparedCursor
 from rustmy.aio.cursors import PreparedDictCursor
 from rustmy.aio.cursors import SSCursor
 from rustmy.aio.cursors import SSDictCursor
+from rustmy.aio.pool import Pool
+from rustmy.aio.pool import create_pool
 from rustmy.err import DatabaseError
 from rustmy.err import DataError
 from rustmy.err import Error
@@ -28,6 +30,7 @@ from rustmy.err import InterfaceError
 from rustmy.err import InternalError
 from rustmy.err import NotSupportedError
 from rustmy.err import OperationalError
+from rustmy.err import PoolTimeout
 from rustmy.err import ProgrammingError
 from rustmy.err import Warning  # noqa: A004
 
@@ -44,6 +47,8 @@ __all__ = [
     "InternalError",
     "NotSupportedError",
     "OperationalError",
+    "Pool",
+    "PoolTimeout",
     "PreparedCursor",
     "PreparedDictCursor",
     "ProgrammingError",
@@ -51,4 +56,5 @@ __all__ = [
     "SSDictCursor",
     "Warning",
     "connect",
+    "create_pool",
 ]
