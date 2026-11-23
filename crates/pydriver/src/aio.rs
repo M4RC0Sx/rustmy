@@ -64,6 +64,10 @@ use crate::params::statement;
 use rustmy_proto::charset::charset_of;
 
 /// Size of the buffer the event loop reads into.
+mod many;
+
+pub(crate) use many::AioMany;
+
 const LOOP_BUFFER: usize = 256 * 1024;
 /// Rows are converted every this many bytes of them.
 const BATCH_BYTES: usize = 64 * 1024;
@@ -426,6 +430,24 @@ impl AioConnection {
         })
     }
 
+    /// Starts a command whose future gives what `run` gives.
+    fn value_command<F>(&self, py: Python<'_>, run: F) -> PyResult<Py<PyAny>>
+    where
+        F: for<'a> FnOnce(&'a mut Client, &'a mut MaybeTls<LoopIo>) -> ValueFuture<'a>
+            + Send
+            + 'static,
+    {
+        let codec = self.codec();
+        let target = Arc::clone(&self.target);
+        self.start(py, move |mut link| {
+            Box::pin(async move {
+                let Link { client, io } = &mut *link;
+                let value = run(client, io).await;
+                outcome(link, value, &codec, &target)
+            })
+        })
+    }
+
     /// Starts a command answered with OK or ERR: its future gives `None`.
     fn simple_command<F>(&self, py: Python<'_>, breaks: bool, run: F) -> PyResult<Py<PyAny>>
     where
@@ -461,6 +483,7 @@ type StartFuture<'a> = Pin<
             + 'a,
     >,
 >;
+type ValueFuture<'a> = Pin<Box<dyn Future<Output = Result<Py<PyAny>, Failure>> + Send + 'a>>;
 type UnitFuture<'a> = Pin<Box<dyn Future<Output = rustmy_proto::Result<()>> + Send + 'a>>;
 
 /// Python's `None`, as a command's value.
@@ -890,6 +913,71 @@ impl AioConnection {
         Self::stream_command(slf, as_dict, |client, io| {
             Box::pin(async move { client.next_result_streamed(io).await })
         })
+    }
+
+    /// `executemany` of `query` over `seq_of_args`, run group by group
+    /// with `AioMany.step` (as `Connection._executemany` and
+    /// `_executemany_pipelined` group them).
+    #[pyo3(signature = (query, seq_of_args, max_stmt_length, max_pipeline, as_dict = false))]
+    fn executemany(
+        slf: &Bound<'_, Self>,
+        query: &Bound<'_, PyString>,
+        seq_of_args: &Bound<'_, PyAny>,
+        max_stmt_length: usize,
+        max_pipeline: usize,
+        as_dict: bool,
+    ) -> PyResult<AioMany> {
+        many::executemany(
+            slf,
+            query,
+            seq_of_args,
+            max_stmt_length,
+            max_pipeline,
+            as_dict,
+            many::Mode::Text,
+        )
+    }
+
+    /// As `executemany`, with prepared statements.
+    #[pyo3(signature = (query, seq_of_args, max_stmt_length, max_pipeline, as_dict = false))]
+    fn executemany_prepared(
+        slf: &Bound<'_, Self>,
+        query: &Bound<'_, PyString>,
+        seq_of_args: &Bound<'_, PyAny>,
+        max_stmt_length: usize,
+        max_pipeline: usize,
+        as_dict: bool,
+    ) -> PyResult<AioMany> {
+        many::executemany(
+            slf,
+            query,
+            seq_of_args,
+            max_stmt_length,
+            max_pipeline,
+            as_dict,
+            many::Mode::Prepared,
+        )
+    }
+
+    /// As `executemany`, leaving the last statement's rows on the wire.
+    #[pyo3(signature = (query, seq_of_args, max_stmt_length, max_pipeline, as_dict = false))]
+    fn executemany_streamed(
+        slf: &Bound<'_, Self>,
+        query: &Bound<'_, PyString>,
+        seq_of_args: &Bound<'_, PyAny>,
+        max_stmt_length: usize,
+        max_pipeline: usize,
+        as_dict: bool,
+    ) -> PyResult<AioMany> {
+        many::executemany(
+            slf,
+            query,
+            seq_of_args,
+            max_stmt_length,
+            max_pipeline,
+            as_dict,
+            many::Mode::Streamed,
+        )
     }
 
     /// The next result of a multi-result query: the future gives what
