@@ -151,13 +151,18 @@ done; docker compose down -v
   plus `test_schema`/`test_schema_2`, from `tests/docker/*-init.sh`).
   `requirements.py` states what the servers support by capability, never by
   driver name; `test_suite.py` replaces the two suite classes that would fail
-  for reasons outside rustmy. `scripts/sqlalchemy_full_suite.py` runs
-  SQLAlchemy's whole suite against PyMySQL's results (about 20 minutes).
+  for reasons outside rustmy. The `*_async` databases run it through the
+  asyncio dialects (not on free-threaded builds: greenlet crashes there).
+  `scripts/sqlalchemy_full_suite.py` runs SQLAlchemy's whole suite against
+  PyMySQL's results (about 20 minutes), or with `--asyncio` the asyncio
+  dialect against asyncmy's.
 
   ```sh
   uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db mysql --db mariadb
   uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db mysql_prepared --db mariadb_prepared
+  uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db mysql_async --db mariadb_async
   uv run python scripts/sqlalchemy_full_suite.py --server mysql
+  uv run --with asyncmy python scripts/sqlalchemy_full_suite.py --asyncio --server mysql
   ```
 
 - **Django**: `scripts/django_suite.py` runs Django's test suite through
@@ -499,7 +504,14 @@ dialect and change only rustmy's URL argument names, skip `SET NAMES` on
 connect (the handshake sets the character set), count rustmy's "connection
 already closed" error as a disconnect, and provide `load_provisioning` for the
 test plugin. `uv.lock` resolves SQLAlchemy 2.0 for Python 3.10 and 2.1
-elsewhere; the dialect must type-check against both.
+elsewhere; the dialect must type-check against both. The asyncio dialects
+(`rustmy/aio/dialect.py`; `mysql+rustmy_async`, `mariadb+rustmy_async`,
+and the blocking URLs under `create_async_engine` through
+`get_async_dialect_cls`; extra `rustmy[sqlalchemy-asyncio]`) subclass the
+blocking ones and put SQLAlchemy's asyncio adapters (`connectors.asyncio`,
+greenlet) over `rustmy.aio`, as its asyncmy dialect does; SQLAlchemy 2.0
+and 2.1 differ in how the adapted connection is created and awaited and in
+who picks the pool, which `_SQLA_21` and `get_pool_class` cover.
 
 ## Style
 

@@ -4,7 +4,7 @@ Two suite classes are replaced (same name, so only these are collected):
 
 - ``ServerSideCursorsTest``: the suite recognises server-side cursors by
   driver name only ("a huge issue [...] for third party dialects", in its
-  own words); this tells it what rustmy's is.
+  own words); this tells it what rustmy's are.
 - ``HasTableTest``: on MariaDB, an account without global privileges gets
   "access denied" (1142) for a table in a schema that does not exist, which
   SQLAlchemy does not read as "no such table". PyMySQL fails the same way;
@@ -25,7 +25,9 @@ from rustmy.cursors import SSCursor
 
 class ServerSideCursorsTest(_ServerSideCursorsTest):
     def _is_server_side(self, cursor: Any) -> bool:
-        return isinstance(cursor, SSCursor)
+        # The asyncio dialects' cursors are SQLAlchemy's adapters, which say
+        # so (as asyncmy's do).
+        return isinstance(cursor, SSCursor) or getattr(cursor, "server_side", False)
 
 
 class HasTableTest(_HasTableTest):
