@@ -49,8 +49,9 @@ class Cursor:
     #: Default number of rows returned by :meth:`fetchmany`.
     arraysize: int = 1
 
-    #: Largest statement :meth:`executemany` builds when batching inserts.
-    max_stmt_length: int = 256 * 1024
+    #: Largest statement :meth:`executemany` builds when batching inserts
+    #: (PyMySQL's, under the 1 MiB ``max_allowed_packet`` of old servers).
+    max_stmt_length: int = 1_024_000
 
     #: Statements :meth:`executemany` sends before reading their replies,
     #: when it cannot batch them into one (anything but ``INSERT … VALUES``).
@@ -339,6 +340,11 @@ class PreparedCursor(Cursor):
     Parameters are typed values only: a sequence (``IN %s``) or a type with
     a ``conv=`` encoder raises :class:`~rustmy.err.NotSupportedError`.
     """
+
+    #: Largest statement :meth:`executemany` builds when batching inserts:
+    #: smaller than a :class:`Cursor`'s, since the server prepares each
+    #: statement and larger ones measured slower.
+    max_stmt_length: int = 256 * 1024
 
     def _run(self, connection: Connection, query: str, args: Params) -> QueryResult:
         return connection._execute_prepared(  # noqa: SLF001

@@ -615,6 +615,31 @@ runs, 256 KiB and 1 MiB traded first place (100k rows: 221/234/251 ms against
 noisier. Before this block `executemany` ran one INSERT per row (0.02x against
 mysqlclient); it is now 2.2–3.6x faster than mysqlclient.
 
+**Revised with latency (2026-11-25): 1,024,000 bytes for text cursors,
+256 KiB for prepared ones.** Without latency the size hardly matters, but
+every statement is a round trip, so with 1 or 10 ms between client and server
+(toxiproxy, `benches/pipeline.py`'s proxy) small statements cost far more.
+Text cursors, blocking and asyncio alike, median of 7 runs (100,000 rows) or
+3 (1,000,000), same rows as above:
+
+| Latency | Rows | 256 KiB | 512 KiB | 1,024,000 |
+|---|--:|--:|--:|--:|
+| 0 ms | 100,000 | 265 ms | 256 ms | **251 ms** |
+| 0 ms | 1,000,000 | 2.89 s | 2.74 s | **2.72 s** |
+| 1 ms | 100,000 | 370 ms | 324 ms | **291 ms** |
+| 1 ms | 1,000,000 | 3.95 s | 3.33 s | **3.02 s** |
+| 10 ms | 100,000 | 689 ms | 460 ms | **364 ms** |
+| 10 ms | 1,000,000 | 7.19 s | 4.64 s | **3.68 s** |
+
+(Blocking connection; asyncio was within 3% of each.) 1,024,000 bytes is
+PyMySQL's size, and a statement that large still fits, command byte
+included, the 1 MiB `max_allowed_packet` of old servers (current defaults are
+64 MiB on MySQL and 16 MiB on MariaDB); the buffer a connection keeps after
+it stays bounded by the same 1 MiB as before. Prepared cursors keep 256 KiB:
+the server prepares every statement, and larger ones were slower without
+latency (100,000 rows: 293 ms at 256 KiB, 341 ms at 1,024,000) and only
+caught up at 1 ms (379 against 360 ms).
+
 The general benchmark after the block, now with `executemany` comparable:
 
 ```sh
