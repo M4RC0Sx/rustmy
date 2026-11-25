@@ -135,29 +135,41 @@ def test_reads_match(pair: Pair, definition: str, data: Any) -> None:
 @given(data=st.data())
 def test_writes_match(pair: Pair, definition: str, prepared: bool, data: Any) -> None:  # noqa: FBT001
     """``execute`` and ``executemany`` store what the blocking ones store:
-    the same rows, row counts and statements."""
+    the same rows and row counts, or the same error (MySQL 9+ rejects some
+    binary TIME parameters, see ``test_prepared._rejected_by_server``)."""
     table = pair.tables[definition]
     twin = f"{table}_b"
     values = data.draw(_values(definition).filter(bool))
     rows = list(enumerate(values, 1))
     sql = "INSERT INTO {} VALUES (%s, %s)"
-    cursor = pair.conn.cursor(prepared=prepared)
-    cursor.execute(f"DELETE FROM {table}")
-    cursor.execute(sql.format(table), rows[0])
-    one = cursor.rowcount
-    many = cursor.executemany(sql.format(table), rows[1:]) if rows[1:] else None
 
-    async def write() -> tuple[int, int | None]:
-        acursor = pair.aconn.cursor(prepared=prepared)
-        await acursor.execute(f"DELETE FROM {twin}")
-        await acursor.execute(sql.format(twin), rows[0])
-        aone = acursor.rowcount
-        amany = (
-            await acursor.executemany(sql.format(twin), rows[1:]) if rows[1:] else None
-        )
-        return aone, amany
+    def write() -> Any:
+        cursor = pair.conn.cursor(prepared=prepared)
+        cursor.execute(f"DELETE FROM {table}")
+        try:
+            cursor.execute(sql.format(table), rows[0])
+            one = cursor.rowcount
+            many = cursor.executemany(sql.format(table), rows[1:]) if rows[1:] else None
+        except rustmy.Error as exc:
+            return type(exc), exc.args
+        return one, many
 
-    assert pair.run(write()) == (one, many)
+    async def awrite() -> Any:
+        cursor = pair.aconn.cursor(prepared=prepared)
+        await cursor.execute(f"DELETE FROM {twin}")
+        try:
+            await cursor.execute(sql.format(twin), rows[0])
+            one = cursor.rowcount
+            many = (
+                await cursor.executemany(sql.format(twin), rows[1:])
+                if rows[1:]
+                else None
+            )
+        except rustmy.Error as exc:
+            return type(exc), exc.args
+        return one, many
+
+    assert pair.run(awrite()) == write()
     read = pair.conn.cursor()
     read.execute(f"SELECT id, v FROM {table} ORDER BY id")
     expected = read.fetchall()
