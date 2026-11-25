@@ -5,12 +5,10 @@ name: codspeed
 # regressions show on shared runners. Pull requests are compared with develop,
 # whose pushes keep the baseline current; CodSpeed comments the differences.
 on:
-  # feature/async: the asyncio integration branch, whose pull requests must
-  # not slow the synchronous path; remove it once the branch is merged.
   push:
-    branches: [develop, feature/async]
+    branches: [develop]
   pull_request:
-    branches: [develop, feature/async]
+    branches: [develop]
   workflow_dispatch:
 
 permissions:
