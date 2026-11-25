@@ -7,6 +7,7 @@ import asyncio
 import socket
 import time
 import uuid
+import warnings
 
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -269,6 +270,31 @@ async def test_closing(conn: aio.Connection) -> None:
     assert conn.closed
     with pytest.raises(rustmy.OperationalError):
         await one(conn, "SELECT 1")
+
+
+async def test_a_dropped_connection_is_closed(
+    conn: aio.Connection, server: Server
+) -> None:
+    """The event loop keeps the protocol alive, so a connection dropped
+    without closing it would stay open (and keep its server session) for as
+    long as the loop runs."""
+    dropped = await connect(server)
+    thread = dropped.thread_id()
+    with pytest.warns(ResourceWarning, match="Unclosed connection"):
+        del dropped
+    sql = f"SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = {thread}"
+    deadline = time.monotonic() + 5
+    while await one(conn, sql):
+        assert time.monotonic() < deadline, "the server session is still open"
+        await asyncio.sleep(0.01)
+
+
+async def test_a_closed_connection_dropped_does_not_warn(server: Server) -> None:
+    closed = await connect(server)
+    closed.close()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ResourceWarning)
+        del closed
 
 
 async def test_server_errors(conn: aio.Connection) -> None:

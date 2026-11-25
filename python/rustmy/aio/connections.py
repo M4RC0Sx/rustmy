@@ -9,6 +9,8 @@ Arguments, defaults and errors are those of :func:`rustmy.connect`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import warnings
 
 from typing import TYPE_CHECKING
 from typing import Any
@@ -269,6 +271,18 @@ class Connection:
             raise err.InterfaceError(0, "connection already closed")
         self._closed = True
         self._core.close()
+
+    def __del__(self) -> None:
+        # The event loop keeps the protocol (the core) alive, so nothing else
+        # would close a connection dropped while open.
+        core = getattr(self, "_core", None)
+        if core is None or self._closed or core.closed:
+            return
+        warnings.warn(f"Unclosed connection {self!r}", ResourceWarning, stacklevel=2)
+        self._closed = True
+        # With the loop closed, its transport closes the socket when freed.
+        with contextlib.suppress(RuntimeError):
+            core.close()
 
     async def ensure_closed(self) -> None:
         """Close the connection (aiomysql's and asyncmy's name)."""
