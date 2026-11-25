@@ -299,7 +299,9 @@ more; what it writes goes to the loop's transport after each poll, and its
 result resolves the command's future. Rows are converted every 64 KiB as
 they arrive. A command whose task is cancelled closes the connection (the
 reply would arrive in the middle of the next command's); an I/O failure or a
-protocol violation leaves it closed too. It takes `connect()`'s options
+protocol violation leaves it closed too. The loop keeps the protocol alive,
+so a connection dropped while open is closed by `Connection.__del__`, with a
+`ResourceWarning` as asyncio's own transports give. It takes `connect()`'s options
 (`connect_opts` in `connection.rs`, shared with the blocking connection).
 What the loop's callbacks need lives in `Core`. `read_timeout` and
 `write_timeout` are a single `call_later` check, not a timer per read: it
