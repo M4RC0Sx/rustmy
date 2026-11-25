@@ -1,7 +1,8 @@
 """Charts and tables of ``showcase.py`` results.
 
     uv run --no-sync python benches/showcase.py \\
-        --render benches/results/showcase-py314.json
+        --render benches/results/showcase-py314.json \\
+        benches/results/showcase-latency-*-py314.json
 
 Writes ``benches/results/showcase-<area>-{light,dark}.svg`` (one panel per
 workload and size: absolute times, lower is better, rustmy highlighted and
@@ -41,6 +42,13 @@ RAW = "https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results"
 #: The other drivers recede: gray at >= 3:1 against each surface.
 MUTED = {"light": "#8a8883", "dark": "#6e6d68"}
 ORDER = ("rustmy", "mysqlclient", "pymysql", "mysqlconnector")
+#: The asyncio areas' drivers, compared with asyncmy (the fastest of the
+#: others) instead of mysqlclient.
+AREA_ORDER = {
+    "asyncio": ("rustmy", "asyncmy", "aiomysql", "mysqlconnector"),
+    "sqlalchemy-asyncio": ("rustmy", "asyncmy", "aiomysql"),
+}
+BASELINE = {"asyncio": "asyncmy", "sqlalchemy-asyncio": "asyncmy"}
 LABELS = {
     "rustmy": "rustmy",
     "rustmy-prepared": "rustmy (prepared)",
@@ -49,13 +57,19 @@ LABELS = {
     "pymysql": "PyMySQL",
     "mysqlconnector": "mysql-connector",
     "mysqlconnector-prepared": "mysql-connector (prepared)",
+    "asyncmy": "asyncmy",
+    "aiomysql": "aiomysql",
 }
+#: mysql-connector-python's asyncio API is another module.
+ASYNC_LABELS = {**LABELS, "mysqlconnector": "mysql.connector.aio"}
 AREAS = {
     "dbapi": "DB-API",
     "prepared": "Prepared statements",
     "sqlalchemy": "SQLAlchemy 2",
     "django": "Django",
     "memory": "Memory",
+    "asyncio": "asyncio",
+    "sqlalchemy-asyncio": "SQLAlchemy 2, asyncio",
 }
 
 
@@ -65,6 +79,16 @@ class Panel:
     rows: int
     values: dict[str, float]  # config -> seconds (MiB for memory)
     unit: str = "s"
+    area: str = ""
+    count: str = "rows"  # what ``rows`` counts
+
+    @property
+    def baseline(self) -> str:
+        return BASELINE.get(self.area, "mysqlclient")
+
+    @property
+    def labels(self) -> dict[str, str]:
+        return ASYNC_LABELS if self.area in AREA_ORDER else LABELS
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -72,11 +96,13 @@ def load(path: Path) -> dict[str, Any]:
     return data
 
 
-def panels(run: dict[str, Any], area: str) -> list[Panel]:
-    """One panel per workload and size, in the order measured."""
+def panels(run: dict[str, Any], area: str, loop: str = "asyncio") -> list[Panel]:
+    """One panel per workload and size, in the order measured (the asyncio
+    areas' on ``loop``)."""
     grouped: dict[tuple[str, int], dict[str, float]] = {}
+    counts: dict[tuple[str, int], str] = {}
     for record in run["results"]:
-        if record["area"] != area:
+        if record["area"] != area or record.get("loop", "asyncio") != loop:
             continue
         name = record["name"]
         config = record["driver"]
@@ -85,6 +111,7 @@ def panels(run: dict[str, Any], area: str) -> list[Panel]:
             config = name[name.index("(") + 1 : -1]
             name = "Read rows"
         grouped.setdefault((name, record["rows"]), {})[config] = record["value"]
+        counts[name, record["rows"]] = record.get("unit", "rows")
     if area == "prepared":
         # rustmy's text protocol, for scale: the DB-API read of the same rows.
         for record in run["results"]:
@@ -95,12 +122,22 @@ def panels(run: dict[str, Any], area: str) -> list[Panel]:
     unit = "MiB" if area == "memory" else "s"
     ordered = sorted(grouped.items(), key=lambda item: item[0][1])
     names = list(dict.fromkeys(name for (name, _), _ in grouped.items()))
-    ordered.sort(key=lambda item: (item[0][1], names.index(item[0][0])))
-    return [Panel(name, rows, values, unit) for (name, rows), values in ordered]
+    # By size, workloads counted otherwise (the pool's queries) last.
+    ordered.sort(
+        key=lambda item: (
+            counts.get(item[0], "rows") != "rows",
+            item[0][1],
+            names.index(item[0][0]),
+        )
+    )
+    return [
+        Panel(name, rows, values, unit, area, counts.get((name, rows), "rows"))
+        for (name, rows), values in ordered
+    ]
 
 
 def configs(panel: Panel) -> list[str]:
-    preferred = (
+    preferred = AREA_ORDER.get(panel.area) or (
         "rustmy-prepared",
         "rustmy",
         "rustmy-text",
@@ -122,22 +159,23 @@ def fmt(value: float, unit: str) -> str:
 
 def headline(panel: Panel) -> str:
     ours = panel.values.get("rustmy-prepared", panel.values.get("rustmy"))
-    base = panel.values.get("mysqlclient")
+    name = panel.labels[panel.baseline]
+    base = panel.values.get(panel.baseline)
     if ours is None or base is None:
         return ""
     if panel.unit == "MiB":
         saved = (1 - ours / base) * 100
         if abs(saved) < 5:
-            return "as much memory as mysqlclient"
+            return f"as much memory as {name}"
         more_or_less = "less" if saved > 0 else "more"
-        return f"{abs(saved):.0f}% {more_or_less} memory than mysqlclient"
+        return f"{abs(saved):.0f}% {more_or_less} memory than {name}"
     ratio = base / ours
     # Within 5% either way is noise, not a result; slower says so.
     if ratio >= 1.05:
-        return f"{ratio:.1f}× faster than mysqlclient"  # noqa: RUF001  # a real "times"
+        return f"{ratio:.1f}× faster than {name}"  # noqa: RUF001  # a real "times"
     if ratio > 0.95:
-        return "on par with mysqlclient"
-    return f"{1 / ratio:.1f}× slower than mysqlclient"  # noqa: RUF001
+        return f"on par with {name}"
+    return f"{1 / ratio:.1f}× slower than {name}"  # noqa: RUF001
 
 
 def draw(ax: Any, theme: Theme, panel: Panel, *, title: str) -> None:
@@ -150,7 +188,7 @@ def draw(ax: Any, theme: Theme, panel: Panel, *, title: str) -> None:
     y = range(len(names))
     ax.barh(y, values, height=0.62, color=colors, edgecolor=theme.surface, linewidth=2)
     ax.invert_yaxis()
-    ax.set_yticks(y, [LABELS[c] for c in names], fontsize=9)
+    ax.set_yticks(y, [panel.labels[c] for c in names], fontsize=9)
     for label, config in zip(ax.get_yticklabels(), names, strict=True):
         ours = config.startswith("rustmy")
         label.set_color(theme.text if ours else theme.text_secondary)
@@ -229,20 +267,32 @@ def layout(fig: Any, rows: int, columns: int, bars: int) -> tuple[float, float]:
     return width, height
 
 
+def grid(items: list[Panel]) -> list[list[Panel]]:
+    """Columns of panels: one per size, the smaller on the left; workloads
+    counted otherwise (the pool's queries) go below the first."""
+    sizes = sorted({p.rows for p in items if p.count == "rows"})
+    columns = [[p for p in items if p.count == "rows" and p.rows == s] for s in sizes]
+    if not columns:
+        columns = [[]]
+    columns[0].extend(p for p in items if p.count != "rows")
+    return columns
+
+
 def area_chart(run: dict[str, Any], area: str, theme: Theme, path: Path) -> None:
-    items = panels(run, area)
-    columns = 2 if len(items) > 1 else 1
-    rows = (len(items) + columns - 1) // columns
-    bars = max(len(configs(p)) for p in items)
-    fig, axes = plt.subplots(rows, columns, squeeze=False)
-    layout(fig, rows, columns, bars)
+    columns = grid(panels(run, area))
+    rows = max(len(column) for column in columns)
+    bars = max(len(configs(p)) for column in columns for p in column)
+    fig, axes = plt.subplots(rows, len(columns), squeeze=False)
+    layout(fig, rows, len(columns), bars)
     fig.patch.set_facecolor(theme.surface)
-    # Fill column by column: the smaller size on the left.
-    for index, panel in enumerate(items):
-        ax = axes[index % rows][index // rows]
-        draw(ax, theme, panel, title=f"{panel.title}, {panel.rows:,} rows")
-    for extra in range(len(items), rows * columns):
-        axes[extra % rows][extra // rows].set_visible(False)
+    for x, column in enumerate(columns):
+        for y in range(rows):
+            if y < len(column):
+                panel = column[y]
+                title = f"{panel.title}, {panel.rows:,} {panel.count}"
+                draw(axes[y][x], theme, panel, title=title)
+            else:
+                axes[y][x].set_visible(False)
     note = (
         "Peak memory, lower is better" if area == "memory" else "Time, lower is better"
     )
@@ -260,7 +310,7 @@ HERO = (
 
 
 def hero(run: dict[str, Any], theme: Theme, path: Path) -> None:
-    size = max(r["rows"] for r in run["results"])
+    size = max(r["rows"] for r in run["results"] if r["area"] == "dbapi")
     fig, axes = plt.subplots(2, 2, squeeze=False)
     layout(fig, 2, 2, len(ORDER))
     fig.patch.set_facecolor(theme.surface)
@@ -272,9 +322,17 @@ def hero(run: dict[str, Any], theme: Theme, path: Path) -> None:
     plt.close(fig)
 
 
-def table(run: dict[str, Any], area: str) -> str:
-    items = panels(run, area)
-    head = ["Workload", "Rows", *(LABELS[c] for c in ORDER), "vs mysqlclient"]
+def table(run: dict[str, Any], area: str, loop: str = "asyncio") -> str:
+    items = panels(run, area, loop)
+    order: tuple[str, ...] = AREA_ORDER.get(area, ORDER)
+    labels = ASYNC_LABELS if area in AREA_ORDER else LABELS
+    baseline = BASELINE.get(area, "mysqlclient")
+    head = [
+        "Workload",
+        "Rows",
+        *(labels[c] for c in order),
+        f"vs {labels[baseline]}",
+    ]
     if area == "prepared":
         head = [
             "Workload",
@@ -286,15 +344,13 @@ def table(run: dict[str, Any], area: str) -> str:
             "PyMySQL",
             "vs mysqlclient",
         ]
-        order: tuple[str, ...] = (
+        order = (
             "rustmy-prepared",
             "rustmy-text",
             "mysqlconnector-prepared",
             "mysqlclient",
             "pymysql",
         )
-    else:
-        order = ORDER
     lines = ["| " + " | ".join(head) + " |", "|---|--:|" + "--:|" * (len(head) - 2)]
     for panel in items:
         values = [panel.values.get(c) for c in order]
@@ -307,11 +363,10 @@ def table(run: dict[str, Any], area: str) -> str:
                 continue
             text = fmt(value, panel.unit)
             cells.append(f"**{text}**" if value == fastest else text)
-        verdict = headline(panel).replace(" than mysqlclient", "")
+        verdict = headline(panel).replace(f" than {labels[baseline]}", "")
+        count = f"{panel.rows:,}" + ("" if panel.count == "rows" else f" {panel.count}")
         lines.append(
-            f"| {panel.title} | {panel.rows:,} | "
-            + " | ".join(cells)
-            + f" | {verdict} |"
+            f"| {panel.title} | {count} | " + " | ".join(cells) + f" | {verdict} |"
         )
     return "\n".join(lines)
 
@@ -326,12 +381,18 @@ def picture(name: str, alt: str, base: str) -> str:
     )
 
 
+def rustmy_version(run: dict[str, Any]) -> str:
+    """rustmy's version, or what was measured before a release."""
+    version: str = run["versions"]["rustmy"]
+    return "(a release build of develop)" if version == "0.0.0" else version
+
+
 def section(run: dict[str, Any], base: str, *, folded: bool = False) -> str:
     v = run["versions"]
     parts = [
         (
             f"**{run['python']}** · MySQL {run['server']} · {run['machine']} · "
-            f"rustmy {v['rustmy']}, mysqlclient {v['mysqlclient']}, "
+            f"rustmy {rustmy_version(run)}, mysqlclient {v['mysqlclient']}, "
             f"PyMySQL {v['pymysql']}, mysql-connector-python {v['mysqlconnector']} "
             f"(C extension), SQLAlchemy {v['sqlalchemy']}, Django {v['django']} · "
             f"best of {run['repeat']} (100k) and {run['repeat_large']} (1M) · "
@@ -340,6 +401,15 @@ def section(run: dict[str, Any], base: str, *, folded: bool = False) -> str:
     ]
     for area, title in AREAS.items():
         measure = "peak memory" if area == "memory" else "time"
+        if area == "asyncio":
+            parts.append(
+                f"asyncio: asyncmy {v['asyncmy']}, aiomysql {v['aiomysql']} and "
+                f"mysql.connector.aio (mysql-connector-python {v['mysqlconnector']}, "
+                "pure Python), on asyncio's default event loop; compared with "
+                "asyncmy, the fastest of them. mysql.connector.aio's pool fails "
+                "instead of waiting when no connection is idle, so it has no pool "
+                "figure; SQLAlchemy has no asyncio dialect for it."
+            )
         parts.append(f"#### {title}")
         parts.append(
             picture(
@@ -355,6 +425,9 @@ def section(run: dict[str, Any], base: str, *, folded: bool = False) -> str:
                 f"<details>\n<summary>Numbers</summary>\n\n{numbers}\n\n</details>"
             )
         parts.append(numbers)
+        if not folded and area in AREA_ORDER and panels(run, area, "uvloop"):
+            parts.append(f"With uvloop {v['uvloop']}:")
+            parts.append(table(run, area, "uvloop"))
     return "\n\n".join(parts)
 
 
@@ -369,14 +442,43 @@ def replace_block(path: Path, marker: str, content: str) -> None:
     path.write_text(pattern.sub(lambda m: m[1] + content + "\n" + m[2], text))
 
 
-def render(path: Path) -> None:
+def latency_section(runs: list[dict[str, Any]]) -> str:
+    """The tables of ``--latency`` runs, by latency."""
+    parts = []
+    for run in sorted(runs, key=lambda run: run["latency_ms"]):
+        parts.append(
+            f"#### +{run['latency_ms']} ms per reply "
+            f"({run['round_trip_ms']:.1f} ms round trip)"
+        )
+        parts.append(
+            f"{run['python']} · MySQL {run['server']} through toxiproxy · "
+            f"rustmy {rustmy_version(run)} · best of {run['repeat']} · {run['date']}"
+        )
+        for area, title in AREAS.items():
+            if any(record["area"] == area for record in run["results"]):
+                parts.append(f"**{title}**")
+                parts.append(table(run, area))
+    return "\n\n".join(parts)
+
+
+def render(paths: list[Path]) -> None:
+    """The showcase from the run without added latency, and the latency
+    tables from the others (either may be absent)."""
     plt.rcParams["svg.fonttype"] = "none"  # keep text as text
     plt.rcParams["svg.hashsalt"] = "rustmy"  # deterministic ids, stable diffs
-    run = load(path)
-    for theme in (LIGHT, DARK):
-        for area in AREAS:
-            area_chart(run, area, theme, RESULTS / f"showcase-{area}-{theme.name}.svg")
-        hero(run, theme, RESULTS / f"hero-{theme.name}.svg")
-    replace_block(BENCH_README, "results:showcase", section(run, "results"))
-    replace_block(README, "showcase", section(run, RAW, folded=True))
-    print("wrote the showcase and hero charts, README.md and benches/README.md")
+    runs = [load(path) for path in paths]
+    latency = [run for run in runs if run.get("latency_ms") is not None]
+    for run in runs:
+        if run in latency:
+            continue
+        for theme in (LIGHT, DARK):
+            for area in AREAS:
+                path = RESULTS / f"showcase-{area}-{theme.name}.svg"
+                area_chart(run, area, theme, path)
+            hero(run, theme, RESULTS / f"hero-{theme.name}.svg")
+        replace_block(BENCH_README, "results:showcase", section(run, "results"))
+        replace_block(README, "showcase", section(run, RAW, folded=True))
+        print("wrote the showcase and hero charts, README.md and benches/README.md")
+    if latency:
+        replace_block(BENCH_README, "results:latency", latency_section(latency))
+        print("wrote the latency tables in benches/README.md")

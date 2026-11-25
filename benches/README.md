@@ -38,6 +38,16 @@ to measure, in the `bench` group, never shipped). Python 3.14, because
 mysql-connector-python has no C extension for 3.15 yet and without it the
 comparison would not be fair.
 
+The asyncio areas run `rustmy.aio` against asyncmy, aiomysql and
+`mysql.connector.aio` (pure Python: the C extension is for the blocking API
+only), on asyncio's default event loop, and compare with asyncmy, the fastest
+of the three: the same reads, streaming and inserts, plus a pool workload
+(32 tasks sharing 8 connections, 6,400 point lookups, each acquiring a
+connection per query). `mysql.connector.aio`'s pool fails instead of waiting
+when every connection is in use, so it has no figure there, and SQLAlchemy has
+no asyncio dialect for it. `--loops asyncio,uvloop` runs them on uvloop as
+well; those tables are only here.
+
 `showcase.py` loads a million orders (integers, a name, a decimal price, a
 microsecond datetime, a nullable date and a nullable note) and runs each area
 with each driver in a fresh process (Django can only load one `MySQLdb`; the
@@ -59,7 +69,8 @@ PKG_CONFIG_PATH=/opt/homebrew/opt/mysql-client/lib/pkgconfig \
 uv run --no-sync --python 3.14 maturin develop --uv --release
 docker compose up -d --wait mysql
 P="uv run --no-sync --python 3.14 python"
-$P benches/showcase.py --json benches/results/showcase-py314.json   # ~1 hour
+$P benches/showcase.py --loops asyncio,uvloop \
+    --json benches/results/showcase-py314.json   # ~1.5 hours
 $P benches/showcase.py --render benches/results/showcase-py314.json
 ```
 
@@ -68,7 +79,7 @@ main README (`hero-*.svg`), and rewrites the tables below and in the main
 README's Performance section.
 
 <!-- results:showcase:start -->
-**CPython 3.14.3** · MySQL 8.4.13 · Darwin arm64 · rustmy 1.3.0, mysqlclient 2.3.1, PyMySQL 2.2.8, mysql-connector-python 26.10.0 (C extension), SQLAlchemy 2.1.9, Django 6.1.3 · best of 5 (100k) and 3 (1M) · 2026-11-20T00:16:22+00:00
+**CPython 3.14.3** · MySQL 8.4.13 · Darwin arm64 · rustmy (a release build of develop), mysqlclient 2.3.1, PyMySQL 2.2.8, mysql-connector-python 26.10.0 (C extension), SQLAlchemy 2.1.9, Django 6.1.3 · best of 5 (100k) and 3 (1M) · 2026-11-25T00:39:39+00:00
 
 #### DB-API
 
@@ -79,14 +90,14 @@ README's Performance section.
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|
-| Read rows (tuples) | 100,000 | **45 ms** | 120 ms | 300 ms | 153 ms | 2.7× faster |
-| Read rows (dicts) | 100,000 | **52 ms** | 135 ms | 332 ms | 208 ms | 2.6× faster |
-| Stream rows | 100,000 | **31 ms** | 103 ms | 314 ms | 179 ms | 3.4× faster |
-| Insert rows (executemany) | 100,000 | **324 ms** | 1.08 s | 617 ms | 574 ms | 3.3× faster |
-| Read rows (tuples) | 1,000,000 | **454 ms** | 1.28 s | 3.06 s | 1.57 s | 2.8× faster |
-| Read rows (dicts) | 1,000,000 | **538 ms** | 1.36 s | 3.42 s | 2.10 s | 2.5× faster |
-| Stream rows | 1,000,000 | **268 ms** | 1.04 s | 3.12 s | 1.81 s | 3.9× faster |
-| Insert rows (executemany) | 1,000,000 | **3.77 s** | 11.55 s | 6.38 s | 5.81 s | 3.1× faster |
+| Read rows (tuples) | 100,000 | **41 ms** | 120 ms | 298 ms | 153 ms | 2.9× faster |
+| Read rows (dicts) | 100,000 | **55 ms** | 135 ms | 333 ms | 204 ms | 2.5× faster |
+| Stream rows | 100,000 | **33 ms** | 102 ms | 315 ms | 179 ms | 3.1× faster |
+| Insert rows (executemany) | 100,000 | **328 ms** | 1.05 s | 621 ms | 575 ms | 3.2× faster |
+| Read rows (tuples) | 1,000,000 | **407 ms** | 1.29 s | 3.11 s | 1.59 s | 3.2× faster |
+| Read rows (dicts) | 1,000,000 | **566 ms** | 1.37 s | 3.43 s | 2.09 s | 2.4× faster |
+| Stream rows | 1,000,000 | **271 ms** | 986 ms | 3.14 s | 1.77 s | 3.6× faster |
+| Insert rows (executemany) | 1,000,000 | **3.69 s** | 10.90 s | 6.36 s | 5.88 s | 3.0× faster |
 
 #### Prepared statements
 
@@ -97,8 +108,8 @@ README's Performance section.
 
 | Workload | Rows | rustmy (prepared) | rustmy (text) | mysql-connector (prepared) | mysqlclient | PyMySQL | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|--:|
-| Read rows | 100,000 | **42 ms** | 45 ms | 178 ms | 124 ms | 312 ms | 2.9× faster |
-| Read rows | 1,000,000 | 473 ms | **454 ms** | 1.79 s | 1.45 s | 3.10 s | 3.1× faster |
+| Read rows | 100,000 | **37 ms** | 41 ms | 178 ms | 123 ms | 308 ms | 3.3× faster |
+| Read rows | 1,000,000 | **402 ms** | 407 ms | 1.78 s | 1.46 s | 3.10 s | 3.6× faster |
 
 #### SQLAlchemy 2
 
@@ -109,14 +120,14 @@ README's Performance section.
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|
-| Core: read rows | 100,000 | **57 ms** | 150 ms | 326 ms | 168 ms | 2.6× faster |
-| ORM: load objects | 100,000 | **243 ms** | 323 ms | 513 ms | 357 ms | 1.3× faster |
-| ORM: stream objects (yield_per) | 100,000 | **199 ms** | 259 ms | 479 ms | 330 ms | 1.3× faster |
-| ORM: bulk insert | 100,000 | **527 ms** | 1.29 s | 893 ms | 1.01 s | 2.4× faster |
-| Core: read rows | 1,000,000 | **541 ms** | 1.32 s | 3.28 s | 1.68 s | 2.4× faster |
-| ORM: load objects | 1,000,000 | **2.59 s** | 3.37 s | 5.29 s | 3.74 s | 1.3× faster |
-| ORM: stream objects (yield_per) | 1,000,000 | **1.89 s** | 2.46 s | 4.71 s | 3.25 s | 1.3× faster |
-| ORM: bulk insert | 1,000,000 | **5.35 s** | 15.14 s | 9.07 s | 9.94 s | 2.8× faster |
+| Core: read rows | 100,000 | **49 ms** | 142 ms | 323 ms | 165 ms | 2.9× faster |
+| ORM: load objects | 100,000 | **234 ms** | 316 ms | 510 ms | 354 ms | 1.4× faster |
+| ORM: stream objects (yield_per) | 100,000 | **193 ms** | 253 ms | 478 ms | 327 ms | 1.3× faster |
+| ORM: bulk insert | 100,000 | **521 ms** | 1.38 s | 877 ms | 996 ms | 2.6× faster |
+| Core: read rows | 1,000,000 | **472 ms** | 1.32 s | 3.26 s | 1.66 s | 2.8× faster |
+| ORM: load objects | 1,000,000 | **2.47 s** | 3.39 s | 5.29 s | 3.73 s | 1.4× faster |
+| ORM: stream objects (yield_per) | 1,000,000 | **1.85 s** | 2.41 s | 4.70 s | 3.18 s | 1.3× faster |
+| ORM: bulk insert | 1,000,000 | **5.33 s** | 14.47 s | 8.90 s | 9.69 s | 2.7× faster |
 
 #### Django
 
@@ -127,14 +138,14 @@ README's Performance section.
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|
-| QuerySet: load objects | 100,000 | **200 ms** | 290 ms | 481 ms | 413 ms | 1.4× faster |
-| QuerySet: values_list() | 100,000 | **45 ms** | 139 ms | 328 ms | 253 ms | 3.1× faster |
-| QuerySet: iterator() | 100,000 | **178 ms** | 248 ms | 448 ms | 369 ms | 1.4× faster |
-| bulk_create() | 100,000 | **1.17 s** | 1.40 s | 1.45 s | 1.90 s | 1.2× faster |
-| QuerySet: load objects | 1,000,000 | **1.92 s** | 2.70 s | 4.73 s | 4.02 s | 1.4× faster |
-| QuerySet: values_list() | 1,000,000 | **425 ms** | 1.21 s | 3.25 s | 2.57 s | 2.8× faster |
-| QuerySet: iterator() | 1,000,000 | **1.68 s** | 2.42 s | 4.49 s | 3.63 s | 1.4× faster |
-| bulk_create() | 1,000,000 | **11.43 s** | 13.83 s | 13.92 s | 18.96 s | 1.2× faster |
+| QuerySet: load objects | 100,000 | **208 ms** | 289 ms | 477 ms | 396 ms | 1.4× faster |
+| QuerySet: values_list() | 100,000 | **47 ms** | 135 ms | 324 ms | 246 ms | 2.9× faster |
+| QuerySet: iterator() | 100,000 | **174 ms** | 251 ms | 447 ms | 361 ms | 1.4× faster |
+| bulk_create() | 100,000 | **1.13 s** | 1.36 s | 1.40 s | 1.92 s | 1.2× faster |
+| QuerySet: load objects | 1,000,000 | **1.98 s** | 2.69 s | 4.75 s | 3.94 s | 1.4× faster |
+| QuerySet: values_list() | 1,000,000 | **434 ms** | 1.21 s | 3.28 s | 2.43 s | 2.8× faster |
+| QuerySet: iterator() | 1,000,000 | **1.68 s** | 2.44 s | 4.53 s | 3.59 s | 1.5× faster |
+| bulk_create() | 1,000,000 | **11.28 s** | 13.75 s | 13.77 s | 19.09 s | 1.2× faster |
 
 #### Memory
 
@@ -146,19 +157,85 @@ README's Performance section.
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|
 | Peak memory of fetchall() | 1,000,000 | 504 MiB | 697 MiB | 512 MiB | **496 MiB** | 28% less memory |
+
+asyncio: asyncmy 0.2.18, aiomysql 0.3.2 and mysql.connector.aio (mysql-connector-python 26.10.0, pure Python), on asyncio's default event loop; compared with asyncmy, the fastest of them. mysql.connector.aio's pool fails instead of waiting when no connection is idle, so it has no pool figure; SQLAlchemy has no asyncio dialect for it.
+
+#### asyncio
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/showcase-asyncio-dark.svg">
+  <img alt="asyncio: time per driver, lower is better" src="results/showcase-asyncio-light.svg">
+</picture>
+
+| Workload | Rows | rustmy | asyncmy | aiomysql | mysql.connector.aio | vs asyncmy |
+|---|--:|--:|--:|--:|--:|--:|
+| Read rows (tuples) | 100,000 | 40 ms | **35 ms** | 371 ms | 454 ms | 1.1× slower |
+| Read rows (dicts) | 100,000 | **51 ms** | 62 ms | 406 ms | 509 ms | 1.2× faster |
+| Stream rows | 100,000 | **58 ms** | 62 ms | 394 ms | 599 ms | 1.1× faster |
+| Insert rows (executemany) | 100,000 | **339 ms** | 538 ms | 628 ms | 1.03 s | 1.6× faster |
+| Read rows (tuples) | 1,000,000 | **327 ms** | 376 ms | 3.81 s | 4.59 s | 1.2× faster |
+| Read rows (dicts) | 1,000,000 | **532 ms** | 693 ms | 4.13 s | 5.09 s | 1.3× faster |
+| Stream rows | 1,000,000 | **535 ms** | 550 ms | 3.95 s | 5.98 s | on par with asyncmy |
+| Insert rows (executemany) | 1,000,000 | **4.07 s** | 5.48 s | 6.32 s | 10.12 s | 1.3× faster |
+| Pool: 32 tasks, 8 connections | 6,400 queries | **173 ms** | 179 ms | 408 ms | n/a | on par with asyncmy |
+
+With uvloop 0.23.0:
+
+| Workload | Rows | rustmy | asyncmy | aiomysql | mysql.connector.aio | vs asyncmy |
+|---|--:|--:|--:|--:|--:|--:|
+| Read rows (tuples) | 100,000 | **37 ms** | 41 ms | 372 ms | 454 ms | 1.1× faster |
+| Read rows (dicts) | 100,000 | **49 ms** | 59 ms | 407 ms | 510 ms | 1.2× faster |
+| Stream rows | 100,000 | **58 ms** | 61 ms | 399 ms | 600 ms | 1.1× faster |
+| Insert rows (executemany) | 100,000 | **351 ms** | 523 ms | 610 ms | 1.07 s | 1.5× faster |
+| Read rows (tuples) | 1,000,000 | **298 ms** | 330 ms | 3.76 s | 4.62 s | 1.1× faster |
+| Read rows (dicts) | 1,000,000 | **461 ms** | 558 ms | 4.10 s | 5.12 s | 1.2× faster |
+| Stream rows | 1,000,000 | **535 ms** | 594 ms | 3.97 s | 5.99 s | 1.1× faster |
+| Insert rows (executemany) | 1,000,000 | **4.02 s** | 5.35 s | 6.21 s | 10.65 s | 1.3× faster |
+| Pool: 32 tasks, 8 connections | 6,400 queries | 165 ms | **158 ms** | 354 ms | n/a | on par with asyncmy |
+
+#### SQLAlchemy 2, asyncio
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="results/showcase-sqlalchemy-asyncio-dark.svg">
+  <img alt="SQLAlchemy 2, asyncio: time per driver, lower is better" src="results/showcase-sqlalchemy-asyncio-light.svg">
+</picture>
+
+| Workload | Rows | rustmy | asyncmy | aiomysql | vs asyncmy |
+|---|--:|--:|--:|--:|--:|
+| Core: read rows | 100,000 | 49 ms | **48 ms** | 387 ms | on par with asyncmy |
+| ORM: load objects | 100,000 | **237 ms** | 257 ms | 573 ms | 1.1× faster |
+| ORM: stream objects (yield_per) | 100,000 | **452 ms** | 453 ms | 808 ms | on par with asyncmy |
+| ORM: bulk insert | 100,000 | **561 ms** | 769 ms | 854 ms | 1.4× faster |
+| Core: read rows | 1,000,000 | **453 ms** | 565 ms | 3.87 s | 1.2× faster |
+| ORM: load objects | 1,000,000 | **2.89 s** | 3.07 s | 6.37 s | 1.1× faster |
+| ORM: stream objects (yield_per) | 1,000,000 | **5.08 s** | 5.45 s | 9.00 s | 1.1× faster |
+| ORM: bulk insert | 1,000,000 | **6.55 s** | 8.49 s | 9.32 s | 1.3× faster |
+
+With uvloop 0.23.0:
+
+| Workload | Rows | rustmy | asyncmy | aiomysql | vs asyncmy |
+|---|--:|--:|--:|--:|--:|
+| Core: read rows | 100,000 | **52 ms** | 56 ms | 395 ms | 1.1× faster |
+| ORM: load objects | 100,000 | 251 ms | **246 ms** | 577 ms | on par with asyncmy |
+| ORM: stream objects (yield_per) | 100,000 | **449 ms** | 466 ms | 803 ms | on par with asyncmy |
+| ORM: bulk insert | 100,000 | **557 ms** | 772 ms | 842 ms | 1.4× faster |
+| Core: read rows | 1,000,000 | **481 ms** | 511 ms | 3.90 s | 1.1× faster |
+| ORM: load objects | 1,000,000 | **2.68 s** | 2.81 s | 6.38 s | on par with asyncmy |
+| ORM: stream objects (yield_per) | 1,000,000 | **5.27 s** | 5.31 s | 8.94 s | on par with asyncmy |
+| ORM: bulk insert | 1,000,000 | **6.47 s** | 8.52 s | 9.32 s | 1.3× faster |
 <!-- results:showcase:end -->
 
 What the numbers say:
 
-- Plain DB-API is where rustmy gains most: 2.5–3.9x mysqlclient's speed
+- Plain DB-API is where rustmy gains most: 2.4–3.6x mysqlclient's speed
   reading (more when streaming, where mysqlclient fetches one row per call),
-  and 3.1–3.3x inserting: mysqlclient sends `executemany` in 64 KiB
+  and 3–3.2x inserting: mysqlclient sends `executemany` in 64 KiB
   statements, rustmy in 256 KiB ones built in Rust.
 - Through an ORM, building a Python object per row costs the same with every
   driver and dominates: rustmy is still 1.2–1.5x faster than mysqlclient and
-  2–2.7x faster than PyMySQL, and Django's `values_list()`, which builds no
-  objects, keeps nearly all of the DB-API gain (2.8–3.1x).
-- Prepared statements read this table as fast as text, not faster: its rows
+  2.1–2.7x faster than PyMySQL, and Django's `values_list()`, which builds no
+  objects, keeps nearly all of the DB-API gain (2.8–2.9x).
+- Prepared statements read this table about 10% faster than text: its rows
   are mostly strings, which travel the same way in both protocols, and the
   binary protocol only saves parsing numbers and dates (on doubles, datetimes
   and decimals it reads in about half the time; see the Phase 5, block 3
@@ -166,6 +243,102 @@ What the numbers say:
   one.
 - Memory: the four drivers hold a million rows in about the same space but
   for mysqlclient, which takes 38% more than rustmy.
+- On asyncio, asyncmy (Cython) is the one to compare with: rustmy reads
+  tuples within 10% of it at 100k rows and 1.1–1.2x faster at 1M, dicts
+  1.2–1.3x faster (built in Rust), and inserts 1.3–1.6x faster; aiomysql and
+  `mysql.connector.aio` parse in Python and read 7–14x slower. Through
+  SQLAlchemy, where the ORM's own work dominates again, rustmy is on par to
+  1.4x faster than asyncmy. The pool workload is on par: rustmy hands a
+  connection given back to the first waiting task (one more turn of the event
+  loop, a few percent under contention), where asyncmy lets the releasing
+  task take it again, ahead of tasks that have waited longer. uvloop speeds
+  every driver up a little and changes none of the comparisons.
+- With latency, every round trip shows. Reads keep their lead; the pool
+  workload is 10% behind asyncmy at 1 ms (the extra turn of the loop per
+  handover delays the next query on that connection) and on par at 10 ms;
+  and inserting 100,000 rows at 10 ms is slower than with the others, which
+  build statements of about 1 MB, a quarter of the round trips of rustmy's
+  256 KiB.
+
+### With network latency
+
+The same DB-API and asyncio workloads at 10,000 and 100,000 rows through the
+`toxiproxy` compose service (profile `bench`), with 1 ms and 10 ms added to
+every reply: where a driver's round trips show. Every driver connects
+through the proxy; the tables are set up directly.
+
+```sh
+docker compose --profile bench up -d --wait mysql toxiproxy
+for ms in 1 10; do
+  SHOWCASE_SIZES=10000,100000 $P benches/showcase.py --keep-tables --latency $ms \
+      --repeat 3 --repeat-large 3 --json benches/results/showcase-latency-${ms}ms-py314.json
+done
+$P benches/showcase.py --render benches/results/showcase-latency-*-py314.json
+```
+
+<!-- results:latency:start -->
+#### +1 ms per reply (3.3 ms round trip)
+
+CPython 3.14.3 · MySQL 8.4.13 through toxiproxy · rustmy (a release build of develop) · best of 3 · 2026-11-25T00:40:52+00:00
+
+**DB-API**
+
+| Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
+|---|--:|--:|--:|--:|--:|--:|
+| Read rows (tuples) | 10,000 | **10 ms** | 15 ms | 33 ms | 19 ms | 1.5× faster |
+| Read rows (dicts) | 10,000 | **7 ms** | 15 ms | 36 ms | 23 ms | 2.0× faster |
+| Stream rows | 10,000 | **8 ms** | 13 ms | 35 ms | 24 ms | 1.6× faster |
+| Insert rows (executemany) | 10,000 | **57 ms** | 170 ms | 77 ms | 74 ms | 3.0× faster |
+| Read rows (tuples) | 100,000 | **42 ms** | 130 ms | 326 ms | 164 ms | 3.1× faster |
+| Read rows (dicts) | 100,000 | **52 ms** | 139 ms | 367 ms | 219 ms | 2.7× faster |
+| Stream rows | 100,000 | **34 ms** | 111 ms | 339 ms | 205 ms | 3.3× faster |
+| Insert rows (executemany) | 100,000 | **505 ms** | 2.16 s | 726 ms | 629 ms | 4.3× faster |
+
+**asyncio**
+
+| Workload | Rows | rustmy | asyncmy | aiomysql | mysql.connector.aio | vs asyncmy |
+|---|--:|--:|--:|--:|--:|--:|
+| Read rows (tuples) | 10,000 | **6 ms** | 12 ms | 39 ms | 46 ms | 2.1× faster |
+| Read rows (dicts) | 10,000 | **6 ms** | 12 ms | 41 ms | 51 ms | 1.9× faster |
+| Stream rows | 10,000 | 10 ms | **10 ms** | 41 ms | 62 ms | on par with asyncmy |
+| Insert rows (executemany) | 10,000 | **44 ms** | 61 ms | 77 ms | 110 ms | 1.4× faster |
+| Read rows (tuples) | 100,000 | **35 ms** | 38 ms | 388 ms | 459 ms | 1.1× faster |
+| Read rows (dicts) | 100,000 | **49 ms** | 66 ms | 424 ms | 508 ms | 1.3× faster |
+| Stream rows | 100,000 | **58 ms** | 61 ms | 406 ms | 613 ms | 1.1× faster |
+| Insert rows (executemany) | 100,000 | **520 ms** | 588 ms | 678 ms | 1.09 s | 1.1× faster |
+| Pool: 32 tasks, 8 connections | 6,400 queries | 3.22 s | **2.86 s** | 2.98 s | n/a | 1.1× slower |
+
+#### +10 ms per reply (12.6 ms round trip)
+
+CPython 3.14.3 · MySQL 8.4.13 through toxiproxy · rustmy (a release build of develop) · best of 3 · 2026-11-25T00:43:32+00:00
+
+**DB-API**
+
+| Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
+|---|--:|--:|--:|--:|--:|--:|
+| Read rows (tuples) | 10,000 | **23 ms** | 30 ms | 44 ms | 44 ms | 1.3× faster |
+| Read rows (dicts) | 10,000 | **23 ms** | 33 ms | 46 ms | 48 ms | 1.4× faster |
+| Stream rows | 10,000 | **22 ms** | 25 ms | 44 ms | 46 ms | 1.1× faster |
+| Insert rows (executemany) | 10,000 | **83 ms** | 386 ms | 95 ms | 105 ms | 4.6× faster |
+| Read rows (tuples) | 100,000 | **51 ms** | 151 ms | 324 ms | 184 ms | 3.0× faster |
+| Read rows (dicts) | 100,000 | **62 ms** | 157 ms | 357 ms | 237 ms | 2.5× faster |
+| Stream rows | 100,000 | **41 ms** | 118 ms | 346 ms | 209 ms | 2.9× faster |
+| Insert rows (executemany) | 100,000 | 987 ms | 4.46 s | 902 ms | **737 ms** | 4.5× faster |
+
+**asyncio**
+
+| Workload | Rows | rustmy | asyncmy | aiomysql | mysql.connector.aio | vs asyncmy |
+|---|--:|--:|--:|--:|--:|--:|
+| Read rows (tuples) | 10,000 | **17 ms** | 22 ms | 47 ms | 56 ms | 1.3× faster |
+| Read rows (dicts) | 10,000 | **17 ms** | 24 ms | 49 ms | 60 ms | 1.4× faster |
+| Stream rows | 10,000 | **21 ms** | 23 ms | 49 ms | 71 ms | 1.1× faster |
+| Insert rows (executemany) | 10,000 | 99 ms | 84 ms | **83 ms** | 126 ms | 1.2× slower |
+| Read rows (tuples) | 100,000 | **45 ms** | 50 ms | 375 ms | 457 ms | 1.1× faster |
+| Read rows (dicts) | 100,000 | **52 ms** | 71 ms | 415 ms | 507 ms | 1.4× faster |
+| Stream rows | 100,000 | **64 ms** | 69 ms | 415 ms | 608 ms | 1.1× faster |
+| Insert rows (executemany) | 100,000 | 957 ms | **755 ms** | 847 ms | 1.20 s | 1.3× slower |
+| Pool: 32 tasks, 8 connections | 6,400 queries | 10.89 s | **10.51 s** | 11.51 s | n/a | on par with asyncmy |
+<!-- results:latency:end -->
 
 ## Current results (Python 3.15)
 

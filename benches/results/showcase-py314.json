@@ -1,13 +1,16 @@
 {
-  "date": "2026-11-20T00:16:22+00:00",
+  "date": "2026-11-25T00:39:39+00:00",
   "machine": "Darwin arm64",
   "python": "CPython 3.14.3",
   "server": "8.4.13",
   "versions": {
-    "rustmy": "1.3.0",
+    "rustmy": "0.0.0",
     "mysqlclient": "2.3.1",
     "pymysql": "2.2.8",
     "mysqlconnector": "26.10.0",
+    "asyncmy": "0.2.18",
+    "aiomysql": "0.3.2",
+    "uvloop": "0.23.0",
     "sqlalchemy": "2.1.9",
     "django": "6.1.3"
   },
@@ -18,748 +21,855 @@
       "area": "dbapi",
       "name": "Read rows (tuples)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.04486591700697318
+      "value": 0.0410441659623757
     },
     {
       "area": "dbapi",
       "name": "Read rows (dicts)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.05238350003492087
+      "value": 0.05501708295196295
     },
     {
       "area": "dbapi",
       "name": "Stream rows",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.030541249958332628
+      "value": 0.033438874990679324
     },
     {
       "area": "dbapi",
       "name": "Insert rows (executemany)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.32365745899733156
+      "value": 0.3283617909764871
     },
     {
       "area": "dbapi",
       "name": "Read rows (tuples)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.45357245800551027
+      "value": 0.4067643749876879
     },
     {
       "area": "dbapi",
       "name": "Read rows (dicts)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.5382325419923291
+      "value": 0.5656000419985503
     },
     {
       "area": "dbapi",
       "name": "Stream rows",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.26758991699898615
+      "value": 0.27121949999127537
     },
     {
       "area": "dbapi",
       "name": "Insert rows (executemany)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 3.771471959014889
+      "value": 3.6892600000137463
     },
     {
       "area": "dbapi",
       "name": "Read rows (tuples)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 0.12042295798892155
+      "value": 0.11975741700734943
     },
     {
       "area": "dbapi",
       "name": "Read rows (dicts)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 0.13524629099993035
+      "value": 0.13518116698833182
     },
     {
       "area": "dbapi",
       "name": "Stream rows",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 0.10332787502557039
+      "value": 0.10204195801634341
     },
     {
       "area": "dbapi",
       "name": "Insert rows (executemany)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 1.080150457972195
+      "value": 1.053416374954395
     },
     {
       "area": "dbapi",
       "name": "Read rows (tuples)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 1.2814177910331637
+      "value": 1.2934673750423826
     },
     {
       "area": "dbapi",
       "name": "Read rows (dicts)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 1.3611673329724
+      "value": 1.3693123330012895
     },
     {
       "area": "dbapi",
       "name": "Stream rows",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 1.0382658329908736
+      "value": 0.9861332919681445
     },
     {
       "area": "dbapi",
       "name": "Insert rows (executemany)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 11.552316249988507
+      "value": 10.903454207989853
     },
     {
       "area": "dbapi",
       "name": "Read rows (tuples)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 0.30046554101863876
+      "value": 0.29818279104074463
     },
     {
       "area": "dbapi",
       "name": "Read rows (dicts)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 0.3316036250325851
+      "value": 0.33341049996670336
     },
     {
       "area": "dbapi",
       "name": "Stream rows",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 0.31435354199493304
+      "value": 0.31477204198017716
     },
     {
       "area": "dbapi",
       "name": "Insert rows (executemany)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 0.6171191250323318
+      "value": 0.6214164579869248
     },
     {
       "area": "dbapi",
       "name": "Read rows (tuples)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 3.064154291001614
+      "value": 3.1139226669911295
     },
     {
       "area": "dbapi",
       "name": "Read rows (dicts)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 3.4235286250477657
+      "value": 3.4340085420408286
     },
     {
       "area": "dbapi",
       "name": "Stream rows",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 3.1188690420240164
+      "value": 3.1445742499781772
     },
     {
       "area": "dbapi",
       "name": "Insert rows (executemany)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 6.376432625052985
+      "value": 6.357647624972742
     },
     {
       "area": "dbapi",
       "name": "Read rows (tuples)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 0.15259583399165422
+      "value": 0.15345070901094005
     },
     {
       "area": "dbapi",
       "name": "Read rows (dicts)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 0.2079647920327261
+      "value": 0.20446804095990956
     },
     {
       "area": "dbapi",
       "name": "Stream rows",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 0.17858829098986462
+      "value": 0.1789008749765344
     },
     {
       "area": "dbapi",
       "name": "Insert rows (executemany)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 0.5742316250107251
+      "value": 0.5752050419687293
     },
     {
       "area": "dbapi",
       "name": "Read rows (tuples)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 1.5676351659931242
+      "value": 1.5926655410439707
     },
     {
       "area": "dbapi",
       "name": "Read rows (dicts)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 2.101351999968756
+      "value": 2.089677375042811
     },
     {
       "area": "dbapi",
       "name": "Stream rows",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 1.80670099996496
+      "value": 1.77153708395781
     },
     {
       "area": "dbapi",
       "name": "Insert rows (executemany)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 5.814126165991183
+      "value": 5.875534749997314
     },
     {
       "area": "prepared",
       "name": "Read rows (rustmy-prepared)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.04227391700260341
+      "value": 0.03729608398862183
     },
     {
       "area": "prepared",
       "name": "Read rows (rustmy-prepared)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.47338583396049216
+      "value": 0.401947874983307
     },
     {
       "area": "prepared",
       "name": "Read rows (mysqlclient)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 0.12417370895855129
+      "value": 0.12296900001820177
     },
     {
       "area": "prepared",
       "name": "Read rows (mysqlclient)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 1.4519958330201916
+      "value": 1.4636207920266315
     },
     {
       "area": "prepared",
       "name": "Read rows (pymysql)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 0.3122946670046076
+      "value": 0.3076404590392485
     },
     {
       "area": "prepared",
       "name": "Read rows (pymysql)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 3.1004372499883175
+      "value": 3.1006277090054937
     },
     {
       "area": "prepared",
       "name": "Read rows (mysqlconnector-prepared)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 0.17798291699727997
+      "value": 0.178298500017263
     },
     {
       "area": "prepared",
       "name": "Read rows (mysqlconnector-prepared)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 1.7901810419862159
+      "value": 1.7834141660132445
     },
     {
       "area": "sqlalchemy",
       "name": "Core: read rows",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.056623624986968935
+      "value": 0.04899804200977087
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: load objects",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.24343658395810053
+      "value": 0.23395383299794048
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: stream objects (yield_per)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.19874941697344184
+      "value": 0.19255866698222235
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: bulk insert",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.5270643329713494
+      "value": 0.5209366249619052
     },
     {
       "area": "sqlalchemy",
       "name": "Core: read rows",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.5412535410141572
+      "value": 0.472206832957454
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: load objects",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 2.585467167024035
+      "value": 2.4679545830003917
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: stream objects (yield_per)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 1.8890842919936404
+      "value": 1.8510397920035757
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: bulk insert",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 5.3458027499727905
+      "value": 5.329875040974002
     },
     {
       "area": "sqlalchemy",
       "name": "Core: read rows",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 0.15000541700283065
+      "value": 0.14191537501756102
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: load objects",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 0.32325737504288554
+      "value": 0.3161543750320561
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: stream objects (yield_per)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 0.25856516597559676
+      "value": 0.2527202080236748
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: bulk insert",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 1.2855894159874879
+      "value": 1.3798186250496656
     },
     {
       "area": "sqlalchemy",
       "name": "Core: read rows",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 1.3217509579844773
+      "value": 1.3216887500020675
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: load objects",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 3.3683437499566935
+      "value": 3.392077208030969
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: stream objects (yield_per)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 2.456386666977778
+      "value": 2.411105665960349
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: bulk insert",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 15.139374500024132
+      "value": 14.470247332996223
     },
     {
       "area": "sqlalchemy",
       "name": "Core: read rows",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 0.32582516700495034
+      "value": 0.3234824999817647
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: load objects",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 0.5134909999906085
+      "value": 0.5098742920090444
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: stream objects (yield_per)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 0.47940258303424343
+      "value": 0.4783902079798281
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: bulk insert",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 0.8926938750082627
+      "value": 0.8772222499828786
     },
     {
       "area": "sqlalchemy",
       "name": "Core: read rows",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 3.2848194170510396
+      "value": 3.2565142500097863
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: load objects",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 5.288575625047088
+      "value": 5.286584333982319
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: stream objects (yield_per)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 4.712939749995712
+      "value": 4.698120541987009
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: bulk insert",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 9.071596249996219
+      "value": 8.898800916969776
     },
     {
       "area": "sqlalchemy",
       "name": "Core: read rows",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 0.16766249999636784
+      "value": 0.16516608302481472
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: load objects",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 0.3566779159591533
+      "value": 0.35381933400640264
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: stream objects (yield_per)",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 0.329627041995991
+      "value": 0.3266357920365408
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: bulk insert",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 1.008909332973417
+      "value": 0.9956314580049366
     },
     {
       "area": "sqlalchemy",
       "name": "Core: read rows",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 1.6822227080119774
+      "value": 1.6559667909750715
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: load objects",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 3.7374289170256816
+      "value": 3.7268577920040116
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: stream objects (yield_per)",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 3.2452739999862388
+      "value": 3.1751407500123605
     },
     {
       "area": "sqlalchemy",
       "name": "ORM: bulk insert",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 9.941085374972317
+      "value": 9.693655166949611
     },
     {
       "area": "django",
       "name": "QuerySet: load objects",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.20043641602387652
+      "value": 0.2076687919907272
     },
     {
       "area": "django",
       "name": "QuerySet: values_list()",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.04545625002356246
+      "value": 0.047243834007531404
     },
     {
       "area": "django",
       "name": "QuerySet: iterator()",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.1784381250035949
+      "value": 0.17386141698807478
     },
     {
       "area": "django",
       "name": "bulk_create()",
       "rows": 100000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 1.1747260420233943
+      "value": 1.134090457984712
     },
     {
       "area": "django",
       "name": "QuerySet: load objects",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 1.920468709024135
+      "value": 1.9831664999946952
     },
     {
       "area": "django",
       "name": "QuerySet: values_list()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 0.4248774580191821
+      "value": 0.434180790965911
     },
     {
       "area": "django",
       "name": "QuerySet: iterator()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 1.6774207500275224
+      "value": 1.6800398339983076
     },
     {
       "area": "django",
       "name": "bulk_create()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 11.432254915998783
+      "value": 11.283090915996581
     },
     {
       "area": "django",
       "name": "QuerySet: load objects",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 0.2898299170192331
+      "value": 0.2894279579631984
     },
     {
       "area": "django",
       "name": "QuerySet: values_list()",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 0.1388944589998573
+      "value": 0.1348143750219606
     },
     {
       "area": "django",
       "name": "QuerySet: iterator()",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 0.24831895797979087
+      "value": 0.25139883399242535
     },
     {
       "area": "django",
       "name": "bulk_create()",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 1.3998367909807712
+      "value": 1.3561714579700492
     },
     {
       "area": "django",
       "name": "QuerySet: load objects",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 2.696017500013113
+      "value": 2.6870063329697587
     },
     {
       "area": "django",
       "name": "QuerySet: values_list()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 1.210607083979994
+      "value": 1.2086757500073873
     },
     {
       "area": "django",
       "name": "QuerySet: iterator()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 2.4154518750146963
+      "value": 2.442748125002254
     },
     {
       "area": "django",
       "name": "bulk_create()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 13.827372624946292
+      "value": 13.748205375042744
     },
     {
       "area": "django",
       "name": "QuerySet: load objects",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 0.48059520800597966
+      "value": 0.4769365840475075
     },
     {
       "area": "django",
       "name": "QuerySet: values_list()",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 0.3282463749637827
+      "value": 0.32395791698945686
     },
     {
       "area": "django",
       "name": "QuerySet: iterator()",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 0.4479684170219116
+      "value": 0.4474935829639435
     },
     {
       "area": "django",
       "name": "bulk_create()",
       "rows": 100000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 1.4467153329751454
+      "value": 1.395669707970228
     },
     {
       "area": "django",
       "name": "QuerySet: load objects",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 4.729276541038416
+      "value": 4.753691416990478
     },
     {
       "area": "django",
       "name": "QuerySet: values_list()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 3.250295583042316
+      "value": 3.275598833046388
     },
     {
       "area": "django",
       "name": "QuerySet: iterator()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 4.4865813329815865
+      "value": 4.533009375038091
     },
     {
       "area": "django",
       "name": "bulk_create()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
-      "value": 13.91770724998787
+      "value": 13.77314862498315
     },
     {
       "area": "django",
       "name": "QuerySet: load objects",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 0.412743832974229
+      "value": 0.3957866670098156
     },
     {
       "area": "django",
       "name": "QuerySet: values_list()",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 0.2531503749778494
+      "value": 0.2463484590407461
     },
     {
       "area": "django",
       "name": "QuerySet: iterator()",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 0.36880787496920675
+      "value": 0.3608086660387926
     },
     {
       "area": "django",
       "name": "bulk_create()",
       "rows": 100000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 1.898706834006589
+      "value": 1.9180866249953397
     },
     {
       "area": "django",
       "name": "QuerySet: load objects",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 4.016560124990065
+      "value": 3.9402467909967527
     },
     {
       "area": "django",
       "name": "QuerySet: values_list()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 2.566470791003667
+      "value": 2.4336483749793842
     },
     {
       "area": "django",
       "name": "QuerySet: iterator()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 3.630042333039455
+      "value": 3.5937016250099987
     },
     {
       "area": "django",
       "name": "bulk_create()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 18.959002542018425
+      "value": 19.091852125013247
     },
     {
       "area": "memory",
       "name": "Peak memory of fetchall()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "rustmy",
-      "value": 503.984375
+      "value": 504.09375
     },
     {
       "area": "memory",
       "name": "Peak memory of fetchall()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlclient",
-      "value": 696.609375
+      "value": 696.796875
     },
     {
       "area": "memory",
       "name": "Peak memory of fetchall()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "pymysql",
       "value": 511.609375
     },
@@ -767,8 +877,1071 @@
       "area": "memory",
       "name": "Peak memory of fetchall()",
       "rows": 1000000,
+      "unit": "rows",
       "driver": "mysqlconnector",
-      "value": 496.359375
+      "value": 496.3125
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.040065917011816055
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.050996792037039995
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.058204917004331946
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.3386405829805881
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.326709209010005
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.5323809999972582
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.5354540839907713
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 4.07096979097696
+    },
+    {
+      "area": "asyncio",
+      "name": "Pool: 32 tasks, 8 connections",
+      "rows": 6400,
+      "unit": "queries",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.17277141701197252
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.035057750006671995
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.06223883299389854
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.06150408397661522
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.5381145409774035
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.3758861250244081
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.6925202499842271
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.5498071669717319
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 5.483653416042216
+    },
+    {
+      "area": "asyncio",
+      "name": "Pool: 32 tasks, 8 connections",
+      "rows": 6400,
+      "unit": "queries",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.1788793340092525
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 0.3708432089770213
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 0.4056088330107741
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 0.3942420000093989
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 0.6280599579913542
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 3.811810625018552
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 4.132255874981638
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 3.954224792018067
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 6.3241906670155
+    },
+    {
+      "area": "asyncio",
+      "name": "Pool: 32 tasks, 8 connections",
+      "rows": 6400,
+      "unit": "queries",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 0.40788558300118893
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "asyncio",
+      "value": 0.4536970829940401
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "asyncio",
+      "value": 0.5088888329919428
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "asyncio",
+      "value": 0.59884166700067
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "asyncio",
+      "value": 1.0332339169690385
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "asyncio",
+      "value": 4.585119874973316
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "asyncio",
+      "value": 5.091779625043273
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "asyncio",
+      "value": 5.983778208028525
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "asyncio",
+      "value": 10.118721875012852
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.03720479103503749
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.049418624956160784
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.05754262499976903
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.35065154201583937
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.2979847500100732
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.46122891700360924
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.5352723330142908
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 4.023465666978154
+    },
+    {
+      "area": "asyncio",
+      "name": "Pool: 32 tasks, 8 connections",
+      "rows": 6400,
+      "unit": "queries",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.16502654197392985
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.04069875000277534
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.0591041250154376
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.0612669579568319
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.5229377920040861
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.32977945799939334
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.5577574580092914
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.593510625010822
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 5.348717792017851
+    },
+    {
+      "area": "asyncio",
+      "name": "Pool: 32 tasks, 8 connections",
+      "rows": 6400,
+      "unit": "queries",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.1578483339981176
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 0.3716621670173481
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 0.4068642079946585
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 0.39852654200512916
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 0.6097758330288343
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 3.7597352910088375
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 4.104347416025121
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 3.9713353750412352
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 6.205084916960914
+    },
+    {
+      "area": "asyncio",
+      "name": "Pool: 32 tasks, 8 connections",
+      "rows": 6400,
+      "unit": "queries",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 0.3541350830346346
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "uvloop",
+      "value": 0.4537852919893339
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "uvloop",
+      "value": 0.5095135840238072
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "uvloop",
+      "value": 0.5995477079995908
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "uvloop",
+      "value": 1.0727803750196472
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (tuples)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "uvloop",
+      "value": 4.617841208004393
+    },
+    {
+      "area": "asyncio",
+      "name": "Read rows (dicts)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "uvloop",
+      "value": 5.117744749994017
+    },
+    {
+      "area": "asyncio",
+      "name": "Stream rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "uvloop",
+      "value": 5.994978707982227
+    },
+    {
+      "area": "asyncio",
+      "name": "Insert rows (executemany)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "mysqlconnector",
+      "loop": "uvloop",
+      "value": 10.648221499985084
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "Core: read rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.049031500006094575
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: load objects",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.23652766703162342
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: stream objects (yield_per)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.4520341250463389
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: bulk insert",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.561273249972146
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "Core: read rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 0.4532624580315314
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: load objects",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 2.892298666993156
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: stream objects (yield_per)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 5.076655792014208
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: bulk insert",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "asyncio",
+      "value": 6.548181875026785
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "Core: read rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.0483286670059897
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: load objects",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.256664999993518
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: stream objects (yield_per)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.45306220900965855
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: bulk insert",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.7691972909960896
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "Core: read rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 0.56515074998606
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: load objects",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 3.066825499990955
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: stream objects (yield_per)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 5.447605625027791
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: bulk insert",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "asyncio",
+      "value": 8.490533041011076
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "Core: read rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 0.3865197909763083
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: load objects",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 0.5733204160351306
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: stream objects (yield_per)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 0.807831583020743
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: bulk insert",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 0.8535024169832468
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "Core: read rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 3.868567083030939
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: load objects",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 6.3719675409956835
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: stream objects (yield_per)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 9.00361554097617
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: bulk insert",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "asyncio",
+      "value": 9.321905374992639
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "Core: read rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.05224333400838077
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: load objects",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.2514380830107257
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: stream objects (yield_per)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.4487511669867672
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: bulk insert",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.5571345000062138
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "Core: read rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 0.48147858399897814
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: load objects",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 2.683085500029847
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: stream objects (yield_per)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 5.271766958001535
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: bulk insert",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "rustmy",
+      "loop": "uvloop",
+      "value": 6.466402666992508
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "Core: read rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.055509166966658086
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: load objects",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.24574766703881323
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: stream objects (yield_per)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.4661810839897953
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: bulk insert",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.7723716659820639
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "Core: read rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 0.5108872079872526
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: load objects",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 2.8105887499987148
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: stream objects (yield_per)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 5.311113458010368
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: bulk insert",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "asyncmy",
+      "loop": "uvloop",
+      "value": 8.521345999964979
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "Core: read rows",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 0.39542216598056257
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: load objects",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 0.5773738339776173
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: stream objects (yield_per)",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 0.8027435829862952
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: bulk insert",
+      "rows": 100000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 0.8416520419996232
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "Core: read rows",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 3.8984823750215583
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: load objects",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 6.3837746669887565
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: stream objects (yield_per)",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 8.940353374986444
+    },
+    {
+      "area": "sqlalchemy-asyncio",
+      "name": "ORM: bulk insert",
+      "rows": 1000000,
+      "unit": "rows",
+      "driver": "aiomysql",
+      "loop": "uvloop",
+      "value": 9.318320958002005
     }
   ]
 }
