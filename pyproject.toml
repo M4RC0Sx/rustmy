@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rustmy"
-description = "Fast DB-API 2.0 driver for MySQL/MariaDB written in Rust, no system libraries required"
+description = "Fast DB-API 2.0 and asyncio driver for MySQL/MariaDB written in Rust, no system libraries required"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
@@ -16,6 +16,7 @@ keywords = [
     "mariadb",
     "dbapi",
     "pep249",
+    "asyncio",
     "database",
     "driver",
     "sqlalchemy",
@@ -24,6 +25,7 @@ keywords = [
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
+    "Framework :: AsyncIO",
     "Intended Audience :: Developers",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
@@ -87,6 +89,8 @@ dev = [
 # the default sync: `uv sync --group bench`.
 bench = [
     # Only to compare with in benches/showcase.py; never shipped.
+    "aiomysql>=0.2",
+    "asyncmy>=0.2.10",
     "django>=5.2",
     # Charts only (report.py, showcase_render.py). Python 3.11+: Pillow, its
     # dependency, has no fixed release for 3.10 (Pillow 13 dropped it).
@@ -94,6 +98,7 @@ bench = [
     "mysql-connector-python>=9.4",
     "mysqlclient>=2.2",
     "pytest-benchmark>=5.1",
+    "uvloop>=0.21; sys_platform != 'win32'",
 ]
 
 [tool.uv]
@@ -218,7 +223,8 @@ exclude = ['^tests/dbapi20\.py$']  # see the tests.dbapi20 override below
 # reference drivers ship no type information either.
 module = [
     "MySQLdb", "MySQLdb.*", "pymysql", "pymysql.*", "matplotlib", "matplotlib.*",
-    "mysql", "mysql.*", "django", "django.*",
+    "mysql", "mysql.*", "django", "django.*", "asyncmy", "asyncmy.*", "aiomysql",
+    "uvloop",
 ]
 ignore_missing_imports = true
 

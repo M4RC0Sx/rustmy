@@ -6,9 +6,10 @@ change fits with what is already there. For a bug or a feature, an issue first
 is welcome (the templates ask for what is needed); vulnerabilities go privately,
 as [SECURITY.md](SECURITY.md) explains.
 
-`rustmy` is a **synchronous** MySQL/MariaDB driver for Python written in Rust
-(PyO3 + maturin): DB-API 2.0 with `paramstyle = "format"` (`%s`,
-`%(name)s`), its own SQLAlchemy dialect, a Django backend through
+`rustmy` is a MySQL/MariaDB driver for Python written in Rust (PyO3 +
+maturin): DB-API 2.0 with `paramstyle = "format"` (`%s`, `%(name)s`), an
+asyncio API (`rustmy.aio`) over the same protocol code, connection pools,
+its own SQLAlchemy dialects (blocking and asyncio), a Django backend through
 `install_as_MySQLdb()`, and wheels with no system dependencies, licensed
 `MIT OR Apache-2.0`.
 
@@ -492,10 +493,11 @@ thread, serving waiters through futures; giving a connection back that
 needs no command (no transaction open, no `reset_on_release`) happens on
 the spot, with an already done future and no turn of the loop (a task per
 release cost 30 µs). Waiters are served strictly in order: under
-saturation that costs about 8% of throughput against asyncmy, whose
-releasing task takes the connection back ahead of the waiters, but bounds
-the wait (32 tasks over 8 connections: 2.6 ms at most against asyncmy's
-102 ms).
+saturation each handover costs a turn of the loop before the waiter sends
+its query (2–3% of throughput against asyncmy locally, 10% with 1 ms of
+latency, in the showcase's pool workload), since asyncmy's releasing task
+takes the connection back ahead of the waiters; but the wait stays bounded
+(32 tasks over 8 connections: 2.6 ms at most against asyncmy's 102 ms).
 
 **SQLAlchemy**: `rustmy/dialect.py` holds `RustmyMySQLDialect` and
 `RustmyMariaDBDialect` (`mysql+rustmy`, `mariadb+rustmy`, through entry
