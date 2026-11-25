@@ -4,6 +4,8 @@ They are defined in the native module (so Rust can raise them without
 importing Python code) and re-exported here. Every exception carries
 ``(code, message)`` as its ``args``.
 
+:class:`PoolTimeout` is rustmy's own, raised by the pools.
+
 :class:`OutOfRangeError` (server error 1690, a numeric value out of range)
 is both a :class:`DataError`, as its SQLSTATE says, and an
 :class:`OperationalError`, as mysqlclient raises it: Django turns that one
@@ -23,6 +25,10 @@ from rustmy._core import ProgrammingError
 from rustmy._core import Warning  # noqa: A004  # PEP 249 mandates the name
 
 
+class PoolTimeout(OperationalError):  # noqa: N818  # the name pools use (psycopg_pool)
+    """No connection of a pool came free in time (``acquire(timeout=…)``)."""
+
+
 __all__ = [
     "DataError",
     "DatabaseError",
@@ -33,6 +39,7 @@ __all__ = [
     "NotSupportedError",
     "OperationalError",
     "OutOfRangeError",
+    "PoolTimeout",
     "ProgrammingError",
     "Warning",
 ]

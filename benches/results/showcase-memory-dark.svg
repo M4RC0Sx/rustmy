@@ -38,8 +38,8 @@ z
    </g>
    <g id="patch_3">
     <path d="M 144 61.854545 
-L 286.065565 61.854545 
-L 286.065565 76.428127 
+L 286.05816 61.854545 
+L 286.05816 76.428127 
 L 144 76.428127 
 z
 " clip-path="url(#p342110a3bc)" style="fill: #3987e5; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
@@ -54,16 +54,16 @@ z
    </g>
    <g id="patch_5">
     <path d="M 144 108.866097 
-L 288.214937 108.866097 
-L 288.214937 123.439679 
+L 288.176131 108.866097 
+L 288.176131 123.439679 
 L 144 123.439679 
 z
 " clip-path="url(#p342110a3bc)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
    </g>
    <g id="patch_6">
     <path d="M 144 132.371873 
-L 283.916193 132.371873 
-L 283.916193 146.945455 
+L 283.865333 132.371873 
+L 283.865333 146.945455 
 L 144 146.945455 
 z
 " clip-path="url(#p342110a3bc)" style="fill: #6e6d68; stroke: #1a1a19; stroke-width: 2; stroke-linejoin: miter"/>
@@ -101,16 +101,16 @@ L 144 57.6
 " style="fill: none; stroke: #3a3a37; stroke-width: 0.8; stroke-linejoin: miter; stroke-linecap: square"/>
    </g>
    <g id="text_5">
-    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="289.992838" y="71.349676" transform="rotate(-0 289.992838 71.349676)">504 MiB</text>
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #f0efec" x="289.985433" y="71.349676" transform="rotate(-0 289.985433 71.349676)">504 MiB</text>
    </g>
    <g id="text_6">
     <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="344.290909" y="94.855452" transform="rotate(-0 344.290909 94.855452)">697 MiB</text>
    </g>
    <g id="text_7">
-    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="292.14221" y="118.361228" transform="rotate(-0 292.14221 118.361228)">512 MiB</text>
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="292.103403" y="118.361228" transform="rotate(-0 292.103403 118.361228)">512 MiB</text>
    </g>
    <g id="text_8">
-    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="287.843466" y="141.867004" transform="rotate(-0 287.843466 141.867004)">496 MiB</text>
+    <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="287.792606" y="141.867004" transform="rotate(-0 287.792606 141.867004)">496 MiB</text>
    </g>
    <g id="text_9">
     <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start; fill: #c3c2b7" x="144" y="29.52" transform="rotate(-0 144 29.52)">Peak memory of fetchall(), 1,000,000 rows</text>

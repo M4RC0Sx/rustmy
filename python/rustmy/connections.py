@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import os
-
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import TypeAlias
 from typing import TypeVar
 from typing import overload
 
+from rustmy import _connect_args
 from rustmy import _core
-from rustmy import _option_files
-from rustmy import _tls
 from rustmy import err
-from rustmy.constants import CLIENT
 from rustmy.converters import encoders as default_encoders
 from rustmy.converters import escape_string
 from rustmy.converters import split_conv
@@ -40,65 +36,10 @@ if TYPE_CHECKING:
 # Server status flags (see the protocol's SERVER_STATUS_* values).
 _STATUS_AUTOCOMMIT = 1 << 1
 _STATUS_NO_BACKSLASH_ESCAPES = 1 << 9
-#: Character sets whose handshake collation id some supported server does
-#: not know (MariaDB has no gb18030): it would keep its own default without
-#: an error. Every other character set the handshake sets exactly as
-#: ``SET NAMES`` would, on all supported servers
-#: (``test_charsets.py::test_the_handshake_sets_the_character_set``).
-_HANDSHAKE_MAY_IGNORE = frozenset({"gb18030"})
 
 PathArg: TypeAlias = "str | PathLike[str]"
 
 _CursorT = TypeVar("_CursorT", bound=Cursor)
-
-
-def _with_option_file(
-    path: PathArg | None, group: str | None, given: dict[str, Any]
-) -> dict[str, Any]:
-    """``given`` (the ``connect()`` arguments) with the ones left as ``None``
-    taken from the option file; flags in the file add to the arguments.
-    """
-    try:
-        from_file = _option_files.connect_args(_option_files.read(path, group))
-    except ValueError as exc:
-        raise err.ProgrammingError(0, str(exc)) from None
-    merged = dict(given)
-    for name, value in from_file.items():
-        if name in {"multi_statements", "local_infile"}:
-            merged[name] = bool(given[name]) or bool(value)
-        elif name == "compress":
-            merged[name] = given[name] or value
-        elif name == "found_rows":
-            if value:
-                merged["client_flag"] = given["client_flag"] | CLIENT.FOUND_ROWS
-        elif name in given and given[name] is None:
-            merged[name] = value
-    return merged
-
-
-#: Seconds ``connect()`` waits by default for the server to accept and
-#: authenticate the connection.
-_DEFAULT_CONNECT_TIMEOUT = 15.0
-
-
-def _connect_timeout(seconds: float | None) -> float | None:
-    """``connect(connect_timeout=…)`` as the core takes it: the default
-    when not given, and ``None`` (no limit) for ``0``.
-    """
-    if seconds is None:
-        return _DEFAULT_CONNECT_TIMEOUT
-    return None if seconds == 0 else seconds
-
-
-def _compression(compress: object) -> str | None:
-    """``connect(compress=…)`` as the algorithm to ask for."""
-    if isinstance(compress, str):
-        if compress in {"zlib", "zstd"}:
-            return compress
-        msg = f"invalid compress {compress!r}; expected True, 'zlib' or 'zstd'"
-        raise ValueError(msg)
-    # True, or a number as mysqlclient takes it.
-    return "zlib" if compress else None
 
 
 class Connection:
@@ -269,99 +210,44 @@ class Connection:
         pinned key, and fail with :class:`~rustmy.err.OperationalError` 2061
         otherwise.
         """
-        if passwd is not None:
-            password = passwd
-        if db is not None:
-            database = db
-        if read_default_file is not None or read_default_group is not None:
-            args = _with_option_file(
-                read_default_file,
-                read_default_group,
-                {
-                    "host": host,
-                    "user": user,
-                    "password": password,
-                    "database": database,
-                    "port": port,
-                    "unix_socket": unix_socket,
-                    "charset": charset,
-                    "connect_timeout": connect_timeout,
-                    "init_command": init_command,
-                    "server_public_key": server_public_key,
-                    "get_server_public_key": get_server_public_key,
-                    "multi_statements": multi_statements,
-                    "client_flag": client_flag,
-                    "compress": compress,
-                    "zstd_level": zstd_level,
-                    "local_infile": local_infile,
-                    "local_infile_dir": local_infile_dir,
-                    # An ``ssl`` dict says all there is to say about TLS.
-                    **(
-                        {}
-                        if ssl is not None
-                        else {
-                            "ssl_mode": ssl_mode,
-                            "ssl_ca": ssl_ca,
-                            "ssl_cert": ssl_cert,
-                            "ssl_key": ssl_key,
-                        }
-                    ),
-                },
-            )
-            host, user, password = args["host"], args["user"], args["password"]
-            database, port = args["database"], args["port"]
-            unix_socket, charset = args["unix_socket"], args["charset"]
-            connect_timeout = args["connect_timeout"]
-            init_command = args["init_command"]
-            server_public_key = args["server_public_key"]
-            get_server_public_key = args["get_server_public_key"]
-            multi_statements = args["multi_statements"]
-            client_flag = args["client_flag"]
-            compress, zstd_level = args["compress"], args["zstd_level"]
-            local_infile = args["local_infile"]
-            local_infile_dir = args["local_infile_dir"]
-            if ssl is None:
-                ssl_mode, ssl_ca = args["ssl_mode"], args["ssl_ca"]
-                ssl_cert, ssl_key = args["ssl_cert"], args["ssl_key"]
-        tls = _tls.resolve(
+        args = _connect_args.resolve(
+            host=host,
+            user=user,
+            password=password,
+            database=database,
+            port=port,
+            unix_socket=unix_socket,
+            passwd=passwd,
+            db=db,
+            charset=charset,
+            collation=collation,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            write_timeout=write_timeout,
+            autocommit=autocommit,
+            init_command=init_command,
+            client_flag=client_flag,
+            multi_statements=multi_statements,
+            sql_mode=sql_mode,
             ssl_mode=ssl_mode,
             ssl_ca=ssl_ca,
             ssl_cert=ssl_cert,
             ssl_key=ssl_key,
             ssl=ssl,
+            server_public_key=server_public_key,
+            get_server_public_key=get_server_public_key,
+            binary_prefix=binary_prefix,
+            statement_cache_size=statement_cache_size,
+            compress=compress,
+            zstd_level=zstd_level,
+            local_infile=local_infile,
+            local_infile_dir=local_infile_dir,
+            read_default_file=read_default_file,
+            read_default_group=read_default_group,
         )
         # Set by close(), unlike `_conn.closed`, which a broken connection sets too.
         self._closed = False
-        self._conn = _core.connect(
-            host="localhost" if host is None else host,
-            port=3306 if port is None else port,
-            user="" if user is None else user,
-            password="" if password is None else password,
-            database=database,
-            unix_socket=unix_socket,
-            connect_timeout=_connect_timeout(connect_timeout),
-            read_timeout=read_timeout,
-            write_timeout=write_timeout,
-            client_flag=client_flag
-            | (CLIENT.MULTI_STATEMENTS if multi_statements else 0),
-            charset="utf8mb4" if charset is None else charset,
-            ssl_mode=tls.mode,
-            ssl_ca=tls.ca,
-            ssl_cert=tls.cert,
-            ssl_key=tls.key,
-            server_public_key=(
-                None if server_public_key is None else os.fspath(server_public_key)
-            ),
-            get_server_public_key=(
-                get_server_public_key is None or bool(get_server_public_key)
-            ),
-            binary_prefix=binary_prefix,
-            statement_cache_size=statement_cache_size,
-            compress=_compression(compress),
-            zstd_level=3 if zstd_level is None else zstd_level,
-            local_infile=bool(local_infile),
-            local_infile_dir=local_infile_dir,
-        )
+        self._conn = _core.connect(**args.core)
         self.cursorclass = cursorclass
         #: Python types to SQL literal encoders (MySQLdb's attribute), from
         #: ``conv``; :meth:`escape` takes it as its mapping.
@@ -378,11 +264,11 @@ class Connection:
         # supported server does not know: it silently ignores the collation
         # id and keeps its default, so only SET NAMES turns that into an
         # error.
-        self._collation = collation
-        self._set_names = collation is not None
-        self._sql_mode = sql_mode
-        self._init_command = init_command
-        self._autocommit_setting = autocommit
+        self._collation = args.collation
+        self._set_names = args.collation is not None
+        self._sql_mode = args.sql_mode
+        self._init_command = args.init_command
+        self._autocommit_setting = args.autocommit
         try:
             self._init_session(connecting=True)
         except BaseException:
@@ -390,39 +276,26 @@ class Connection:
             raise
 
     def _init_session(self, *, connecting: bool = False) -> None:
-        """Apply the per-session settings chosen at connect time, in as few
-        statements as possible (each one is a round trip).
-
-        After a reset, a character set other than the server's own is set
-        again: MySQL's reset returns the session to the server's default
-        character set rather than the one negotiated at connect time
-        (MariaDB keeps it).
-        """
+        """Apply the per-session settings chosen at connect time (see
+        :func:`rustmy._connect_args.session_plan`)."""
         conn = self._conn
-        settings: list[str] = []
-        params: list[object] = []
-        if self._set_names or (
-            conn.charset != conn.server_charset
-            and (not connecting or conn.charset in _HANDSHAKE_MAY_IGNORE)
-        ):
-            settings.append(_core.names_clause(conn.charset, self._collation))
-        if self._sql_mode is not None:
-            settings.append("sql_mode = %s")
-            params.append(self._sql_mode)
-        autocommit = self._autocommit_setting
-        if (
-            self._init_command is None
-            and autocommit is not None
-            and self.get_autocommit() != autocommit
-        ):
-            settings.append("autocommit = 1" if autocommit else "autocommit = 0")
-            autocommit = None
-        if settings:
-            conn.execute("SET " + ", ".join(settings), tuple(params) or None)
-        if self._init_command is not None:
-            self._query(self._init_command)
-        if autocommit is not None:
-            self.autocommit(autocommit)
+        plan = _connect_args.session_plan(
+            charset=conn.charset,
+            server_charset=conn.server_charset,
+            connecting=connecting,
+            set_names=self._set_names,
+            collation=self._collation,
+            sql_mode=self._sql_mode,
+            init_command=self._init_command,
+            autocommit=self._autocommit_setting,
+            server_autocommit=self.get_autocommit(),
+        )
+        if plan.settings is not None:
+            conn.execute(*plan.settings)
+        if plan.init_command is not None:
+            self._query(plan.init_command)
+        if plan.autocommit is not None:
+            self.autocommit(plan.autocommit)
 
     def _query(self, sql: str) -> QueryResult:
         return self._conn.query(sql)

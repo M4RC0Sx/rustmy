@@ -16,6 +16,9 @@ these differences:
   statement would override an explicit ``collation``.
 - A connection closed under SQLAlchemy (``InterfaceError``, "connection
   already closed") counts as a disconnect, so the pool replaces it.
+
+``create_async_engine`` with the same URL uses the asyncio dialects
+(:mod:`rustmy.aio.dialect`).
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine.interfaces import DBAPIConnection
     from sqlalchemy.engine.interfaces import DBAPICursor
     from sqlalchemy.engine.interfaces import DBAPIModule
+    from sqlalchemy.engine.interfaces import Dialect
     from sqlalchemy.engine.interfaces import PoolProxiedConnection
     from sqlalchemy.engine.url import URL
 
@@ -69,6 +73,13 @@ class RustmyMySQLDialect(MySQLDialect_mysqldb):
     @classmethod
     def import_dbapi(cls) -> ModuleType:
         return rustmy
+
+    @classmethod
+    def get_async_dialect_cls(cls, url: URL) -> type[Dialect]:  # noqa: ARG003  # SQLAlchemy's signature
+        """The asyncio dialect, for ``create_async_engine``."""
+        from rustmy.aio.dialect import RustmyAsyncMySQLDialect  # noqa: PLC0415  # asyncio only on demand
+
+        return RustmyAsyncMySQLDialect
 
     @classmethod
     def load_provisioning(cls) -> None:
@@ -132,3 +143,9 @@ class RustmyMySQLDialect(MySQLDialect_mysqldb):
 
 class RustmyMariaDBDialect(MariaDBDialect, RustmyMySQLDialect):
     supports_statement_cache = True
+
+    @classmethod
+    def get_async_dialect_cls(cls, url: URL) -> type[Dialect]:  # noqa: ARG003  # SQLAlchemy's signature
+        from rustmy.aio.dialect import RustmyAsyncMariaDBDialect  # noqa: PLC0415  # asyncio only on demand
+
+        return RustmyAsyncMariaDBDialect

@@ -6,7 +6,8 @@ name: pr-title
 # (Pull requests into master are merged as they are; their title is unused.)
 on:
   pull_request:
-    branches: [develop]
+    # feature/async: the asyncio integration branch; remove it once merged.
+    branches: [develop, feature/async]
     types: [opened, edited, reopened, synchronize]
 
 # Reading the title needs nothing more. (Not pull_request_target: GitHub runs

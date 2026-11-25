@@ -4,6 +4,7 @@
 //! Behaviour follows the other MySQL drivers (format paramstyle, literals
 //! the server parses back to the same value); the implementation is ours.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::io::Write as _;
 use std::sync::Arc;
@@ -218,7 +219,7 @@ fn slot_value<'a, 'py>(
     placeholder: Placeholder<'_>,
     args: &'a Args<'py>,
     next_positional: &mut usize,
-) -> PyResult<std::borrow::Cow<'a, Bound<'py, PyAny>>> {
+) -> PyResult<Cow<'a, Bound<'py, PyAny>>> {
     match (placeholder, args) {
         (Placeholder::Positional, Args::Positional(values)) => {
             let value = values.get(*next_positional).ok_or_else(|| {
@@ -228,14 +229,14 @@ fn slot_value<'a, 'py>(
                 ))
             })?;
             *next_positional += 1;
-            Ok(std::borrow::Cow::Borrowed(value))
+            Ok(Cow::Borrowed(value))
         }
         (Placeholder::Positional, Args::Named(_)) => Err(programming_error(
             "%s placeholder used with mapping parameters; use %(name)s",
         )),
         (Placeholder::Named(name), Args::Named(mapping)) => mapping
             .get_item(name)
-            .map(std::borrow::Cow::Owned)
+            .map(Cow::Owned)
             .map_err(|_| programming_error(format!("missing parameter {name:?}"))),
         (Placeholder::Named(name), Args::Positional(_)) => Err(programming_error(format!(
             "%({name})s placeholder needs mapping parameters"
@@ -324,6 +325,32 @@ impl<'t> TemplateSink<'t> for Prepare<'_, '_> {
         });
         Ok(())
     }
+}
+
+/// `query` with `args` interpolated, in the encoder's character set: the
+/// statement as sent. Without arguments, a `utf8mb4` or ASCII query is used
+/// as it is.
+pub(crate) fn statement<'a>(
+    encoder: &Encoder,
+    query: &'a Bound<'_, PyString>,
+    args: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Cow<'a, [u8]>> {
+    let template = query.to_str()?;
+    Ok(match args.filter(|a| !a.is_none()) {
+        None if encoder.codec.is_utf8mb4() || template.is_ascii() => {
+            Cow::Borrowed(template.as_bytes())
+        }
+        None => {
+            let mut out = Vec::with_capacity(template.len() + 16);
+            encoder.codec.encode_into(query.py(), &mut out, template)?;
+            Cow::Owned(out)
+        }
+        Some(args) => {
+            let mut out = Vec::with_capacity(template.len() + 64);
+            encoder.interpolate(query.py(), &mut out, template, &Args::from_py(args))?;
+            Cow::Owned(out)
+        }
+    })
 }
 
 impl Encoder {

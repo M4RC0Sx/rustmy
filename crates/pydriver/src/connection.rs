@@ -31,9 +31,13 @@ use rustmy_proto::StreamId;
 use rustmy_proto::TlsOpts;
 use rustmy_proto::charset::charset_of;
 use rustmy_proto::constants::status;
-use rustmy_proto::sql::insert_values;
-use rustmy_proto::sql::mentions_local_infile;
 
+use crate::batch::InsertBatch;
+use crate::batch::Pipeline;
+use crate::batch::PreparedInsertBatch;
+use crate::batch::PreparedPipeline;
+use crate::batch::PreparedRun;
+use crate::batch::Window;
 use crate::charset::Codec;
 use crate::charset::UTF8;
 use crate::convert::Converter;
@@ -48,8 +52,7 @@ use crate::errors::client_code;
 use crate::errors::from_proto;
 use crate::params::Args;
 use crate::params::Encoder;
-use crate::params::has_placeholder;
-use crate::params::unescape_percent;
+use crate::params::statement;
 use crate::stream::ResultStream;
 
 #[derive(Debug)]
@@ -107,9 +110,33 @@ type PipelinedMany<'py> = (Py<PyAny>, u64, Bound<'py, PyBytes>);
 /// no placeholders (DDL and introspection, some of which the server cannot
 /// prepare or answers differently when prepared).
 #[derive(Debug)]
-enum Plan {
+pub(crate) enum Plan {
     Text(Vec<u8>),
     Prepared(Vec<u8>, Execute),
+}
+
+/// How `query` with `args` runs on a `PreparedCursor`: prepared with its
+/// placeholders bound to `args`, or as text when there is nothing to bind.
+pub(crate) fn prepared_plan(
+    py: Python<'_>,
+    encoder: &Encoder,
+    query: &Bound<'_, PyString>,
+    args: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Plan> {
+    let Some(args) = args.filter(|a| !a.is_none()) else {
+        return Ok(Plan::Text(statement(encoder, query, None)?.into_owned()));
+    };
+    let prepared = encoder.prepared_sql(py, query.to_str()?)?;
+    if prepared.slots.is_empty() {
+        // Interpolation still turns `%%` into `%` and checks that no
+        // argument is left over.
+        return Ok(Plan::Text(
+            statement(encoder, query, Some(args))?.into_owned(),
+        ));
+    }
+    let mut params = Execute::default();
+    encoder.bind(py, &mut params, &prepared.slots, &Args::from_py(args))?;
+    Ok(Plan::Prepared(prepared.sql, params))
 }
 
 impl Plan {
@@ -118,36 +145,6 @@ impl Plan {
             Self::Text(sql) => conn.query_streamed(sql),
             Self::Prepared(sql, params) => conn.execute_cached_streamed(sql, params),
         }
-    }
-}
-
-/// Statements of one pipelined `executemany` window, back to back.
-#[derive(Debug, Default)]
-struct Window {
-    bytes: Vec<u8>,
-    ends: Vec<usize>,
-}
-
-impl Window {
-    const fn len(&self) -> usize {
-        self.ends.len()
-    }
-
-    fn push(&mut self, statement: &[u8]) {
-        self.bytes.extend_from_slice(statement);
-        self.ends.push(self.bytes.len());
-    }
-
-    fn clear(&mut self) {
-        self.bytes.clear();
-        self.ends.clear();
-    }
-
-    fn statements(&self) -> impl Iterator<Item = &[u8]> + Send {
-        let starts = std::iter::once(0).chain(self.ends.iter().copied());
-        starts
-            .zip(self.ends.iter().copied())
-            .map(|(start, end)| self.bytes.get(start..end).unwrap_or_default())
     }
 }
 
@@ -474,23 +471,7 @@ impl Connection {
         query: &'a Bound<'_, PyString>,
         args: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Cow<'a, [u8]>> {
-        let template = query.to_str()?;
-        let encoder = self.encoder()?;
-        Ok(match args.filter(|a| !a.is_none()) {
-            None if encoder.codec.is_utf8mb4() || template.is_ascii() => {
-                Cow::Borrowed(template.as_bytes())
-            }
-            None => {
-                let mut out = Vec::with_capacity(template.len() + 16);
-                encoder.codec.encode_into(query.py(), &mut out, template)?;
-                Cow::Owned(out)
-            }
-            Some(args) => {
-                let mut out = Vec::with_capacity(template.len() + 64);
-                encoder.interpolate(query.py(), &mut out, template, &Args::from_py(args))?;
-                Cow::Owned(out)
-            }
-        })
+        statement(&self.encoder()?, query, args)
     }
 
     /// Reads connection state that needs no I/O, keeping the GIL.
@@ -538,41 +519,28 @@ impl Connection {
     ) -> PyResult<Option<PipelinedMany<'py>>> {
         let py = slf.py();
         let this = slf.get();
-        let template = query.to_str()?;
-        let encoder = this.encoder()?;
         let budget = this.peek(Conn::pipeline_budget)?;
-        // The server reads whatever follows a LOAD DATA LOCAL as its file:
-        // one statement per window.
-        let max_pipeline = if mentions_local_infile(template.as_bytes()) {
-            1
-        } else {
-            max_pipeline.max(1)
-        };
-        let mut window = Window::default();
-        let mut statement = Vec::new();
+        let mut pipeline = Pipeline::new(this.encoder()?, query.to_str()?, max_pipeline, budget);
         let mut rowcount = 0;
         for item in seq_of_args.try_iter()? {
-            statement.clear();
-            let built = item.and_then(|args| {
-                encoder.interpolate(py, &mut statement, template, &Args::from_py(&args))
-            });
-            if let Err(err) = built {
-                // The statements before it run, as in a loop of execute()
-                // calls.
-                if window.len() > 0 {
-                    this.run_window(py, &window)?;
+            match item.and_then(|args| pipeline.add(py, &args)) {
+                Ok(Some(full)) => {
+                    rowcount += this.run_window(py, &full)?;
+                    py.check_signals()?;
                 }
-                return Err(err);
+                Ok(None) => {}
+                Err(err) => {
+                    // The statements before it run, as in a loop of
+                    // execute() calls.
+                    let pending = pipeline.take();
+                    if pending.len() > 0 {
+                        this.run_window(py, &pending)?;
+                    }
+                    return Err(err);
+                }
             }
-            if window.len() > 0
-                && (window.len() >= max_pipeline || window.bytes.len() + statement.len() > budget)
-            {
-                rowcount += this.run_window(py, &window)?;
-                window.clear();
-                py.check_signals()?;
-            }
-            window.push(&statement);
         }
+        let window = pipeline.take();
         let Some(last) = window.statements().last() else {
             return Ok(None);
         };
@@ -602,19 +570,7 @@ impl Connection {
         query: &Bound<'_, PyString>,
         args: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Plan> {
-        let Some(args) = args.filter(|a| !a.is_none()) else {
-            return Ok(Plan::Text(self.statement(query, None)?.into_owned()));
-        };
-        let encoder = self.encoder()?;
-        let prepared = encoder.prepared_sql(py, query.to_str()?)?;
-        if prepared.slots.is_empty() {
-            // Interpolation still turns `%%` into `%` and checks that no
-            // argument is left over.
-            return Ok(Plan::Text(self.statement(query, Some(args))?.into_owned()));
-        }
-        let mut params = Execute::default();
-        encoder.bind(py, &mut params, &prepared.slots, &Args::from_py(args))?;
-        Ok(Plan::Prepared(prepared.sql, params))
+        prepared_plan(py, &self.encoder()?, query, args)
     }
 
     /// Runs one window of a prepared `executemany`; the first server error
@@ -642,10 +598,10 @@ impl Connection {
     ) -> PyResult<Option<PipelinedMany<'py>>> {
         let py = slf.py();
         let this = slf.get();
-        let template = query.to_str()?;
-        let encoder = this.encoder()?;
-        let prepared = encoder.prepared_sql(py, template)?;
-        if prepared.slots.is_empty() {
+        let budget = this.peek(Conn::pipeline_budget)?;
+        let Some(mut pipeline) =
+            PreparedPipeline::new(py, this.encoder()?, query.to_str()?, max_pipeline, budget)?
+        else {
             return Self::pipelined_many(
                 slf,
                 query,
@@ -655,44 +611,29 @@ impl Connection {
                 as_dict,
                 batch_bytes,
             );
-        }
-        let sql = prepared.sql;
-        let budget = this.peek(Conn::pipeline_budget)?;
-        let max_pipeline = max_pipeline.max(1);
-        let mut window: Vec<Execute> = Vec::new();
-        let mut window_bytes = 0;
+        };
+        let sql = pipeline.sql().to_vec();
         let mut rowcount = 0;
-        let mut last_args = None;
         for item in seq_of_args.try_iter()? {
-            let mut params = Execute::default();
-            let bound = item.and_then(|args| {
-                encoder.bind(py, &mut params, &prepared.slots, &Args::from_py(&args))?;
-                Ok(args)
-            });
-            let args = match bound {
-                Ok(args) => args,
+            match item.and_then(|args| pipeline.add(py, &args)) {
+                Ok(Some(full)) => {
+                    rowcount += this.run_prepared_window(py, &sql, &full)?;
+                    py.check_signals()?;
+                }
+                Ok(None) => {}
                 Err(err) => {
                     // The items before it run, as in a loop of execute()
                     // calls.
-                    if !window.is_empty() {
-                        this.run_prepared_window(py, &sql, &window)?;
+                    let pending = pipeline.take();
+                    if !pending.is_empty() {
+                        this.run_prepared_window(py, &sql, &pending)?;
                     }
                     return Err(err);
                 }
-            };
-            if !window.is_empty()
-                && (window.len() >= max_pipeline || window_bytes + params.encoded_len() > budget)
-            {
-                rowcount += this.run_prepared_window(py, &sql, &window)?;
-                window.clear();
-                window_bytes = 0;
-                py.check_signals()?;
             }
-            window_bytes += params.encoded_len();
-            window.push(params);
-            last_args = Some(args);
         }
-        let (Some(last), Some(last_args)) = (window.pop(), last_args) else {
+        let mut window = pipeline.take();
+        let (Some(last), Some(shown)) = (window.pop(), pipeline.shown_last(py)?) else {
             return Ok(None);
         };
         let mut before = 0;
@@ -709,8 +650,6 @@ impl Connection {
                 .unwrap_or_else(|| py.None())
         };
         // `_executed`: the last item as `mogrify` shows it.
-        let mut shown = Vec::new();
-        encoder.interpolate(py, &mut shown, template, &Args::from_py(&last_args))?;
         Ok(Some((result, rowcount + before, PyBytes::new(py, &shown))))
     }
 
@@ -725,22 +664,17 @@ impl Connection {
         })
     }
 
-    /// Runs one statement of an `executemany` batch and resets `sql` to
-    /// the prefix for the next one.
-    fn flush_batch(
+    /// Runs one statement of an `executemany` batch, adding it to
+    /// `totals`.
+    fn run_batch(
         &self,
         py: Python<'_>,
-        sql: &mut Vec<u8>,
-        suffix: &[u8],
-        prefix_len: usize,
+        statement: &[u8],
         totals: &mut (u64, Option<u64>),
     ) -> PyResult<()> {
-        sql.extend_from_slice(suffix);
-        let statement: &[u8] = sql;
         let result = self.with_conn(py, |conn| conn.query(statement))?;
         totals.0 += result.affected_rows;
         totals.1 = Some(result.last_insert_id);
-        sql.truncate(prefix_len);
         Ok(())
     }
 
@@ -911,53 +845,26 @@ impl Connection {
         seq_of_args: &Bound<'py, PyAny>,
         max_stmt_length: usize,
     ) -> PyResult<Option<BatchTotals<'py>>> {
-        let template = query.to_str()?;
-        let Some(parts) = insert_values(template.as_bytes()) else {
+        let Some(mut batch) =
+            InsertBatch::new(py, self.encoder()?, query.to_str()?, max_stmt_length)?
+        else {
             return Ok(None);
         };
-        // The parts split at ASCII tokens, hence at character boundaries;
-        // anything else runs row by row.
-        let (Some(prefix_template), Some(row_template), Some(suffix_template)) = (
-            template.get(parts.prefix),
-            template.get(parts.row),
-            template.get(parts.suffix),
-        ) else {
-            return Ok(None);
-        };
-        if has_placeholder(prefix_template.as_bytes())
-            || has_placeholder(suffix_template.as_bytes())
-        {
-            return Ok(None);
-        }
-        let encoder = self.encoder()?;
-        let prefix = unescape_percent(&encoder, py, prefix_template)?;
-        let suffix = unescape_percent(&encoder, py, suffix_template)?;
-
-        let mut sql = prefix.clone();
-        let mut row = Vec::new();
-        let mut rows_in_batch = 0usize;
         let mut totals = (0, None);
         for args in seq_of_args.try_iter()? {
-            row.clear();
-            encoder.interpolate(py, &mut row, row_template, &Args::from_py(&args?))?;
-            if rows_in_batch > 0 && sql.len() + 1 + row.len() + suffix.len() > max_stmt_length {
-                self.flush_batch(py, &mut sql, &suffix, prefix.len(), &mut totals)?;
-                rows_in_batch = 0;
+            if let Some(statement) = batch.add(py, &args?)? {
+                self.run_batch(py, &statement, &mut totals)?;
             }
-            if rows_in_batch > 0 {
-                sql.push(b',');
-            }
-            sql.extend_from_slice(&row);
-            rows_in_batch += 1;
         }
-        let mut last = None;
-        if rows_in_batch > 0 {
-            sql.extend_from_slice(&suffix);
-            last = Some(PyBytes::new(py, &sql));
-            sql.truncate(sql.len() - suffix.len());
-            self.flush_batch(py, &mut sql, &suffix, prefix.len(), &mut totals)?;
+        let last = batch.finish();
+        if let Some(statement) = &last {
+            self.run_batch(py, statement, &mut totals)?;
         }
-        Ok(Some((totals.0, totals.1, last)))
+        Ok(Some((
+            totals.0,
+            totals.1,
+            last.map(|statement| PyBytes::new(py, &statement)),
+        )))
     }
 
     /// `executemany` of a statement that is not a batchable `INSERT`, with
@@ -1020,82 +927,31 @@ impl Connection {
         seq_of_args: &Bound<'py, PyAny>,
         max_stmt_length: usize,
     ) -> PyResult<Option<BatchTotals<'py>>> {
-        let template = query.to_str()?;
-        let Some(parts) = insert_values(template.as_bytes()) else {
+        let Some(mut batch) =
+            PreparedInsertBatch::new(py, self.encoder()?, query.to_str()?, max_stmt_length)?
+        else {
             return Ok(None);
         };
-        let (Some(prefix), Some(row), Some(suffix)) = (
-            template.get(parts.prefix),
-            template.get(parts.row),
-            template.get(parts.suffix),
-        ) else {
-            return Ok(None);
-        };
-        if has_placeholder(prefix.as_bytes()) || has_placeholder(suffix.as_bytes()) {
-            return Ok(None);
-        }
-        let encoder = self.encoder()?;
-        let row_sql = encoder.prepared_sql(py, row)?;
-        if row_sql.slots.is_empty() {
-            return Ok(None);
-        }
-        let prefix_sql = encoder.prepared_sql(py, prefix)?.sql;
-        let suffix_sql = encoder.prepared_sql(py, suffix)?.sql;
-        let most_rows = (usize::from(u16::MAX) / row_sql.slots.len()).max(1);
-        let statement = |rows: usize| {
-            let mut sql = prefix_sql.clone();
-            for i in 0..rows {
-                if i > 0 {
-                    sql.push(b',');
-                }
-                sql.extend_from_slice(&row_sql.sql);
-            }
-            sql.extend_from_slice(&suffix_sql);
-            sql
-        };
-        let run = |batch: &Execute, rows: usize, totals: &mut (u64, Option<u64>)| {
-            let sql = statement(rows);
-            let result = self.with_conn(py, |conn| conn.execute_cached(&sql, batch))?;
+        let run = |prepared: &PreparedRun, totals: &mut (u64, Option<u64>)| {
+            let result = self.with_conn(py, |conn| {
+                conn.execute_cached(&prepared.sql, &prepared.params)
+            })?;
             totals.0 += result.affected_rows;
             totals.1 = Some(result.last_insert_id);
             PyResult::Ok(())
         };
-        let mut rows_per_statement = None;
-        let mut batch = Execute::default();
-        let mut batch_args = Vec::new();
         let mut totals = (0, None);
-        for item in seq_of_args.try_iter()? {
-            let args = item?;
-            let mut values = Execute::default();
-            encoder.bind(py, &mut values, &row_sql.slots, &Args::from_py(&args))?;
-            let limit = *rows_per_statement.get_or_insert_with(|| {
-                (max_stmt_length / values.encoded_len().max(1)).clamp(1, most_rows)
-            });
-            if !batch_args.is_empty()
-                && (batch_args.len() >= limit
-                    || batch.encoded_len() + values.encoded_len() > max_stmt_length)
-            {
-                run(&batch, batch_args.len(), &mut totals)?;
-                batch.clear();
-                batch_args.clear();
+        for args in seq_of_args.try_iter()? {
+            if let Some(prepared) = batch.add(py, &args?)? {
+                run(&prepared, &mut totals)?;
             }
-            batch.append(&values);
-            batch_args.push(args);
         }
-        if batch_args.is_empty() {
+        let Some((prepared, shown)) = batch.finish(py)? else {
             return Ok(Some((0, None, None)));
-        }
-        run(&batch, batch_args.len(), &mut totals)?;
+        };
+        run(&prepared, &mut totals)?;
         // `_executed`: the last statement, interpolated as `mogrify` shows
         // it.
-        let mut shown = unescape_percent(&encoder, py, prefix)?;
-        for (i, args) in batch_args.iter().enumerate() {
-            if i > 0 {
-                shown.push(b',');
-            }
-            encoder.interpolate(py, &mut shown, row, &Args::from_py(args))?;
-        }
-        shown.extend_from_slice(&unescape_percent(&encoder, py, suffix)?);
         Ok(Some((totals.0, totals.1, Some(PyBytes::new(py, &shown)))))
     }
 
@@ -1332,40 +1188,13 @@ fn sql_name<'a>(what: &str, name: &'a str) -> PyResult<&'a str> {
     }
 }
 
-/// Opens an authenticated connection. Python-facing argument handling
-/// (defaults, aliases) lives in `rustmy.connections`.
-#[pyfunction]
-#[pyo3(signature = (
-    *,
-    host,
-    port,
-    user,
-    password,
-    database = None,
-    unix_socket = None,
-    connect_timeout = None,
-    read_timeout = None,
-    write_timeout = None,
-    client_flag = 0,
-    charset = "utf8mb4",
-    ssl_mode = "preferred",
-    ssl_ca = None,
-    ssl_cert = None,
-    ssl_key = None,
-    server_public_key = None,
-    get_server_public_key = true,
-    binary_prefix = true,
-    statement_cache_size = 32,
-    compress = None,
-    zstd_level = 3,
-    local_infile = false,
-    local_infile_dir = None,
-))]
+/// The protocol's connection options from `connect()`'s arguments
+/// (validated), with the session's codec and the target errors name.
 #[expect(
     clippy::too_many_arguments,
     reason = "mirrors the keyword-only Python signature one to one"
 )]
-pub(crate) fn connect(
+pub(crate) fn connect_opts(
     py: Python<'_>,
     host: String,
     port: u16,
@@ -1384,13 +1213,12 @@ pub(crate) fn connect(
     ssl_key: Option<PathBuf>,
     server_public_key: Option<PathBuf>,
     get_server_public_key: bool,
-    binary_prefix: bool,
     statement_cache_size: usize,
     compress: Option<&str>,
     zstd_level: u8,
     local_infile: bool,
     local_infile_dir: Option<PathBuf>,
-) -> PyResult<Connection> {
+) -> PyResult<(Opts, Arc<Codec>, String)> {
     if local_infile && local_infile_dir.is_none() {
         return Err(PyValueError::new_err(
             "local_infile=True needs local_infile_dir: LOAD DATA LOCAL INFILE \
@@ -1452,6 +1280,93 @@ pub(crate) fn connect(
         compress,
         local_infile_dir,
     };
+    Ok((opts, codec, target))
+}
+
+/// Opens an authenticated connection. Python-facing argument handling
+/// (defaults, aliases) lives in `rustmy.connections`.
+#[pyfunction]
+#[pyo3(signature = (
+    *,
+    host,
+    port,
+    user,
+    password,
+    database = None,
+    unix_socket = None,
+    connect_timeout = None,
+    read_timeout = None,
+    write_timeout = None,
+    client_flag = 0,
+    charset = "utf8mb4",
+    ssl_mode = "preferred",
+    ssl_ca = None,
+    ssl_cert = None,
+    ssl_key = None,
+    server_public_key = None,
+    get_server_public_key = true,
+    binary_prefix = true,
+    statement_cache_size = 32,
+    compress = None,
+    zstd_level = 3,
+    local_infile = false,
+    local_infile_dir = None,
+))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the keyword-only Python signature one to one"
+)]
+pub(crate) fn connect(
+    py: Python<'_>,
+    host: String,
+    port: u16,
+    user: &str,
+    password: String,
+    database: Option<&str>,
+    unix_socket: Option<PathBuf>,
+    connect_timeout: Option<f64>,
+    read_timeout: Option<f64>,
+    write_timeout: Option<f64>,
+    client_flag: u32,
+    charset: &str,
+    ssl_mode: &str,
+    ssl_ca: Option<PathBuf>,
+    ssl_cert: Option<PathBuf>,
+    ssl_key: Option<PathBuf>,
+    server_public_key: Option<PathBuf>,
+    get_server_public_key: bool,
+    binary_prefix: bool,
+    statement_cache_size: usize,
+    compress: Option<&str>,
+    zstd_level: u8,
+    local_infile: bool,
+    local_infile_dir: Option<PathBuf>,
+) -> PyResult<Connection> {
+    let (opts, codec, target) = connect_opts(
+        py,
+        host,
+        port,
+        user,
+        password,
+        database,
+        unix_socket,
+        connect_timeout,
+        read_timeout,
+        write_timeout,
+        client_flag,
+        charset,
+        ssl_mode,
+        ssl_ca,
+        ssl_cert,
+        ssl_key,
+        server_public_key,
+        get_server_public_key,
+        statement_cache_size,
+        compress,
+        zstd_level,
+        local_infile,
+        local_infile_dir,
+    )?;
     let conn = py.detach(|| Conn::connect(&opts)).map_err(|err| {
         from_proto(err, Phase::Connect, &target, |message| {
             String::from_utf8_lossy(message).into_owned()
@@ -1470,7 +1385,7 @@ pub(crate) fn connect(
 
 /// Warns that a command is discarding rows the user never fetched, pointing
 /// at the first caller outside the `rustmy` package.
-fn warn_abandoned_stream(py: Python<'_>) -> PyResult<()> {
+pub(crate) fn warn_abandoned_stream(py: Python<'_>) -> PyResult<()> {
     let mut stacklevel = 1;
     let mut frame = py
         .import("sys")
