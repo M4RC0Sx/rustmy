@@ -123,9 +123,13 @@ impl InsertBatch {
     }
 
     fn take(&mut self) -> Vec<u8> {
-        let mut statement = self.sql.clone();
+        // The statement leaves in the buffer it was built in, and the next
+        // one starts in a buffer as large: copying it out was one more pass
+        // over up to `max_stmt_length` bytes per statement.
+        let mut next = Vec::with_capacity(self.sql.capacity());
+        next.extend_from_slice(self.sql.get(..self.prefix_len).unwrap_or_default());
+        let mut statement = std::mem::replace(&mut self.sql, next);
         statement.extend_from_slice(&self.suffix);
-        self.sql.truncate(self.prefix_len);
         self.rows = 0;
         statement
     }
