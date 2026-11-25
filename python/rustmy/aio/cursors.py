@@ -42,8 +42,9 @@ class Cursor:
     #: Rows :meth:`fetchmany` returns by default (PEP 249).
     arraysize = 1
 
-    #: Largest statement :meth:`executemany` builds when batching inserts.
-    max_stmt_length = 256 * 1024
+    #: Largest statement :meth:`executemany` builds when batching inserts
+    #: (as :attr:`rustmy.cursors.Cursor.max_stmt_length`).
+    max_stmt_length = 1_024_000
 
     #: Statements :meth:`executemany` sends before reading their replies,
     #: when it cannot batch them into one (anything but ``INSERT … VALUES``).
@@ -268,6 +269,9 @@ class DictCursor(Cursor):
 class PreparedCursor(Cursor):
     """Buffered cursor running server-side prepared statements; as
     :class:`rustmy.cursors.PreparedCursor`."""
+
+    #: As :attr:`rustmy.cursors.PreparedCursor.max_stmt_length`.
+    max_stmt_length = 256 * 1024
 
     def _many(
         self, connection: Connection, query: str, seq_of_args: Iterable[Params]
