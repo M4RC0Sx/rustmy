@@ -191,6 +191,9 @@ done; docker compose down -v
   (`CATALOGUE`; a new one fails the guard test). `tests/test_differential.py`
   runs the same cases through rustmy and PyMySQL; every decided difference is
   in `INTENDED_DIFFERENCES` with both sides' values, never silenced.
+  `tests/test_aio_differential.py` stores and reads the same hypothesis
+  values through `rustmy.aio` and the blocking connection, with every kind
+  of cursor, and requires the same rows, descriptions and counts.
 - **Fuzzing** (nightly and cargo-fuzz; details in `fuzz/README.md`):
   `cargo +nightly fuzz run session fuzz/corpus/session fuzz/seeds/session -- -max_total_time=300`.
   Targets call `rustmy_proto::fuzzing::*`, compiled only with the `fuzzing`
@@ -202,8 +205,9 @@ done; docker compose down -v
   (`cargo llvm-cov` over `proto`'s tests and the instrumented extension under
   pytest) to Codecov with flags `python` and `rust`.
 - **Memory leaks**: `uv run --no-sync python scripts/leak_check.py` runs every
-  API path in a loop. RSS growth alone is usually the allocator: confirm with
-  `heap <pid>`/`leaks <pid>` on macOS or valgrind on Linux.
+  API path in a loop, blocking and asyncio, pools included. RSS growth alone
+  is usually the allocator: confirm with `heap <pid>`/`leaks <pid>` on macOS
+  or valgrind on Linux.
 - **Benchmarks**: see [benches/README.md](benches/README.md) (needs
   `uv sync --group bench`, a release build and the MySQL container).
   `report.py` and `showcase.py --render` turn the JSON results into the
