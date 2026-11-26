@@ -80,7 +80,7 @@ dev = [
     "pytest-cov>=7.0",
     "pytest-mock>=3.15",
     "pytest-randomly>=4.0",
-    "ruff>=0.14",
+    "ruff>=0.17.6",
     "sqlalchemy[asyncio]>=2.0",
     "testcontainers[mysql]>=4.15.0",
     "time-machine>=2.19",
@@ -96,7 +96,7 @@ bench = [
     # dependency, has no fixed release for 3.10 (Pillow 13 dropped it).
     "matplotlib>=3.10; python_version >= '3.11'",
     "mysql-connector-python>=9.4",
-    "mysqlclient>=2.2",
+    "mysqlclient>=2.3.2",
     "pytest-benchmark>=5.1",
     "uvloop>=0.21; sys_platform != 'win32'",
 ]
