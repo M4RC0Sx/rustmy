@@ -7,15 +7,23 @@ panic, hang or allocate without bound.
 | Target | What it feeds untrusted bytes to |
 |---|---|
 | `handshake` | the server greeting parser |
-| `packets` | packet framing (lengths, sequence ids, >16 MiB payloads) |
-| `compressed` | the compressed protocol layer (zlib or zstd, picked by the first byte): compressed headers and sequence ids, payloads that do not inflate to their declared length, packets split across compressed ones |
+| `packets` | packet framing (lengths, sequence ids, >16 MiB payloads), read whole and in pieces of varying sizes, which must give the same payloads and error |
+| `compressed` | the compressed protocol layer (zlib or zstd, picked by the first byte): compressed headers and sequence ids, payloads that do not inflate to their declared length, packets split across compressed ones; read whole and in pieces, like `packets` |
 | `result_set` | column definitions, rows, OK / ERR / EOF packets |
 | `text_values` | text-protocol integer, float, date and time parsers |
 | `sql` | the `INSERT … VALUES` recogniser used by `executemany` and string escaping |
 | `session` | the whole client against a scripted server: handshake, every authentication plugin (RSA, ed25519, parsec, auth switches), queries, multiple results, prepared statements, pipelined batches, `ping`, `select_db`, `reset_connection`, `change_user`; each input runs twice, uncompressed and asking for compression (the replies after authentication are then read as compressed packets) |
+| `differential` | the same session through the protocol core and through the one released as 1.3.2 (a git dependency on its tag), each over a Unix socket to a fake server that sends the input: every call's result and error must match, uncompressed and compressed. Unix only; it starts from the `session` corpus and seeds |
 
 The hooks live behind the `fuzzing` feature of `rustmy-proto`
-(`crates/proto/src/fuzzing.rs`), which normal builds never enable.
+(`crates/proto/src/fuzzing.rs`), which normal builds never enable. The
+`differential` target uses only the public API of both versions, with the
+feature on in both (it caps parsec's iterations alike).
+
+```sh
+cargo +nightly fuzz run differential fuzz/corpus/differential \
+    fuzz/corpus/session fuzz/seeds/session -- -max_total_time=300 -timeout=10
+```
 
 ## Running
 

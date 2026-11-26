@@ -29,6 +29,7 @@ code that ships.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import datetime as dt
 import gc
@@ -44,8 +45,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
+from typing import TypeVar
 
 import rustmy
+import rustmy.aio
 import rustmy.constants
 import rustmy.converters
 
@@ -56,6 +59,9 @@ from rustmy.cursors import SSCursor
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from collections.abc import Coroutine
+
+    _T = TypeVar("_T")
 
 
 CERTS = Path(__file__).resolve().parent.parent / "tests" / "docker" / "certs"
@@ -133,6 +139,20 @@ class Scenarios:
         cursor = self.conn.cursor()
         for statement in SETUP:
             cursor.execute(statement)
+        self.pool = rustmy.Pool(1, 2, **BASE)
+        self.loop = asyncio.new_event_loop()
+        self.aconn = self.run(rustmy.aio.connect(**BASE))
+        self.ainfile = self.run(rustmy.aio.connect(**BASE, local_infile_dir=workdir))
+        self.azstd = self.run(rustmy.aio.connect(**BASE, compress="zstd"))
+        self.apool = self.run(self._create_pool())
+
+    @staticmethod
+    async def _create_pool() -> rustmy.aio.Pool:
+        return await rustmy.aio.create_pool(1, 2, **BASE)
+
+    def run(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
+        """Run ``coroutine`` on the scenarios' event loop."""
+        return self.loop.run_until_complete(coroutine)
 
     def connect_close(self) -> None:
         rustmy.connect(**BASE).close()
@@ -295,6 +315,198 @@ class Scenarios:
         self.conn.escape_string("it's ñ")
         rustmy.converters.literal(dt.datetime(2026, 1, 1))  # noqa: DTZ001
 
+    def pool_acquire(self) -> None:
+        with self.pool.acquire() as conn:
+            conn.cursor().execute("SELECT 1")
+
+    def pool_rollback(self) -> None:
+        # Given back inside a transaction: the pool rolls it back.
+        with self.pool.acquire() as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN")
+            cursor.execute("UPDATE leak_target SET s = 'x' WHERE id = 1")
+
+    def pool_timeout(self) -> None:
+        with (
+            self.pool.acquire(),
+            self.pool.acquire(),
+            contextlib.suppress(rustmy.PoolTimeout),
+            self.pool.acquire(timeout=0),
+        ):
+            pass
+
+    def pool_open_close(self) -> None:
+        with rustmy.Pool(1, 2, **BASE) as pool, pool.acquire() as conn:
+            conn.cursor().execute("SELECT 1")
+
+    def aio_connect_close(self) -> None:
+        async def go() -> None:
+            conn = await rustmy.aio.connect(**BASE)
+            await conn.ensure_closed()
+
+        self.run(go())
+
+    def aio_connect_dropped(self) -> None:
+        # Never closed: garbage collection must free it all, the transport
+        # and its protocol included.
+        async def go() -> None:
+            conn = await rustmy.aio.connect(**BASE)
+            await conn.cursor().execute("SELECT 1")
+
+        self.run(go())
+
+    def aio_connect_tls(self) -> None:
+        async def go() -> None:
+            conn = await rustmy.aio.connect(
+                **{**BASE, "ssl_mode": "verify_ca", "ssl_ca": CERTS / "ca.pem"}
+            )
+            await conn.cursor().execute("SELECT 1")
+            await conn.ensure_closed()
+
+        self.run(go())
+
+    def aio_connect_failure(self) -> None:
+        async def go() -> None:
+            with contextlib.suppress(rustmy.OperationalError):
+                await rustmy.aio.connect(**{**BASE, "password": "wrong"})
+
+        self.run(go())
+
+    def aio_fetchall(self) -> None:
+        async def go() -> None:
+            async with self.aconn.cursor() as cursor:
+                await cursor.execute("SELECT * FROM leak_rows")
+                await cursor.fetchall()
+
+        self.run(go())
+
+    def aio_fetchall_dict(self) -> None:
+        async def go() -> None:
+            async with self.aconn.cursor(rustmy.aio.DictCursor) as cursor:
+                await cursor.execute("SELECT * FROM leak_rows")
+                await cursor.fetchall()
+
+        self.run(go())
+
+    def aio_stream_full(self) -> None:
+        async def go() -> None:
+            async with self.aconn.cursor(rustmy.aio.SSCursor) as cursor:
+                await cursor.execute("SELECT * FROM leak_rows")
+                async for _ in cursor:
+                    pass
+
+        self.run(go())
+
+    def aio_stream_abandoned(self) -> None:
+        async def go() -> None:
+            cursor = self.aconn.cursor(rustmy.aio.SSCursor)
+            await cursor.execute("SELECT * FROM leak_rows")
+            await cursor.fetchone()
+            await self.aconn.cursor().execute("SELECT 1")
+
+        self.run(go())
+
+    def aio_prepared(self) -> None:
+        async def go() -> None:
+            cursor = self.aconn.cursor(prepared=True)
+            await cursor.execute("SELECT * FROM leak_rows WHERE id < %s", (100,))
+            await cursor.fetchall()
+
+        self.run(go())
+
+    def aio_server_error(self) -> None:
+        async def go() -> None:
+            with contextlib.suppress(rustmy.ProgrammingError):
+                await self.aconn.cursor().execute("SELECT * FROM no_such_table")
+
+        self.run(go())
+
+    def aio_executemany(self) -> None:
+        async def go() -> None:
+            cursor = self.aconn.cursor()
+            await cursor.execute("DELETE FROM leak_target WHERE id > 1000")
+            await cursor.executemany(
+                "INSERT INTO leak_target VALUES (%s, %s)",
+                [(1000 + i, f"new {i}") for i in range(1, 51)],
+            )
+            await cursor.executemany(
+                "UPDATE leak_target SET s = %s WHERE id = %s",
+                [(f"row {i}", i) for i in range(1, 51)],
+            )
+
+        self.run(go())
+
+    def aio_compressed(self) -> None:
+        async def go() -> None:
+            cursor = self.azstd.cursor()
+            await cursor.execute("SELECT * FROM leak_rows")
+            await cursor.fetchall()
+
+        self.run(go())
+
+    def aio_local_infile(self) -> None:
+        async def go() -> None:
+            cursor = self.ainfile.cursor()
+            await cursor.execute(
+                "CREATE TEMPORARY TABLE IF NOT EXISTS loaded (id INT, s VARCHAR(64))"
+            )
+            await cursor.execute(
+                "LOAD DATA LOCAL INFILE %s INTO TABLE loaded FIELDS TERMINATED BY ','",
+                (str(self.csv),),
+            )
+            await cursor.execute("TRUNCATE loaded")
+
+        self.run(go())
+
+    def aio_read_timeout(self) -> None:
+        async def go() -> None:
+            conn = await rustmy.aio.connect(**BASE, read_timeout=0.05)
+            with contextlib.suppress(rustmy.OperationalError):
+                await conn.cursor().execute("SELECT SLEEP(0.2)")
+            conn.close()
+
+        self.run(go())
+
+    def aio_cancelled(self) -> None:
+        # A command whose task is cancelled closes its connection.
+        async def go() -> None:
+            conn = await rustmy.aio.connect(**BASE)
+            task = asyncio.ensure_future(conn.cursor().execute("SELECT SLEEP(0.2)"))
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            conn.close()
+
+        self.run(go())
+
+    def aio_pool_acquire(self) -> None:
+        async def go() -> None:
+            async with self.apool.acquire() as conn:
+                await conn.cursor().execute("SELECT 1")
+
+        self.run(go())
+
+    def aio_pool_contention(self) -> None:
+        # More tasks than connections: waiters served through futures.
+        async def one() -> None:
+            async with self.apool.acquire() as conn:
+                await conn.cursor().execute("SELECT 1")
+
+        async def go() -> None:
+            await asyncio.gather(*(one() for _ in range(6)))
+
+        self.run(go())
+
+    def aio_pool_timeout(self) -> None:
+        async def go() -> None:
+            async with self.apool.acquire(), self.apool.acquire():
+                with contextlib.suppress(rustmy.PoolTimeout):
+                    async with self.apool.acquire(timeout=0):
+                        pass
+
+        self.run(go())
+
     def close(self) -> None:
         cursor = self.conn.cursor()
         cursor.execute("DROP TABLE leak_rows, leak_target")
@@ -307,6 +519,12 @@ class Scenarios:
             self.conv,
         ):
             conn.close()
+        self.pool.close()
+        self.apool.close()
+        self.run(self.apool.wait_closed())
+        for aconn in (self.aconn, self.ainfile, self.azstd):
+            self.run(aconn.ensure_closed())
+        self.loop.close()
 
 
 # Heavier scenarios get fewer iterations per round.
@@ -320,6 +538,17 @@ WEIGHT = {
     "executemany_pipelined": 0.2,
     "executemany_prepared": 0.2,
     "local_infile": 0.2,
+    "pool_open_close": 0.1,
+    "pool_timeout": 0.5,
+    "aio_connect_close": 0.2,
+    "aio_connect_dropped": 0.2,
+    "aio_connect_tls": 0.05,
+    "aio_connect_failure": 0.1,
+    "aio_read_timeout": 0.01,
+    "aio_cancelled": 0.01,
+    "aio_executemany": 0.2,
+    "aio_local_infile": 0.2,
+    "aio_pool_contention": 0.5,
 }
 
 
@@ -352,7 +581,7 @@ def main() -> None:
         names = [
             name
             for name in vars(Scenarios)
-            if not name.startswith("_") and name != "close"
+            if not name.startswith("_") and name not in ("close", "run")
         ]
         if args.only:
             names = [name for name in names if name in args.only.split(",")]

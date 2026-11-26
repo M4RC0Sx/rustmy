@@ -6,9 +6,10 @@ change fits with what is already there. For a bug or a feature, an issue first
 is welcome (the templates ask for what is needed); vulnerabilities go privately,
 as [SECURITY.md](SECURITY.md) explains.
 
-`rustmy` is a **synchronous** MySQL/MariaDB driver for Python written in Rust
-(PyO3 + maturin): DB-API 2.0 with `paramstyle = "format"` (`%s`,
-`%(name)s`), its own SQLAlchemy dialect, a Django backend through
+`rustmy` is a MySQL/MariaDB driver for Python written in Rust (PyO3 +
+maturin): DB-API 2.0 with `paramstyle = "format"` (`%s`, `%(name)s`), an
+asyncio API (`rustmy.aio`) over the same protocol code, connection pools,
+its own SQLAlchemy dialects (blocking and asyncio), a Django backend through
 `install_as_MySQLdb()`, and wheels with no system dependencies, licensed
 `MIT OR Apache-2.0`.
 
@@ -151,13 +152,18 @@ done; docker compose down -v
   plus `test_schema`/`test_schema_2`, from `tests/docker/*-init.sh`).
   `requirements.py` states what the servers support by capability, never by
   driver name; `test_suite.py` replaces the two suite classes that would fail
-  for reasons outside rustmy. `scripts/sqlalchemy_full_suite.py` runs
-  SQLAlchemy's whole suite against PyMySQL's results (about 20 minutes).
+  for reasons outside rustmy. The `*_async` databases run it through the
+  asyncio dialects (not on free-threaded builds: greenlet crashes there).
+  `scripts/sqlalchemy_full_suite.py` runs SQLAlchemy's whole suite against
+  PyMySQL's results (about 20 minutes), or with `--asyncio` the asyncio
+  dialect against asyncmy's.
 
   ```sh
   uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db mysql --db mariadb
   uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db mysql_prepared --db mariadb_prepared
+  uv run pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite --db mysql_async --db mariadb_async
   uv run python scripts/sqlalchemy_full_suite.py --server mysql
+  uv run --with asyncmy python scripts/sqlalchemy_full_suite.py --asyncio --server mysql
   ```
 
 - **Django**: `scripts/django_suite.py` runs Django's test suite through
@@ -185,17 +191,23 @@ done; docker compose down -v
   (`CATALOGUE`; a new one fails the guard test). `tests/test_differential.py`
   runs the same cases through rustmy and PyMySQL; every decided difference is
   in `INTENDED_DIFFERENCES` with both sides' values, never silenced.
+  `tests/test_aio_differential.py` stores and reads the same hypothesis
+  values through `rustmy.aio` and the blocking connection, with every kind
+  of cursor, and requires the same rows, descriptions and counts.
 - **Fuzzing** (nightly and cargo-fuzz; details in `fuzz/README.md`):
   `cargo +nightly fuzz run session fuzz/corpus/session fuzz/seeds/session -- -max_total_time=300`.
   Targets call `rustmy_proto::fuzzing::*`, compiled only with the `fuzzing`
   feature (a scripted transport and a low parsec iteration cap); CI lints that
-  feature and fuzzes weekly.
+  feature and fuzzes weekly. `differential` runs the same session through
+  `proto` and through the 1.3.2 release (a git dependency on its tag, in
+  `fuzz/` only) and fails on any difference in results or errors.
 - **Coverage**: `coverage.yml` uploads Python (`coverage.xml`) and Rust
   (`cargo llvm-cov` over `proto`'s tests and the instrumented extension under
   pytest) to Codecov with flags `python` and `rust`.
 - **Memory leaks**: `uv run --no-sync python scripts/leak_check.py` runs every
-  API path in a loop. RSS growth alone is usually the allocator: confirm with
-  `heap <pid>`/`leaks <pid>` on macOS or valgrind on Linux.
+  API path in a loop, blocking and asyncio, pools included. RSS growth alone
+  is usually the allocator: confirm with `heap <pid>`/`leaks <pid>` on macOS
+  or valgrind on Linux.
 - **Benchmarks**: see [benches/README.md](benches/README.md) (needs
   `uv sync --group bench`, a release build and the MySQL container).
   `report.py` and `showcase.py --render` turn the JSON results into the
@@ -215,6 +227,9 @@ done; docker compose down -v
   Python objects.
 - `python/rustmy/`: the Python package (maturin `python-source`): the public
   DB-API surface, constants, the SQLAlchemy dialect and the `MySQLdb` alias.
+  `connect()`'s arguments are resolved once for both connections, blocking
+  and asyncio (`_connect_args.py`: aliases, option files, TLS, defaults, and
+  the statements that apply the session settings).
   `_core.pyi` must stay in sync with what `crates/pydriver` exports.
 - The version has a single source, `[workspace.package]` in `Cargo.toml`.
 
@@ -248,8 +263,11 @@ fast; signals are checked between batches (Ctrl+C interrupts a long read, and
 the next command discards the rest).
 
 **Streaming** (`SSCursor`, `crates/pydriver/src/stream.rs`): the pending
-result set is state of `Conn` (`query_streamed`, `read_rows`, `skip_rows`), so
-any command discards unread rows first. The connection lock is held only
+result set is protocol state of the connection (`Session` in `session.rs`,
+which reads a reply's head, its rows, a `COM_STMT_PREPARE` reply and a
+pipelined statement's whole reply without I/O; `Conn::query_streamed`,
+`read_rows` and `skip_rows` drive it), so any command discards unread rows
+first. The connection lock is held only
 while a batch is read, never while Python runs. Every command bumps the
 connection's `generation`; a `ResultStream` compares its own on every fetch,
 so a cursor whose rows were discarded raises instead of returning a truncated
@@ -261,6 +279,60 @@ authentication ends; `read_timeout`/`write_timeout` replace it then
 (`Conn::connect`; `crates/proto/tests/timeouts.rs` plays a server that never
 answers). TCP sockets get `TCP_NODELAY` and keepalive through `socket2`
 (probes after 60 s idle, every 10 s where the platform allows setting it).
+Packet framing does no I/O of its own (`packet::Framer`): bytes from the
+server go into an `Input` buffer in whatever pieces they arrive, compressed
+packets included, and whole payloads come out; `packet::Wire` reads and
+writes them over a `Transport` (`transport.rs`) and reads a large body
+straight into the caller's buffer where the transport can. Every command
+from the handshake's end on is an `async fn` of `client::Client` over a
+`Transport`, written once; `Conn` runs them over its blocking stream with
+`block_on`, a single poll with a no-op waker (a blocking transport never
+leaves one pending: no runtime, no thread), and an event loop can run the
+same ones with a transport of its own. Rows the input buffer holds are
+taken without any I/O (`Wire::try_read_into`); only a refill waits. A row that the buffer holds whole takes a fast path. The `packets`
+and `compressed` fuzz targets read every input whole and in pieces, and the
+results must match.
+
+**asyncio** (`rustmy.aio`, `python/rustmy/aio/`, `crates/pydriver/src/aio.rs`): the
+same `Client` operations run on the event loop's thread, with no runtime and
+no other thread. `AioConnection` is the core of an `asyncio.BufferedProtocol`
+whose callbacks are bound to its methods (no Python frame per read):
+`buffer_updated` hands the bytes to its transport (`LoopIo`, whose refill is
+pending until the loop has something) and polls the running operation once
+more; what it writes goes to the loop's transport after each poll, and its
+result resolves the command's future. Rows are converted every 64 KiB as
+they arrive. A command whose task is cancelled closes the connection (the
+reply would arrive in the middle of the next command's); an I/O failure or a
+protocol violation leaves it closed too. The loop keeps the protocol alive,
+so a connection dropped while open is closed by `Connection.__del__`, with a
+`ResourceWarning` as asyncio's own transports give. It takes `connect()`'s options
+(`connect_opts` in `connection.rs`, shared with the blocking connection).
+What the loop's callbacks need lives in `Core`. `read_timeout` and
+`write_timeout` are a single `call_later` check, not a timer per read: it
+fails a command (2013, the connection closed) that has waited that long for
+the server since its last progress (bytes received, a piece of a local
+file read), using `write_timeout` while the loop's transport holds unsent
+bytes, and otherwise schedules itself again; idle time between commands
+does not count. A local file (`LOAD DATA LOCAL INFILE`) is read in the
+loop's executor, 256 KiB per trip (`Transport::read_file`), so the loop
+never waits on the disk.
+TLS runs in memory over any transport (`transport::MaybeTls`, `rustls`'s
+`ClientConnection`, with the blocking connection's configuration and
+cache): `Client::connect` starts it right after the `SSLRequest`, as the
+blocking handshake does. Compression is the same layer as everywhere.
+The Python layer mirrors the blocking one with `await` (the shape of aiomysql's
+and asyncmy's API: `execute`, the `fetch*` methods, `nextset`, `callproc`,
+`commit`... are coroutines): `connect()` resolves its arguments with
+`_connect_args`, applies the session settings with the same plan, and the
+buffered and prepared cursors keep the blocking cursors' behaviour (PEP 249
+errors included). Unbuffered cursors (`AioStream`) apply backpressure: `take`
+hands out the rows already converted without I/O (no future is created
+while rows are at hand), and `read` reads one more batch off the loop only
+when more are asked for; the command generation, the discard warning and
+the errors follow the blocking `ResultStream`. `executemany` groups its
+items with the blocking connection's builders (`batch.rs`) and runs each
+group as a command of its own (`AioMany.step`): one `await` per statement
+or window, not per item.
 
 **TLS and authentication.** TLS through `rustls`; `ssl_mode` is disabled /
 preferred (default) / required / verify_ca / verify_identity. With `ssl_ca`,
@@ -276,13 +348,18 @@ cleartext over TLS or Unix sockets, and with RSA-OAEP over plain TCP: the key
 is requested from the server when needed, as PyMySQL does, or pinned with
 `server_public_key`; `get_server_public_key=False` never requests it and
 fails with `Error::Auth` (2061) instead, as libmysqlclient does by default. A key is accepted only right after the client asked for
-it, never with a pinned one (`requests_key` in `conn.rs`;
+it, never with a pinned one (`requests_key` in `login.rs`;
 `crates/proto/tests/auth.rs` plays the man in the middle). MariaDB's `parsec`
 derives its key with as many PBKDF2 rounds as the server asks for, bounded
 as MariaDB Connector/C bounds them: what fits in `connect_timeout`
 (`parsec_max_factor`). A logical payload may be 64 KiB until authentication
 succeeds and 1 GiB after, checked from each header before reading
-(`packet.rs`). `Opts`'s `Debug` output hides the password.
+(`packet.rs`). `Opts`'s `Debug` output hides the password. Like framing,
+the handshake does no I/O of its own (`login.rs`): `Login` turns the
+greeting into the session's parameters and replies, and `Auth` runs the
+authentication exchange one payload at a time, for `COM_CHANGE_USER` too;
+`Conn` moves the payloads, runs the TLS handshake and reads the pinned key
+file (after TLS, before the first response).
 
 **Character sets** (`crates/pydriver/src/charset.rs`, ids in
 `crates/proto/src/charset.rs`). The handshake requests the server's own
@@ -324,8 +401,9 @@ and regenerate it when the supported versions change (an integration test
 compares it with each MySQL server's catalogue). `multi_statements` is off by
 default.
 
-**Pipelined `executemany`.** A batchable `INSERT … VALUES` becomes multi-row
-statements; anything else is sent in windows of up to `Cursor.max_pipeline`
+**Pipelined `executemany`.** How the items are grouped is in `batch.rs`,
+without I/O, for both connections. A batchable `INSERT … VALUES` becomes
+multi-row statements; anything else is sent in windows of up to `Cursor.max_pipeline`
 statements (256) and `Conn::pipeline_budget()` bytes (16 KiB over TCP/TLS,
 8 KiB over Unix sockets, so a window always fits in the send buffer: the
 server may stop reading while it sends a large reply, a deadlock reproduced
@@ -372,7 +450,9 @@ their own, and every reply starts at compressed sequence 1 (`ReplyStart` in
 `packet.rs`). `RUSTMY_TEST_COMPRESS=zlib|zstd` runs `live.rs` and the Python
 suite compressed (CI does it in every server job).
 
-**`LOAD DATA LOCAL INFILE`**: off unless `connect(local_infile_dir=…)`, and
+**`LOAD DATA LOCAL INFILE`** (`infile.rs`: the permission, the checks and
+the outcome; the connection sends the file): off unless
+`connect(local_infile_dir=…)`, and
 only then is `CLIENT_LOCAL_FILES` requested. Every command records which file
 names it may be asked for: a `COM_QUERY` the names its `LOAD DATA|XML …
 LOCAL INFILE '…'` statements give (`sql::local_infile_names`, unescaped as
@@ -383,7 +463,7 @@ statement named that exact name and the canonicalized path is a regular file
 inside the directory; otherwise an empty file goes and `OperationalError` 2068
 is raised, the connection still in sync, with nothing on disk touched unless
 the statement named the file. The file goes in 16 KiB packets with the GIL
-released; a read error halfway closes the connection, so the server aborts
+released (read by `Transport::read_file`, here where the connection runs); a read error halfway closes the connection, so the server aborts
 instead of loading part of it. `crates/proto/tests/local_infile.rs` tests it
 against a fake, malicious server.
 
@@ -401,6 +481,30 @@ arguments win, `[client]` and the group in file order, `!include`/
 with a warning (outside Windows), as `my_print_defaults` does. Fetch methods
 return tuples, `()` when exhausted.
 
+**Pools** (`rustmy.Pool`; `python/rustmy/pool.py`): the accounts are
+`rustmy_proto::pool::PoolCore`, without I/O and with the time given by the
+caller: it counts connections by id (lent, idle, being opened, so the
+maximum holds while they open), lends idle ones most recently used first,
+serves waiters in order, and answers each call with what to do (connections
+to close, waiters to serve, how many to open for the minimum). Its tests run
+random sequences of calls against a model of the caller and check the
+accounts after every step. The facade holds the connections, does the
+waiting (`threading.Condition`, with the GIL released) and the I/O outside
+its lock: connections for the minimum open on threads of their own, so
+giving one back never waits for a new one. A connection given back with a
+transaction open (the status flag the server already sent) is rolled back;
+one that is closed or fails is not lent again. `rustmy.aio.create_pool`
+(`python/rustmy/aio/pool.py`) drives the same accounts on the loop's
+thread, serving waiters through futures; giving a connection back that
+needs no command (no transaction open, no `reset_on_release`) happens on
+the spot, with an already done future and no turn of the loop (a task per
+release cost 30 µs). Waiters are served strictly in order: under
+saturation each handover costs a turn of the loop before the waiter sends
+its query (2–3% of throughput against asyncmy locally, 10% with 1 ms of
+latency, in the showcase's pool workload), since asyncmy's releasing task
+takes the connection back ahead of the waiters; but the wait stays bounded
+(32 tasks over 8 connections: 2.6 ms at most against asyncmy's 102 ms).
+
 **SQLAlchemy**: `rustmy/dialect.py` holds `RustmyMySQLDialect` and
 `RustmyMariaDBDialect` (`mysql+rustmy`, `mariadb+rustmy`, through entry
 points; extra `rustmy[sqlalchemy]`). They subclass SQLAlchemy's mysqlclient
@@ -408,7 +512,14 @@ dialect and change only rustmy's URL argument names, skip `SET NAMES` on
 connect (the handshake sets the character set), count rustmy's "connection
 already closed" error as a disconnect, and provide `load_provisioning` for the
 test plugin. `uv.lock` resolves SQLAlchemy 2.0 for Python 3.10 and 2.1
-elsewhere; the dialect must type-check against both.
+elsewhere; the dialect must type-check against both. The asyncio dialects
+(`rustmy/aio/dialect.py`; `mysql+rustmy_async`, `mariadb+rustmy_async`,
+and the blocking URLs under `create_async_engine` through
+`get_async_dialect_cls`; extra `rustmy[sqlalchemy-asyncio]`) subclass the
+blocking ones and put SQLAlchemy's asyncio adapters (`connectors.asyncio`,
+greenlet) over `rustmy.aio`, as its asyncmy dialect does; SQLAlchemy 2.0
+and 2.1 differ in how the adapted connection is created and awaited and in
+who picks the pool, which `_SQLA_21` and `get_pool_class` cover.
 
 ## Style
 

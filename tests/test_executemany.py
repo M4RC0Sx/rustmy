@@ -12,6 +12,9 @@ import pytest
 
 import rustmy
 
+from rustmy import aio
+from rustmy import cursors
+
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -77,6 +80,23 @@ def test_batches_respect_max_stmt_length(cursor: rustmy.Cursor, table: str) -> N
     assert 1 < lastrowid <= 100
     cursor.execute(f"SELECT COUNT(*) FROM {table}")
     assert cursor.fetchone() == (100,)
+
+
+def test_default_statement_sizes() -> None:
+    """Text statements as large as PyMySQL's, which still fit the 1 MiB
+    ``max_allowed_packet`` of old servers with the command byte; prepared
+    ones smaller, since the server prepares each one (larger ones measured
+    slower)."""
+    for text in (cursors.Cursor, cursors.DictCursor, cursors.SSCursor, aio.Cursor):
+        assert text.max_stmt_length == 1_024_000
+        assert text.max_stmt_length + 1 <= 1 << 20
+    for prepared in (
+        cursors.PreparedCursor,
+        cursors.PreparedDictCursor,
+        aio.PreparedCursor,
+        aio.PreparedDictCursor,
+    ):
+        assert prepared.max_stmt_length == 256 * 1024
 
 
 def test_row_larger_than_limit_goes_alone(cursor: rustmy.Cursor, table: str) -> None:

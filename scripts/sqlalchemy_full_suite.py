@@ -7,6 +7,13 @@ driver and server), taken from its sdist. It runs before closing a block:
     uv run python scripts/sqlalchemy_full_suite.py --server mysql
     uv run python scripts/sqlalchemy_full_suite.py --server mariadb
 
+With ``--asyncio`` it runs the asyncio dialect (``rustmy_async``) and
+compares with asyncmy's, which it needs installed (not one of rustmy's
+dependencies):
+
+    uv run --with asyncmy python scripts/sqlalchemy_full_suite.py \\
+        --asyncio --server mysql
+
 Before each driver's run the test databases are recreated (as root, on the
 throwaway docker servers), so one run's leftovers cannot fail the next. The
 script fails if a test fails with rustmy and not with PyMySQL, except those
@@ -39,8 +46,8 @@ DATABASES = ("sqla_test", "test_schema", "test_schema_2")
 
 #: Tests that fail with rustmy only because SQLAlchemy's test suite picks
 #: them by driver name: server-side cursors are recognised by name, and the
-#: implicit-bound date/time tests are excluded for PyMySQL and mysqlclient,
-#: which send these parameters exactly as rustmy does.
+#: implicit-bound date/time tests are excluded for PyMySQL, mysqlclient and
+#: asyncmy, which send these parameters exactly as rustmy does.
 KNOWN = re.compile(
     r"ServerSideCursorsTest::"
     r"|(Date|DateTime|DateTimeCoercedToDateTime|DateHistoric|DateTimeHistoric"
@@ -103,24 +110,40 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--server", choices=sorted(SERVERS), default="mysql")
     parser.add_argument("--workdir", type=Path, default=ROOT / ".cache" / "sqlalchemy")
+    parser.add_argument(
+        "--asyncio",
+        action="store_true",
+        help="the asyncio dialect, against asyncmy's",
+    )
     args = parser.parse_args()
     backend, port = SERVERS[args.server]
+    ours_name, theirs_name = (
+        ("rustmy_async", "asyncmy") if args.asyncio else ("rustmy", "pymysql")
+    )
     source = sdist(args.workdir)
     print(f"SQLAlchemy {sqlalchemy.__version__}, {args.server}, sdist in {source}")
     ours = failures(
-        source, backend, "rustmy", port, args.workdir / f"{args.server}-rustmy.log"
+        source,
+        backend,
+        ours_name,
+        port,
+        args.workdir / f"{args.server}-{ours_name}.log",
     )
     theirs = failures(
-        source, backend, "pymysql", port, args.workdir / f"{args.server}-pymysql.log"
+        source,
+        backend,
+        theirs_name,
+        port,
+        args.workdir / f"{args.server}-{theirs_name}.log",
     )
     only_ours = sorted(t for t in ours - theirs if not KNOWN.search(t))
     known = sorted(t for t in ours - theirs if KNOWN.search(t))
     only_theirs = sorted(theirs - ours)
     print(f"failing with both: {len(ours & theirs)}, known: {len(known)}")
-    print(f"failing with PyMySQL only: {len(only_theirs)}")
+    print(f"failing with {theirs_name} only: {len(only_theirs)}")
     for test in only_theirs:
         print(f"  {test}")
-    print(f"failing with rustmy only: {len(only_ours)}")
+    print(f"failing with {ours_name} only: {len(only_ours)}")
     for test in only_ours:
         print(f"  {test}")
     return 1 if only_ours else 0

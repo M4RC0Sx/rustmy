@@ -1,17 +1,22 @@
 """The README's performance section: absolute times of everyday workloads,
 100,000 and 1,000,000 rows, rustmy against mysqlclient, PyMySQL and
-mysql-connector-python (with its C extension).
+mysql-connector-python (with its C extension), and rustmy.aio against
+asyncmy, aiomysql and mysql.connector.aio.
 
     docker compose up -d --wait mysql
     uv run --no-sync python benches/showcase.py [--repeat N] [--json PATH]
-    uv run --no-sync python benches/showcase.py --render PATH   # charts + tables
+    uv run --no-sync python benches/showcase.py --render PATH...   # charts + tables
 
 Areas: plain DB-API (tuples, dicts, streaming, inserts), prepared statements,
-SQLAlchemy 2 (Core and ORM) and Django (QuerySets and ``bulk_create``), plus
-the peak memory of reading a million rows. Every driver runs each area in a
-fresh process of its own (Django can only load one ``MySQLdb``), over plain
-TCP with ``autocommit``, against the same tables; best of ``--repeat``
-(``--repeat-large`` for the 1M-row workloads).
+SQLAlchemy 2 (Core and ORM) and Django (QuerySets and ``bulk_create``), the
+peak memory of reading a million rows, and on asyncio the DB-API workloads
+plus a pool's (``asyncio``) and SQLAlchemy's (``sqlalchemy-asyncio``). Every
+driver runs each area in a fresh process of its own (Django can only load
+one ``MySQLdb``), over plain TCP with ``autocommit``, against the same
+tables; best of ``--repeat`` (``--repeat-large`` for the 1M-row workloads).
+``--loops asyncio,uvloop`` runs the asyncio areas on both loops;
+``--latency MS`` runs through the ``toxiproxy`` compose service with that
+much added to every reply (``SHOWCASE_SIZES`` picks the sizes).
 
 The table is an order list (integers, a name, a decimal price, a
 microsecond datetime, a nullable date and a nullable note): the mix most
@@ -22,8 +27,10 @@ measure; it is not a dependency and never ships with rustmy.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import datetime as dt
 import gc
+import inspect
 import json
 import os
 import platform
@@ -40,7 +47,10 @@ from typing import Any
 
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
     from collections.abc import Callable
+    from collections.abc import Coroutine
+    from collections.abc import Iterable
     from collections.abc import Iterator
 
 
@@ -53,6 +63,14 @@ PASSWORD = "rustmy"  # docker test server
 DATABASE = "rustmy_test"
 
 DRIVERS = ("rustmy", "mysqlclient", "pymysql", "mysqlconnector")
+#: The asyncio areas' drivers; mysql-connector-python's asyncio API is
+#: ``mysql.connector.aio`` (pure Python), and SQLAlchemy has no asyncio
+#: dialect for it.
+ASYNC_DRIVERS = ("rustmy", "asyncmy", "aiomysql", "mysqlconnector")
+AREA_DRIVERS = {
+    "asyncio": ASYNC_DRIVERS,
+    "sqlalchemy-asyncio": ("rustmy", "asyncmy", "aiomysql"),
+}
 LABELS = {
     "rustmy": "rustmy",
     "rustmy-prepared": "rustmy, PreparedCursor",
@@ -104,6 +122,8 @@ class Scenario:
     area: str
     name: str
     rows: int
+    #: What ``rows`` counts (the pool workload counts queries).
+    unit: str = "rows"
 
 
 def rows_to_insert(count: int) -> list[tuple[Any, ...]]:
@@ -301,9 +321,9 @@ def prepared(
 # --- SQLAlchemy --------------------------------------------------------------
 
 
-def sqlalchemy(
-    driver: str, repeat: int, repeat_large: int
-) -> Iterator[tuple[Scenario, float]]:
+def sqlalchemy_models() -> tuple[Any, Any, list[str]]:
+    """The ORM classes of the orders table and of the insert table, and the
+    column names."""
     import sqlalchemy as sa  # noqa: PLC0415
 
     from sqlalchemy import orm  # noqa: PLC0415
@@ -326,6 +346,17 @@ def sqlalchemy(
 
     order = type("Order", (Base,), {"__tablename__": TABLE, **columns()})
     inserted = type("Inserted", (Base,), {"__tablename__": INSERT_TABLE, **columns()})
+    return order, inserted, [c.strip() for c in COLUMNS.split(",")]
+
+
+def sqlalchemy(
+    driver: str, repeat: int, repeat_large: int
+) -> Iterator[tuple[Scenario, float]]:
+    import sqlalchemy as sa  # noqa: PLC0415
+
+    from sqlalchemy import orm  # noqa: PLC0415
+
+    order, inserted, names = sqlalchemy_models()
     urls = {
         "rustmy": "mysql+rustmy://{u}:{p}@{h}:{port}/{d}?ssl_mode=disabled",
         "mysqlclient": "mysql+mysqldb://{u}:{p}@{h}:{port}/{d}?ssl_mode=DISABLED",
@@ -340,8 +371,7 @@ def sqlalchemy(
         connect_args=connect_args,
         pool_size=1,
     )
-    names = [c.strip() for c in COLUMNS.split(",")]
-    table = order.__table__  # type: ignore[attr-defined]
+    table = order.__table__
     # render_nulls: without it the ORM leaves out the NULL columns of each
     # row and splits the batch wherever the NULLs change (thousands of
     # statements here, with any driver).
@@ -356,7 +386,7 @@ def sqlalchemy(
 
         def orm_load(n: int = rows) -> None:
             with orm.Session(engine) as session:
-                query: Any = sa.select(order).where(order.id <= n)  # type: ignore[attr-defined]
+                query: Any = sa.select(order).where(order.id <= n)
                 objects: list[Any] = list(session.scalars(query))
             assert len(objects) == n
 
@@ -364,7 +394,7 @@ def sqlalchemy(
             with orm.Session(engine) as session:
                 query: Any = (
                     sa.select(order)
-                    .where(order.id <= n)  # type: ignore[attr-defined]
+                    .where(order.id <= n)
                     .execution_options(yield_per=2000)
                 )
                 assert sum(1 for _ in session.scalars(query)) == n
@@ -499,6 +529,342 @@ def django(
         )
 
 
+# --- asyncio -----------------------------------------------------------------
+
+#: The event loop the asyncio areas run on (``--loop``).
+LOOP = "asyncio"
+#: The pool workload: tasks sharing a pool of connections, each running its
+#: share of point lookups.
+POOL_TASKS = 32
+POOL_SIZE = 8
+POOL_QUERIES = 6400
+
+
+def run_loop(
+    main: Callable[[], Coroutine[Any, Any, list[tuple[Scenario, float]]]],
+) -> list[tuple[Scenario, float]]:
+    if LOOP == "uvloop":
+        import uvloop  # noqa: PLC0415
+
+        results: list[tuple[Scenario, float]] = uvloop.run(main())
+        return results
+    return asyncio.run(main())
+
+
+async def abest(
+    run: Callable[[], Awaitable[object]],
+    repeat: int,
+    reset: Callable[[], Awaitable[object]] | None = None,
+) -> float:
+    times = []
+    for _ in range(repeat):
+        if reset is not None:
+            await reset()
+        gc.collect()
+        start = time.perf_counter()
+        await run()
+        times.append(time.perf_counter() - start)
+    return min(times)
+
+
+def aio_kwargs(driver: str) -> dict[str, Any]:
+    """Connection arguments: plain TCP, ``autocommit``."""
+    common: dict[str, Any] = {
+        "host": HOST,
+        "port": PORT,
+        "user": USER,
+        "password": PASSWORD,
+        "autocommit": True,
+    }
+    if driver == "rustmy":
+        return {**common, "database": DATABASE, "ssl_mode": "disabled"}
+    if driver == "mysqlconnector":
+        return {**common, "database": DATABASE, "ssl_disabled": True}
+    return {**common, "db": DATABASE}
+
+
+async def aio_connect(driver: str) -> Any:
+    if driver == "rustmy":
+        from rustmy import aio  # noqa: PLC0415
+
+        return await aio.connect(**aio_kwargs(driver))
+    if driver == "asyncmy":
+        import asyncmy  # noqa: PLC0415
+
+        return await asyncmy.connect(**aio_kwargs(driver))
+    if driver == "aiomysql":
+        import aiomysql  # noqa: PLC0415
+
+        return await aiomysql.connect(**aio_kwargs(driver))
+    import mysql.connector.aio  # noqa: PLC0415
+
+    return await mysql.connector.aio.connect(**aio_kwargs(driver))
+
+
+async def aio_close(driver: str, conn: Any) -> None:
+    if driver == "mysqlconnector":
+        await conn.close()
+    else:
+        await conn.ensure_closed()
+
+
+async def aio_cursor(driver: str, conn: Any, kind: str = "tuple") -> Any:
+    """A cursor of ``kind`` (``tuple``, ``dict`` or ``stream``)."""
+    if driver == "mysqlconnector":
+        # Its default cursor is unbuffered: rows come as iterated.
+        return await conn.cursor(dictionary=kind == "dict")
+    if driver == "rustmy":
+        from rustmy import aio  # noqa: PLC0415
+
+        classes: dict[str, Any] = {"dict": aio.DictCursor, "stream": aio.SSCursor}
+    elif driver == "asyncmy":
+        from asyncmy import cursors  # noqa: PLC0415
+
+        classes = {"dict": cursors.DictCursor, "stream": cursors.SSCursor}
+    else:
+        import aiomysql  # noqa: PLC0415
+
+        classes = {"dict": aiomysql.DictCursor, "stream": aiomysql.SSCursor}
+    cursor = conn.cursor(classes[kind]) if kind in classes else conn.cursor()
+    # aiomysql's cursor() is a coroutine.
+    return await cursor if inspect.isawaitable(cursor) else cursor
+
+
+async def aio_count(driver: str, cursor: Any) -> int:
+    """Iterates over the rows of an unbuffered cursor."""
+    count = 0
+    if driver == "mysqlconnector":
+        # Its cursors' __aiter__ is a coroutine, which async for refuses.
+        while batch := await cursor.fetchmany(1000):
+            count += len(batch)
+    else:
+        async for _ in cursor:
+            count += 1
+    return count
+
+
+async def aio_pool(driver: str) -> tuple[Any, Callable[[], Any]]:
+    """A pool of ``POOL_SIZE`` connections and how to close it."""
+    kwargs = aio_kwargs(driver)
+    if driver == "rustmy":
+        from rustmy import aio  # noqa: PLC0415
+
+        pool: Any = await aio.create_pool(POOL_SIZE, POOL_SIZE, **kwargs)
+    elif driver == "asyncmy":
+        import asyncmy  # noqa: PLC0415
+
+        pool = await asyncmy.create_pool(minsize=POOL_SIZE, maxsize=POOL_SIZE, **kwargs)
+    else:
+        import aiomysql  # noqa: PLC0415
+
+        pool = await aiomysql.create_pool(
+            minsize=POOL_SIZE, maxsize=POOL_SIZE, **kwargs
+        )
+
+    async def close() -> None:
+        pool.close()
+        await pool.wait_closed()
+
+    return pool, close
+
+
+def asyncio_dbapi(
+    driver: str, repeat: int, repeat_large: int
+) -> list[tuple[Scenario, float]]:
+    async def main() -> list[tuple[Scenario, float]]:
+        out: list[tuple[Scenario, float]] = []
+        conn = await aio_connect(driver)
+        placeholders = ", ".join(["%s"] * len(COLUMNS.split(",")))
+        insert = f"INSERT INTO {INSERT_TABLE} ({COLUMNS}) VALUES ({placeholders})"
+        for rows in SIZES:
+            times = repeat if rows < max(SIZES) else repeat_large
+            select = f"SELECT {COLUMNS} FROM {TABLE} WHERE id <= {rows}"
+
+            async def fetchall(kind: str, sql: str = select, n: int = rows) -> None:
+                cursor = await aio_cursor(driver, conn, kind)
+                await cursor.execute(sql)
+                assert len(await cursor.fetchall()) == n
+                await cursor.close()
+
+            async def stream(sql: str = select, n: int = rows) -> None:
+                cursor = await aio_cursor(driver, conn, "stream")
+                await cursor.execute(sql)
+                assert await aio_count(driver, cursor) == n
+                await cursor.close()
+
+            out.append(
+                (
+                    Scenario("asyncio", "Read rows (tuples)", rows),
+                    await abest(lambda: fetchall("tuple"), times),
+                )
+            )
+            out.append(
+                (
+                    Scenario("asyncio", "Read rows (dicts)", rows),
+                    await abest(lambda: fetchall("dict"), times),
+                )
+            )
+            out.append(
+                (
+                    Scenario("asyncio", "Stream rows", rows),
+                    await abest(stream, times),
+                )
+            )
+            data = rows_to_insert(rows)
+
+            async def executemany(data: list[tuple[Any, ...]] = data) -> None:
+                cursor = await aio_cursor(driver, conn)
+                # In chunks of 10,000, as in the blocking area.
+                for start in range(0, len(data), 10_000):
+                    await cursor.executemany(insert, data[start : start + 10_000])
+                await cursor.close()
+
+            async def truncate() -> None:
+                cursor = await aio_cursor(driver, conn)
+                await cursor.execute(f"TRUNCATE {INSERT_TABLE}")
+                await cursor.close()
+
+            out.append(
+                (
+                    Scenario("asyncio", "Insert rows (executemany)", rows),
+                    await abest(executemany, times, truncate),
+                )
+            )
+        await aio_close(driver, conn)
+        # mysql.connector.aio's pool fails when it has no idle connection
+        # instead of waiting for one: it cannot serve more tasks than
+        # connections.
+        if driver != "mysqlconnector":
+            out.append(
+                (
+                    Scenario(
+                        "asyncio",
+                        f"Pool: {POOL_TASKS} tasks, {POOL_SIZE} connections",
+                        POOL_QUERIES,
+                        "queries",
+                    ),
+                    await pool_queries(driver, repeat),
+                )
+            )
+        return out
+
+    return run_loop(main)
+
+
+async def pool_queries(driver: str, repeat: int) -> float:
+    """``POOL_TASKS`` tasks, each acquiring a connection of the pool for every
+    point lookup of its share."""
+    pool, close = await aio_pool(driver)
+    sql = f"SELECT {COLUMNS} FROM {TABLE} WHERE id = %s"
+    share = POOL_QUERIES // POOL_TASKS
+
+    async def task(first: int) -> None:
+        for i in range(first, first + share):
+            async with pool.acquire() as conn:
+                cursor = await aio_cursor(driver, conn)
+                await cursor.execute(sql, (i,))
+                assert len(await cursor.fetchall()) == 1
+                await cursor.close()
+
+    async def run() -> None:
+        await asyncio.gather(*(task(1 + t * share) for t in range(POOL_TASKS)))
+
+    elapsed = await abest(run, repeat)
+    await close()
+    return elapsed
+
+
+def sqlalchemy_asyncio(
+    driver: str, repeat: int, repeat_large: int
+) -> list[tuple[Scenario, float]]:
+    import sqlalchemy as sa  # noqa: PLC0415
+
+    from sqlalchemy.ext import asyncio as sa_asyncio  # noqa: PLC0415
+
+    order, inserted, names = sqlalchemy_models()
+    urls = {
+        # create_async_engine picks rustmy's asyncio dialect.
+        "rustmy": "mysql+rustmy://{u}:{p}@{h}:{port}/{d}?ssl_mode=disabled",
+        "asyncmy": "mysql+asyncmy://{u}:{p}@{h}:{port}/{d}",
+        "aiomysql": "mysql+aiomysql://{u}:{p}@{h}:{port}/{d}",
+    }
+    table = order.__table__
+    statement = sa.insert(inserted).execution_options(render_nulls=True)
+
+    async def main() -> list[tuple[Scenario, float]]:
+        out: list[tuple[Scenario, float]] = []
+        engine = sa_asyncio.create_async_engine(
+            urls[driver].format(u=USER, p=PASSWORD, h=HOST, port=PORT, d=DATABASE),
+            pool_size=1,
+        )
+        for rows in SIZES:
+            times = repeat if rows < max(SIZES) else repeat_large
+
+            async def core(n: int = rows) -> None:
+                async with engine.connect() as conn:
+                    result = await conn.execute(sa.select(table).where(table.c.id <= n))
+                    assert len(result.all()) == n
+
+            async def orm_load(n: int = rows) -> None:
+                async with sa_asyncio.AsyncSession(engine) as session:
+                    query: Any = sa.select(order).where(order.id <= n)
+                    objects = list(await session.scalars(query))
+                assert len(objects) == n
+
+            async def orm_stream(n: int = rows) -> None:
+                async with sa_asyncio.AsyncSession(engine) as session:
+                    query: Any = (
+                        sa.select(order)
+                        .where(order.id <= n)
+                        .execution_options(yield_per=2000)
+                    )
+                    count = 0
+                    async for _ in await session.stream_scalars(query):
+                        count += 1
+                assert count == n
+
+            data = [dict(zip(names, row, strict=True)) for row in rows_to_insert(rows)]
+
+            async def orm_insert(data: list[dict[str, Any]] = data) -> None:
+                async with sa_asyncio.AsyncSession(engine) as session, session.begin():
+                    for start in range(0, len(data), 10_000):
+                        await session.execute(statement, data[start : start + 10_000])
+
+            async def truncate() -> None:
+                async with engine.begin() as conn:
+                    await conn.exec_driver_sql(f"TRUNCATE {INSERT_TABLE}")
+
+            area = "sqlalchemy-asyncio"
+            out.append(
+                (
+                    Scenario(area, "Core: read rows", rows),
+                    await abest(core, times),
+                )
+            )
+            out.append(
+                (
+                    Scenario(area, "ORM: load objects", rows),
+                    await abest(orm_load, times),
+                )
+            )
+            out.append(
+                (
+                    Scenario(area, "ORM: stream objects (yield_per)", rows),
+                    await abest(orm_stream, times),
+                )
+            )
+            out.append(
+                (
+                    Scenario(area, "ORM: bulk insert", rows),
+                    await abest(orm_insert, times, truncate),
+                )
+            )
+        await engine.dispose()
+        return out
+
+    return run_loop(main)
+
+
 # --- Memory ------------------------------------------------------------------
 
 
@@ -529,19 +895,22 @@ def memory(
     conn.close()
 
 
-AREAS: dict[str, Callable[[str, int, int], Iterator[tuple[Scenario, float]]]] = {
+AREAS: dict[str, Callable[[str, int, int], Iterable[tuple[Scenario, float]]]] = {
     "dbapi": dbapi,
     "prepared": prepared,
     "sqlalchemy": sqlalchemy,
     "django": django,
     "memory": memory,
+    "asyncio": asyncio_dbapi,
+    "sqlalchemy-asyncio": sqlalchemy_asyncio,
 }
 
 
 def worker(area: str, driver: str, repeat: int, repeat_large: int) -> None:
+    loop = {"loop": LOOP} if area in AREA_DRIVERS else {}
     for scenario, value in AREAS[area](driver, repeat, repeat_large):
         print(
-            json.dumps({**scenario.__dict__, "driver": driver, "value": value}),
+            json.dumps({**scenario.__dict__, "driver": driver, **loop, "value": value}),
             flush=True,
         )
 
@@ -553,12 +922,19 @@ def versions() -> dict[str, str]:
         ("mysqlclient", "MySQLdb"),
         ("pymysql", "pymysql"),
         ("mysqlconnector", "mysql.connector"),
+        ("asyncmy", "asyncmy"),
+        ("aiomysql", "aiomysql"),
+        ("uvloop", "uvloop"),
         ("sqlalchemy", "sqlalchemy"),
         ("django", "django"),
     ):
+        # asyncmy has no __version__: its distribution's metadata then.
         code = (
-            f"import {module} as m; v = getattr(m, '__version__', None) "
-            "or '.'.join(map(str, m.version_info[:3])); print(v)"
+            f"import importlib.metadata, {module} as m; "
+            "v = getattr(m, '__version__', None) "
+            "or ('.'.join(map(str, m.version_info[:3])) "
+            "if hasattr(m, 'version_info') "
+            f"else importlib.metadata.version({name!r})); print(v)"
         )
         out[name] = subprocess.run(  # noqa: S603  # our own interpreter
             [sys.executable, "-c", code], check=True, capture_output=True, text=True
@@ -598,36 +974,48 @@ def run_all(args: argparse.Namespace) -> None:
     root_cursor.execute("SELECT @@log_bin")
     binary_log = root_cursor.fetchone() == (1,)
     results: list[dict[str, Any]] = []
-    areas = args.areas.split(",") if args.areas else list(AREAS)
-    for area in areas:
-        for driver in DRIVERS:
-            print(f"{area} / {driver}...", flush=True)
-            out = subprocess.run(  # noqa: S603  # our own script
-                [
-                    sys.executable,
-                    __file__,
-                    "--worker",
-                    area,
-                    driver,
-                    "--repeat",
-                    str(args.repeat),
-                    "--repeat-large",
-                    str(args.repeat_large),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout
+    default = "dbapi,asyncio" if args.latency is not None else ",".join(AREAS)
+    areas = (args.areas or default).split(",")
+    runs = [
+        (area, driver, loop)
+        for area in areas
+        for loop in (args.loops if area in AREA_DRIVERS else ["-"])
+        for driver in AREA_DRIVERS.get(area, DRIVERS)
+    ]
+    env = dict(os.environ)
+    latency: dict[str, Any] = {}
+    if args.latency is not None:
+        # Every worker connects through toxiproxy; the tables were set up
+        # directly.
+        from pipeline import PROXIES  # noqa: PLC0415
+        from pipeline import round_trip  # noqa: PLC0415
+        from pipeline import set_latency  # noqa: PLC0415
+
+        listen, proxy = PROXIES[PORT]
+        env["RUSTMY_BENCH_PORT"] = str(listen)
+        set_latency(proxy, args.latency)
+        through = rustmy.connect(
+            host=HOST,
+            port=listen,
+            user=USER,
+            password=PASSWORD,
+            autocommit=True,
+            ssl_mode="disabled",
+        )
+        latency = {
+            "latency_ms": args.latency,
+            "round_trip_ms": round(round_trip(through) * 1e3, 3),
+        }
+        through.close()
+        print(f"+{args.latency} ms per reply: {latency['round_trip_ms']} ms round trip")
+    try:
+        for area, driver, loop in runs:
+            results.extend(measure(args, area, driver, loop, env))
             if binary_log:
                 root_cursor.execute("PURGE BINARY LOGS BEFORE NOW()")
-            for line in out.splitlines():
-                record = json.loads(line)
-                results.append(record)
-                unit = "MiB" if area == "memory" else "ms"
-                value = record["value"] if area == "memory" else record["value"] * 1000
-                print(
-                    f"  {record['name']:<44}{record['rows']:>10,}{value:>12.1f} {unit}"
-                )
+    finally:
+        if latency:
+            set_latency(proxy, 0)
     report = {
         "date": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "machine": f"{platform.system()} {platform.machine()}",
@@ -636,11 +1024,43 @@ def run_all(args: argparse.Namespace) -> None:
         "versions": versions(),
         "repeat": args.repeat,
         "repeat_large": args.repeat_large,
+        **latency,
         "results": results,
     }
     args.json.parent.mkdir(parents=True, exist_ok=True)
     args.json.write_text(json.dumps(report, indent=2) + "\n")
     print(f"results written to {args.json}")
+
+
+def measure(
+    args: argparse.Namespace, area: str, driver: str, loop: str, env: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Runs one area with one driver in a process of its own."""
+    print(f"{area} / {driver}" + ("" if loop == "-" else f" / {loop}"), flush=True)
+    out = subprocess.run(  # noqa: S603  # our own script
+        [
+            sys.executable,
+            __file__,
+            "--worker",
+            area,
+            driver,
+            "--repeat",
+            str(args.repeat),
+            "--repeat-large",
+            str(args.repeat_large),
+            *(["--loop", loop] if loop != "-" else []),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    ).stdout
+    records = [json.loads(line) for line in out.splitlines()]
+    for record in records:
+        unit = "MiB" if area == "memory" else "ms"
+        value = record["value"] if area == "memory" else record["value"] * 1000
+        print(f"  {record['name']:<44}{record['rows']:>10,}{value:>12.1f} {unit}")
+    return records
 
 
 def main() -> None:
@@ -650,16 +1070,37 @@ def main() -> None:
     parser.add_argument("--areas", help="comma-separated subset of " + ", ".join(AREAS))
     parser.add_argument("--keep-tables", action="store_true", help="reuse the tables")
     parser.add_argument(
+        "--loops",
+        type=lambda value: value.split(","),
+        default=["asyncio"],
+        help="event loops for the asyncio areas: asyncio (default), uvloop or both",
+    )
+    parser.add_argument("--loop", default="asyncio", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--latency",
+        type=int,
+        metavar="MS",
+        help="through toxiproxy, with MS added to every reply (areas dbapi and "
+        "asyncio unless --areas)",
+    )
+    parser.add_argument(
         "--json", type=Path, default=RESULTS / "showcase.json", metavar="PATH"
     )
     parser.add_argument(
         "--worker", nargs=2, metavar=("AREA", "DRIVER"), help=argparse.SUPPRESS
     )
     parser.add_argument(
-        "--render", type=Path, metavar="PATH", help="draw charts and tables from a JSON"
+        "--render",
+        type=Path,
+        nargs="+",
+        metavar="PATH",
+        help="draw charts and tables from a run's JSON, and the latency tables "
+        "from --latency runs' JSON",
     )
     args = parser.parse_args()
     if args.worker:
+        global LOOP  # noqa: PLW0603  # one worker process, one loop
+        LOOP = args.loop
         area, driver = args.worker
         worker(area, driver, args.repeat, args.repeat_large)
     elif args.render:

@@ -11,6 +11,7 @@ mod auth;
 pub mod binary;
 mod buf;
 pub mod charset;
+mod client;
 mod column;
 mod compress;
 mod conn;
@@ -20,29 +21,40 @@ mod error;
 #[doc(hidden)]
 pub mod fuzzing;
 mod handshake;
+mod infile;
+mod login;
 mod packet;
+pub mod pool;
 mod result;
+mod session;
 pub mod sql;
 pub mod text;
 mod tls;
+mod transport;
 
 pub use binary::Execute;
+pub use client::Client;
 pub use column::Column;
 pub use compress::Compression;
 pub use conn::Conn;
 pub use conn::DEFAULT_STATEMENT_CACHE;
 pub use conn::Opts;
 pub use conn::PipelineTotals;
-pub use conn::ReadOutcome;
 pub use conn::Statement;
-pub use conn::StreamId;
 pub use error::Error;
 pub use error::Result;
+pub use infile::LocalFile;
+pub use packet::Input;
 pub use result::QueryResult;
 pub use result::RowRef;
 pub use result::RowSet;
+pub use session::ReadOutcome;
+pub use session::StreamId;
 pub use tls::SslMode;
 pub use tls::TlsOpts;
+pub use transport::MaybeTls;
+pub use transport::StartTls;
+pub use transport::Transport;
 
 /// Maximum payload carried by a single protocol packet (2^24 - 1 bytes).
 ///

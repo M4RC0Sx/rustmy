@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
-use std::fs::File;
 use std::io;
 use std::io::Read;
 use std::io::Write;
@@ -19,72 +18,27 @@ use std::time::Duration;
 use socket2::SockRef;
 use socket2::TcpKeepalive;
 
-use crate::auth::AuthPlugin;
-use crate::auth::cleartext_password;
-use crate::auth::encrypt_password;
 use crate::auth::parse_public_key;
-use crate::auth::parsec_max_factor;
-use crate::auth::parsec_response;
-use crate::auth::trim_nonce;
 use crate::binary::Execute;
-use crate::buf::Reader;
-use crate::buf::put_nul_bytes;
-use crate::charset::handshake_collation;
+use crate::client::Client;
 use crate::column::Column;
 use crate::compress::Compression;
-use crate::constants::capability;
-use crate::constants::command;
-use crate::constants::status;
 use crate::error::Error;
 use crate::error::Result;
-use crate::handshake::HandshakeResponse;
-use crate::handshake::ServerHandshake;
-use crate::handshake::ssl_request;
+use crate::login::Login;
 use crate::packet::PacketStream;
-use crate::packet::ReplyStart;
-use crate::packet::release;
 use crate::result::QueryResult;
-use crate::result::RowPacket;
 use crate::result::RowSet;
-use crate::result::accept_row_packet;
-use crate::result::parse_eof;
-use crate::result::parse_err;
-use crate::result::parse_ok;
-use crate::result::row_terminator;
-use crate::sql::local_infile_names;
-use crate::tls::SslMode;
+use crate::session::ReadOutcome;
+use crate::session::StreamId;
 use crate::tls::TlsOpts;
 use crate::tls::client_config;
 use crate::tls::server_name;
 use crate::tls::tls_error;
-
-/// Capabilities requested by default; the effective set is the
-/// intersection with what the server offers.
-const DEFAULT_CAPABILITIES: u32 = capability::LONG_PASSWORD
-    | capability::LONG_FLAG
-    | capability::PROTOCOL_41
-    | capability::TRANSACTIONS
-    | capability::SECURE_CONNECTION
-    | capability::MULTI_RESULTS
-    | capability::PS_MULTI_RESULTS
-    | capability::PLUGIN_AUTH
-    | capability::PLUGIN_AUTH_LENENC_CLIENT_DATA
-    | capability::DEPRECATE_EOF;
-
-/// `caching_sha2_password`: the server found the password in its cache.
-const FAST_AUTH_SUCCESS: u8 = 0x03;
-/// `caching_sha2_password`: the server needs the cleartext password.
-const PERFORM_FULL_AUTH: u8 = 0x04;
-/// `caching_sha2_password`: client asks for the server's RSA public key.
-const CACHING_SHA2_REQUEST_PUBLIC_KEY: u8 = 0x02;
-/// `sha256_password`: client asks for the server's RSA public key.
-const SHA256_REQUEST_PUBLIC_KEY: u8 = 0x01;
-
-/// The server could not re-prepare a statement after a schema change.
-const ER_NEED_REPREPARE: u16 = 1615;
-/// The server holds `max_prepared_stmt_count` statements across all its
-/// connections.
-const ER_MAX_PREPARED_STMT_COUNT_REACHED: u16 = 1461;
+use crate::transport::Blocking;
+use crate::transport::Close;
+use crate::transport::Transport;
+use crate::transport::block_on;
 
 /// Idle time before TCP sends the first keepalive probe, and time between
 /// probes (where the platform lets us set it). A connection idle in a pool
@@ -94,11 +48,6 @@ const ER_MAX_PREPARED_STMT_COUNT_REACHED: u16 = 1461;
 /// last; the probes also keep such middleboxes from dropping it.
 const KEEPALIVE_TIME: Duration = Duration::from_secs(60);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Bytes of a local file sent per packet (`LOAD DATA LOCAL INFILE`). Measured
-/// from 4 to 64 KiB (benches/README.md): flat on a local link, while over a
-/// slow compressed one 16 KiB was 5% faster with zstd than 64 KiB.
-const LOCAL_INFILE_CHUNK: usize = 16 * 1024;
 
 /// Default size of the prepared-statement cache: the server allows 16,382
 /// prepared statements across all its connections by default
@@ -337,6 +286,12 @@ impl Stream {
     }
 }
 
+impl Close for Stream {
+    fn close(&mut self) {
+        self.shutdown();
+    }
+}
+
 impl Read for Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
@@ -390,56 +345,8 @@ fn keepalive() -> TcpKeepalive {
     keepalive
 }
 
-/// The error for a password that would have to be encrypted with a key
-/// the server sends, when [`Opts::get_server_public_key`] forbids asking.
-fn key_request_refused(plugin: AuthPlugin) -> Error {
-    Error::Auth(format!(
-        "{} needs the server's RSA public key to send the password without TLS; \
-         pin it with server_public_key, use TLS, or allow get_server_public_key",
-        String::from_utf8_lossy(plugin.name()),
-    ))
-}
-
-/// First authentication payload for `plugin`.
-fn first_response(
-    plugin: AuthPlugin,
-    password: &[u8],
-    nonce: &[u8],
-    secure: bool,
-    pinned_key: Option<&rsa::PublicKey>,
-    get_server_public_key: bool,
-) -> Result<Vec<u8>> {
-    if plugin != AuthPlugin::Sha256 {
-        return Ok(plugin.scramble(password, nonce));
-    }
-    // sha256_password sends the password itself from the start.
-    if password.is_empty() {
-        Ok(vec![0])
-    } else if secure {
-        Ok(cleartext_password(password))
-    } else if let Some(key) = pinned_key {
-        encrypt_password(password, nonce, key)
-    } else if get_server_public_key {
-        Ok(vec![SHA256_REQUEST_PUBLIC_KEY])
-    } else {
-        Err(key_request_refused(plugin))
-    }
-}
-
-/// Whether `reply` asks the server for its RSA public key. Only then may the
-/// next `AuthMoreData` be a key: accepting one at any other time would let a
-/// man in the middle replace a key pinned with `server_public_key` (or skip
-/// the request) and decrypt the password.
-fn requests_key(plugin: AuthPlugin, reply: &[u8]) -> bool {
-    matches!(
-        (plugin, reply),
-        (AuthPlugin::CachingSha2, [CACHING_SHA2_REQUEST_PUBLIC_KEY])
-            | (AuthPlugin::Sha256, [SHA256_REQUEST_PUBLIC_KEY])
-    )
-}
-
 /// [`Opts::local_infile_dir`] resolved, or why it cannot be used.
-fn local_infile_dir(opts: &Opts) -> Result<Option<PathBuf>> {
+pub(crate) fn local_infile_dir(opts: &Opts) -> Result<Option<PathBuf>> {
     opts.local_infile_dir
         .as_deref()
         .map(allowed_directory)
@@ -458,21 +365,7 @@ fn allowed_directory(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-/// Fills `buf` from `file` unless it ends first; returns the bytes read.
-fn read_full(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
-    let mut filled = 0;
-    while let Some(rest) = buf.get_mut(filled..).filter(|rest| !rest.is_empty()) {
-        match file.read(rest) {
-            Ok(0) => break,
-            Ok(read) => filled += read,
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(filled)
-}
-
-fn load_public_key(path: &Path) -> Result<rsa::PublicKey> {
+pub(crate) fn load_public_key(path: &Path) -> Result<rsa::PublicKey> {
     let pem = fs::read(path).map_err(|e| {
         Error::Config(format!(
             "cannot read server_public_key {}: {e}",
@@ -481,20 +374,6 @@ fn load_public_key(path: &Path) -> Result<rsa::PublicKey> {
     })?;
     parse_public_key(&pem)
         .map_err(|e| Error::Config(format!("server_public_key {}: {e}", path.display())))
-}
-
-/// Identifies a result set whose rows are being streamed, so that reading
-/// more rows fails once another command has discarded them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StreamId(u64);
-
-/// Where a streamed result set stands after a read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadOutcome {
-    /// More rows (or the terminator) are still on the wire.
-    More,
-    /// The result set ended; the terminator carried this many warnings.
-    Done { warnings: u16 },
 }
 
 /// A statement prepared on the server ([`Conn::prepare`]).
@@ -511,14 +390,14 @@ pub struct Statement {
 /// Statements prepared by [`Conn::execute_cached`], keyed by their SQL; the
 /// least recently used is closed when a new one needs the room.
 #[derive(Debug, Default)]
-struct StatementCache {
+pub(crate) struct StatementCache {
     capacity: usize,
     entries: HashMap<Vec<u8>, (Statement, u64)>,
     clock: u64,
 }
 
 impl StatementCache {
-    fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             // The statement being run is always kept.
             capacity: capacity.max(1),
@@ -526,7 +405,7 @@ impl StatementCache {
         }
     }
 
-    fn get(&mut self, sql: &[u8]) -> Option<&Statement> {
+    pub(crate) fn get(&mut self, sql: &[u8]) -> Option<&Statement> {
         self.clock += 1;
         let clock = self.clock;
         self.entries.get_mut(sql).map(|(statement, used)| {
@@ -537,7 +416,7 @@ impl StatementCache {
 
     /// The statement to close to make room for one more, if the cache is
     /// full.
-    fn evict(&mut self) -> Option<u32> {
+    pub(crate) fn evict(&mut self) -> Option<u32> {
         if self.entries.len() < self.capacity {
             return None;
         }
@@ -545,7 +424,7 @@ impl StatementCache {
     }
 
     /// Forgets the least recently used statement and returns its id.
-    fn evict_oldest(&mut self) -> Option<u32> {
+    pub(crate) fn evict_oldest(&mut self) -> Option<u32> {
         let oldest = self
             .entries
             .iter()
@@ -556,21 +435,21 @@ impl StatementCache {
             .map(|(statement, _)| statement.id)
     }
 
-    fn insert(&mut self, sql: Vec<u8>, statement: Statement) {
+    pub(crate) fn insert(&mut self, sql: Vec<u8>, statement: Statement) {
         self.clock += 1;
         self.entries.insert(sql, (statement, self.clock));
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Forgets every statement: the server has closed them.
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.entries.clear();
     }
 
-    fn remove(&mut self, sql: &[u8]) -> Option<u32> {
+    pub(crate) fn remove(&mut self, sql: &[u8]) -> Option<u32> {
         self.entries.remove(sql).map(|(statement, _)| statement.id)
     }
 }
@@ -589,65 +468,13 @@ pub struct PipelineTotals {
     pub error: Option<(usize, Error)>,
 }
 
-/// Which local files the server may ask for during the current command.
-#[derive(Debug)]
-enum Infile {
-    /// None.
-    Refuse,
-    /// Those the statement names (`LOAD DATA LOCAL INFILE 'name'`).
-    Allow(Vec<Vec<u8>>),
-    /// None, and a request breaks the connection: the server would read
-    /// the statements sent after this one as the file's contents.
-    Pipelined,
-}
-
-/// The result set whose rows are still unread on the wire.
-#[derive(Debug, Clone, Copy)]
-struct Pending {
-    id: StreamId,
-    deprecate_eof: bool,
-}
-
-/// An authenticated connection to a MySQL or MariaDB server.
+/// An authenticated connection to a MySQL or MariaDB server, over a
+/// blocking stream: each command runs the protocol's operation
+/// ([`crate::client`]) to its end.
 #[derive(Debug)]
 pub struct Conn {
-    stream: PacketStream<Stream>,
-    capabilities: u32,
-    status: u16,
-    server_version: String,
-    connection_id: u32,
-    /// Default plugin and nonce from the greeting, reused by `COM_CHANGE_USER`.
-    default_plugin: AuthPlugin,
-    greeting_nonce: Vec<u8>,
-    /// Pinned RSA key (`Opts::server_public_key`), also for `COM_CHANGE_USER`.
-    pinned_key: Option<rsa::PublicKey>,
-    /// [`Opts::get_server_public_key`], also for `COM_CHANGE_USER`.
-    get_server_public_key: bool,
-    /// Largest parsec iteration factor accepted, from the connect timeout.
-    parsec_max_factor: u8,
-    /// Session collation sent in the handshake, also for `COM_CHANGE_USER`.
-    collation: u8,
-    /// The server's default collation, from its greeting.
-    server_collation: u8,
-    /// Scratch buffer for control packets.
-    buf: Vec<u8>,
-    /// Streamed result set with rows still on the wire.
-    pending: Option<Pending>,
-    /// Last [`StreamId`] handed out.
-    last_stream_id: u64,
-    /// Whether the reply being read comes from `COM_STMT_EXECUTE` (its
-    /// result sets, queued ones included, have binary rows).
-    binary_reply: bool,
-    /// Statements prepared by [`Conn::execute_cached`], by SQL.
-    statements: StatementCache,
-    /// Compression in use, negotiated in the handshake.
-    compression: Option<Compression>,
-    /// zstd level sent in the handshake response.
-    zstd_level: u8,
-    /// [`Opts::local_infile_dir`], resolved.
-    local_infile_dir: Option<PathBuf>,
-    /// Local files the current command may send.
-    infile: Infile,
+    io: Blocking<Stream>,
+    client: Client,
 }
 
 impl Conn {
@@ -668,8 +495,8 @@ impl Conn {
             opts.connect_timeout.or(opts.write_timeout),
         )?;
         let conn = Self::handshake(transport, opts, local_infile_dir)?;
-        conn.stream
-            .get_ref()
+        conn.io
+            .0
             .set_timeouts(opts.read_timeout, opts.write_timeout)?;
         Ok(conn)
     }
@@ -688,244 +515,63 @@ impl Conn {
         let mut stream = PacketStream::new(transport);
         let mut buf = Vec::new();
         stream.read_into(&mut buf)?;
-        let greeting = ServerHandshake::parse(&buf)?;
-
-        if greeting.capabilities & capability::PROTOCOL_41 == 0 {
-            return Err(Error::unsupported("servers older than MySQL 4.1"));
-        }
-        let mut wanted = DEFAULT_CAPABILITIES | opts.client_flag;
-        if opts.database.is_some() {
-            wanted |= capability::CONNECT_WITH_DB;
-        }
-        if local_infile_dir.is_some() {
-            wanted |= capability::LOCAL_FILES;
-        }
-        let use_tls = Self::negotiate_tls(opts, &greeting)?;
-        if use_tls {
-            wanted |= capability::SSL;
-        }
-        // With both flags the server picks zlib: ask for one only.
-        let zstd_offered = greeting.capabilities & capability::ZSTD_COMPRESSION_ALGORITHM != 0;
-        let (compression, zstd_level) = match opts.compress {
-            Some(Compression::Zstd { level }) if zstd_offered => {
-                wanted |= capability::ZSTD_COMPRESSION_ALGORITHM;
-                (Some(Compression::Zstd { level }), level)
-            }
-            Some(_) if greeting.capabilities & capability::COMPRESS != 0 => {
-                wanted |= capability::COMPRESS;
-                (Some(Compression::Zlib), 0)
-            }
-            _ => (None, 0),
-        };
-        let capabilities = wanted & greeting.capabilities;
-        let collation =
-            handshake_collation(&opts.charset, greeting.collation, greeting.is_mariadb())
-                .ok_or_else(|| {
-                    Error::Config(format!("unknown character set {:?}", opts.charset))
-                })?;
-
-        if use_tls {
+        let login = Login::new(opts, &buf, local_infile_dir.is_some())?;
+        if let Some(request) = login.ssl_request() {
             // SSLRequest goes out in plain text, then the same socket is
             // wrapped in TLS and the sequence continues inside it.
-            stream.write_packet(&ssl_request(capabilities, collation))?;
+            stream.write_packet(&request)?;
             let (raw, seq) = stream.into_parts()?;
             stream = PacketStream::from_parts(raw.upgrade(&opts.tls, &opts.host)?, seq);
         }
-
-        let mut conn = Self {
-            stream,
-            capabilities,
-            status: greeting.status,
-            server_version: greeting.server_version.clone(),
-            connection_id: greeting.connection_id,
-            // Answer with the server's default plugin when we know it;
-            // otherwise offer native auth and let the server switch us.
-            default_plugin: AuthPlugin::from_name(&greeting.auth_plugin)
-                .unwrap_or(AuthPlugin::Native),
-            greeting_nonce: greeting.nonce.clone(),
-            pinned_key: opts
-                .server_public_key
-                .as_deref()
-                .map(load_public_key)
-                .transpose()?,
-            get_server_public_key: opts.get_server_public_key,
-            parsec_max_factor: parsec_max_factor(opts.connect_timeout),
-            collation,
-            server_collation: greeting.collation,
+        let secure = stream.get_ref().is_secure();
+        let (mut io, wire) = stream.into_wire();
+        let client = block_on(Client::authenticate(
+            &mut io,
+            wire,
+            login,
+            opts,
             buf,
-            pending: None,
-            last_stream_id: 0,
-            binary_reply: false,
-            statements: StatementCache::new(opts.statement_cache),
-            compression,
-            zstd_level,
             local_infile_dir,
-            infile: Infile::Refuse,
-        };
-        conn.authenticate(opts)?;
-        conn.stream.authenticated();
-        if let Some(algorithm) = compression {
-            conn.stream.compress(algorithm)?;
-        }
-        Ok(conn)
-    }
-
-    /// Decides whether to use TLS, per `ssl_mode` and what the server offers.
-    fn negotiate_tls(opts: &Opts, greeting: &ServerHandshake) -> Result<bool> {
-        let mode = opts.tls.mode;
-        if mode == SslMode::Disabled {
-            return Ok(false);
-        }
-        if opts.unix_socket.is_some() {
-            // A local socket is already private; certificates name hosts.
-            if mode.verifies() {
-                return Err(Error::Tls(
-                    "certificate verification needs a TCP connection, not a Unix socket".to_owned(),
-                ));
-            }
-            return Ok(false);
-        }
-        let server_has_tls = greeting.capabilities & capability::SSL != 0;
-        if mode.requires_tls() && !server_has_tls {
-            return Err(Error::Tls(format!(
-                "ssl_mode {mode:?} needs TLS but the server does not support it"
-            )));
-        }
-        Ok(server_has_tls)
+            secure,
+        ))?;
+        Ok(Self { io, client })
     }
 
     /// Compression in use, if any.
     #[must_use]
     pub const fn compression(&self) -> Option<Compression> {
-        self.compression
+        self.client.compression
     }
 
     /// Whether the connection is encrypted with TLS.
     #[must_use]
     pub fn is_tls(&self) -> bool {
-        matches!(self.stream.get_ref(), Stream::Tls(_))
+        matches!(self.io.0, Stream::Tls(_))
     }
 
-    fn authenticate(&mut self, opts: &Opts) -> Result<()> {
-        let password = opts.password.as_bytes();
-        let plugin = self.default_plugin;
-        let nonce = self.greeting_nonce.clone();
-        let auth_response = self.first_response(plugin, password, &nonce)?;
-        let response = HandshakeResponse {
-            capabilities: self.capabilities,
-            collation: self.collation,
-            user: &opts.user,
-            auth_response: &auth_response,
-            database: opts.database.as_deref(),
-            auth_plugin: plugin.name(),
-            zstd_level: self.zstd_level,
-        }
-        .encode()?;
-        self.stream.write_packet(&response)?;
-        let key_requested = requests_key(plugin, &auth_response);
-        self.auth_exchange(password, plugin, nonce, key_requested)
-    }
-
-    fn first_response(&self, plugin: AuthPlugin, password: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
-        let secure = self.stream.get_ref().is_secure();
-        first_response(
-            plugin,
-            password,
-            nonce,
-            secure,
-            self.pinned_key.as_ref(),
-            self.get_server_public_key,
-        )
-    }
-
-    /// Runs the server-driven part of authentication (auth switches and
-    /// plugin-specific round trips) until OK or ERR. `key_requested` says
-    /// whether what the client last sent asked for the server's public key.
-    fn auth_exchange(
-        &mut self,
-        password: &[u8],
-        mut plugin: AuthPlugin,
-        mut nonce: Vec<u8>,
-        mut key_requested: bool,
-    ) -> Result<()> {
-        let secure = self.stream.get_ref().is_secure();
-        loop {
-            self.read_packet()?;
-            let reply = match self.buf.first().copied() {
-                Some(0x00) => {
-                    self.status = parse_ok(&self.buf)?.status;
-                    return Ok(());
-                }
-                Some(0xFF) => return Err(parse_err(&self.buf)),
-                Some(0xFE) => {
-                    // Auth switch: plugin name, then a fresh nonce.
-                    let mut r = Reader::new(&self.buf);
-                    r.skip(1)?;
-                    let name = r.nul_bytes()?;
-                    plugin = AuthPlugin::from_name(name).ok_or_else(|| {
-                        Error::unsupported(format!(
-                            "authentication plugin {:?}",
-                            String::from_utf8_lossy(name)
-                        ))
-                    })?;
-                    let data = r.rest();
-                    nonce = if plugin.nul_terminated_nonce() {
-                        trim_nonce(data).to_vec()
-                    } else {
-                        data.to_vec()
-                    };
-                    self.first_response(plugin, password, &nonce)?
-                }
-                // AuthMoreData: plugin-specific continuation.
-                Some(0x01) => {
-                    let data = self.buf.get(1..).unwrap_or_default();
-                    match (plugin, data) {
-                        (AuthPlugin::CachingSha2, [FAST_AUTH_SUCCESS]) => continue,
-                        (AuthPlugin::CachingSha2, [PERFORM_FULL_AUTH]) => {
-                            if secure {
-                                cleartext_password(password)
-                            } else if let Some(key) = &self.pinned_key {
-                                encrypt_password(password, &nonce, key)?
-                            } else if self.get_server_public_key {
-                                vec![CACHING_SHA2_REQUEST_PUBLIC_KEY]
-                            } else {
-                                return Err(key_request_refused(plugin));
-                            }
-                        }
-                        // The public key we asked for; never one we did not
-                        // (a pinned key is never requested).
-                        (AuthPlugin::CachingSha2 | AuthPlugin::Sha256, pem) => {
-                            if !key_requested {
-                                return Err(Error::protocol(
-                                    "the server sent a public key the client did not request",
-                                ));
-                            }
-                            encrypt_password(password, &nonce, &parse_public_key(pem)?)?
-                        }
-                        (AuthPlugin::Parsec, salt) => {
-                            parsec_response(password, &nonce, salt, self.parsec_max_factor)?
-                        }
-                        (AuthPlugin::Native | AuthPlugin::Ed25519, _) => {
-                            return Err(Error::protocol(
-                                "unexpected AuthMoreData for this authentication plugin",
-                            ));
-                        }
-                    }
-                }
-                // parsec's salt message may also arrive without the 0x01 prefix.
-                Some(b'P') if plugin == AuthPlugin::Parsec => {
-                    parsec_response(password, &nonce, &self.buf, self.parsec_max_factor)?
-                }
-                _ => return Err(Error::protocol("unexpected packet during authentication")),
-            };
-            key_requested = requests_key(plugin, &reply);
-            self.stream.write_packet(&reply)?;
+    /// How many bytes of statements [`Conn::pipeline`] may send in one
+    /// batch (a single statement larger than this goes alone).
+    ///
+    /// While a batch is being written the server is already replying, and a
+    /// large reply (rows) that fills the socket's buffers stops it reading
+    /// until we read, which we only do once the write ends: the batch must
+    /// fit in our send buffer, whatever the server does. 16 KiB is Linux's
+    /// default for TCP (other systems start higher); Unix sockets on macOS
+    /// default to 8 KiB.
+    #[must_use]
+    pub fn pipeline_budget(&self) -> usize {
+        match self.io.0 {
+            #[cfg(unix)]
+            Stream::Unix(_) => 8 * 1024,
+            _ => 16 * 1024,
         }
     }
 
-    fn read_packet(&mut self) -> Result<()> {
-        self.buf.clear();
-        self.stream.read_into(&mut self.buf).map(|_| ())
+    /// Whether the server has more results queued for the last query
+    /// (multi-statement queries and stored procedures).
+    #[must_use]
+    pub const fn has_more_results(&self) -> bool {
+        self.client.session.has_more_results()
     }
 
     /// Runs `sql` with the text protocol and returns the first result.
@@ -937,8 +583,7 @@ impl Conn {
     ///
     /// I/O failures, protocol violations or an ERR packet from the server.
     pub fn query(&mut self, sql: &[u8]) -> Result<QueryResult> {
-        let (result, stream) = self.query_streamed(sql)?;
-        self.read_all(result, stream)
+        block_on(self.client.query(&mut self.io, sql))
     }
 
     /// Like [`Conn::query`], but leaves the rows on the wire: the result
@@ -951,11 +596,7 @@ impl Conn {
     ///
     /// I/O failures, protocol violations or an ERR packet from the server.
     pub fn query_streamed(&mut self, sql: &[u8]) -> Result<(QueryResult, Option<StreamId>)> {
-        self.drain_results()?;
-        self.infile = self.allowed_files(sql);
-        self.stream.write_command(command::QUERY, sql)?;
-        self.binary_reply = false;
-        self.read_head()
+        block_on(self.client.query_streamed(&mut self.io, sql))
     }
 
     /// Prepares `sql` (with `?` placeholders) on the server
@@ -966,41 +607,7 @@ impl Conn {
     /// I/O failures, protocol violations, or the server's error (a syntax
     /// error, too many prepared statements...).
     pub fn prepare(&mut self, sql: &[u8]) -> Result<Statement> {
-        self.drain_results()?;
-        self.stream.write_command(command::STMT_PREPARE, sql)?;
-        self.read_packet()?;
-        match self.buf.first() {
-            Some(0x00) => {}
-            Some(0xFF) => return Err(parse_err(&self.buf)),
-            _ => return Err(Error::protocol("unexpected reply to COM_STMT_PREPARE")),
-        }
-        let mut r = Reader::new(&self.buf);
-        r.skip(1)?;
-        let id = r.u32()?;
-        let columns = usize::from(r.u16()?);
-        let params = r.u16()?;
-        let deprecate_eof = self.capabilities & capability::DEPRECATE_EOF != 0;
-        // Parameter definitions say nothing useful (every type is "string"
-        // before the first execution).
-        for _ in 0..params {
-            self.read_packet()?;
-        }
-        if params > 0 && !deprecate_eof {
-            self.read_packet()?;
-        }
-        let mut definitions = Vec::with_capacity(columns.min(4096));
-        for _ in 0..columns {
-            self.read_packet()?;
-            definitions.push(Column::parse(&self.buf)?);
-        }
-        if columns > 0 && !deprecate_eof {
-            self.read_packet()?;
-        }
-        Ok(Statement {
-            id,
-            params,
-            columns: definitions,
-        })
+        block_on(self.client.prepare(&mut self.io, sql))
     }
 
     /// Runs a prepared statement (`COM_STMT_EXECUTE`, `payload` from
@@ -1012,10 +619,7 @@ impl Conn {
     ///
     /// I/O failures, protocol violations or an ERR packet from the server.
     pub fn execute_streamed(&mut self, payload: &[u8]) -> Result<(QueryResult, Option<StreamId>)> {
-        self.drain_results()?;
-        self.stream.write_command(command::STMT_EXECUTE, payload)?;
-        self.binary_reply = true;
-        self.read_head()
+        block_on(self.client.execute_streamed(&mut self.io, payload))
     }
 
     /// Like [`Conn::execute_streamed`], reading every row.
@@ -1024,8 +628,7 @@ impl Conn {
     ///
     /// As [`Conn::execute_streamed`].
     pub fn execute(&mut self, payload: &[u8]) -> Result<QueryResult> {
-        let (result, stream) = self.execute_streamed(payload)?;
-        self.read_all(result, stream)
+        block_on(self.client.execute(&mut self.io, payload))
     }
 
     /// Frees a prepared statement on the server (`COM_STMT_CLOSE`, which
@@ -1035,9 +638,7 @@ impl Conn {
     ///
     /// I/O failures.
     pub fn close_statement(&mut self, id: u32) -> Result<()> {
-        self.drain_results()?;
-        self.stream
-            .write_command(command::STMT_CLOSE, &id.to_le_bytes())
+        block_on(self.client.close_statement(&mut self.io, id))
     }
 
     /// Runs `sql` as a prepared statement with `params`, preparing it first
@@ -1054,22 +655,10 @@ impl Conn {
         sql: &[u8],
         params: &Execute,
     ) -> Result<(QueryResult, Option<StreamId>)> {
-        let id = self.cached_statement(sql, params)?;
-        match self.execute_streamed(&params.finish(id)) {
-            // The server could not re-prepare it after a schema change:
-            // prepare it again, once.
-            Err(Error::Server {
-                code: ER_NEED_REPREPARE,
-                ..
-            }) => {
-                if let Some(id) = self.statements.remove(sql) {
-                    self.close_statement(id)?;
-                }
-                let id = self.cached_statement(sql, params)?;
-                self.execute_streamed(&params.finish(id))
-            }
-            other => other,
-        }
+        block_on(
+            self.client
+                .execute_cached_streamed(&mut self.io, sql, params),
+        )
     }
 
     /// Like [`Conn::execute_cached_streamed`], reading every row.
@@ -1078,64 +667,7 @@ impl Conn {
     ///
     /// As [`Conn::execute_cached_streamed`].
     pub fn execute_cached(&mut self, sql: &[u8], params: &Execute) -> Result<QueryResult> {
-        let (result, stream) = self.execute_cached_streamed(sql, params)?;
-        self.read_all(result, stream)
-    }
-
-    /// The id of `sql` prepared on this connection, preparing it (and
-    /// closing the least recently used statement) if needed.
-    fn cached_statement(&mut self, sql: &[u8], params: &Execute) -> Result<u32> {
-        let expected = if let Some(statement) = self.statements.get(sql) {
-            (statement.id, statement.params)
-        } else {
-            if let Some(oldest) = self.statements.evict() {
-                self.close_statement(oldest)?;
-            }
-            let statement = match self.prepare(sql) {
-                // The server's statements are all taken, some by this
-                // connection's cache: free the least recently used one and
-                // try once more.
-                Err(Error::Server {
-                    code: ER_MAX_PREPARED_STMT_COUNT_REACHED,
-                    ..
-                }) if !self.statements.is_empty() => {
-                    if let Some(oldest) = self.statements.evict_oldest() {
-                        self.close_statement(oldest)?;
-                    }
-                    self.prepare(sql)?
-                }
-                other => other?,
-            };
-            let found = (statement.id, statement.params);
-            self.statements.insert(sql.to_vec(), statement);
-            found
-        };
-        let (id, placeholders) = expected;
-        if usize::from(placeholders) != params.len() {
-            return Err(Error::Parameters {
-                expected: placeholders,
-                given: params.len(),
-            });
-        }
-        Ok(id)
-    }
-
-    /// How many bytes of statements [`Conn::pipeline`] may send in one
-    /// batch (a single statement larger than this goes alone).
-    ///
-    /// While a batch is being written the server is already replying, and a
-    /// large reply (rows) that fills the socket's buffers stops it reading
-    /// until we read, which we only do once the write ends: the batch must
-    /// fit in our send buffer, whatever the server does. 16 KiB is Linux's
-    /// default for TCP (other systems start higher); Unix sockets on macOS
-    /// default to 8 KiB.
-    #[must_use]
-    pub fn pipeline_budget(&self) -> usize {
-        match self.stream.get_ref() {
-            #[cfg(unix)]
-            Stream::Unix(_) => 8 * 1024,
-            _ => 16 * 1024,
-        }
+        block_on(self.client.execute_cached(&mut self.io, sql, params))
     }
 
     /// Runs `statements` with the text protocol, sending them all before
@@ -1156,10 +688,7 @@ impl Conn {
         &mut self,
         statements: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<PipelineTotals> {
-        let replies = self.send_pipeline(command::QUERY, statements)?;
-        let mut totals = PipelineTotals::default();
-        self.read_replies(&replies, &mut totals)?;
-        Ok(totals)
+        block_on(self.client.pipeline(&mut self.io, statements))
     }
 
     /// Like [`Conn::pipeline`] with `last` sent after `statements`, whose
@@ -1175,8 +704,10 @@ impl Conn {
         statements: impl IntoIterator<Item = &'a [u8]>,
         last: &'a [u8],
     ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
-        let replies = self.send_pipeline(command::QUERY, statements.into_iter().chain([last]))?;
-        self.finish_pipeline_streamed(&replies)
+        block_on(
+            self.client
+                .pipeline_streamed(&mut self.io, statements, last),
+        )
     }
 
     /// Runs `sql` as a prepared statement once per item of `params`,
@@ -1194,12 +725,7 @@ impl Conn {
         sql: &[u8],
         params: &[Execute],
     ) -> Result<PipelineTotals> {
-        let payloads = self.execute_payloads(sql, params)?;
-        let replies =
-            self.send_pipeline(command::STMT_EXECUTE, payloads.iter().map(Vec::as_slice))?;
-        let mut totals = PipelineTotals::default();
-        self.read_replies(&replies, &mut totals)?;
-        Ok(totals)
+        block_on(self.client.execute_many_cached(&mut self.io, sql, params))
     }
 
     /// Like [`Conn::execute_many_cached`] with `last` run after `params`,
@@ -1215,105 +741,10 @@ impl Conn {
         params: &[Execute],
         last: &Execute,
     ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
-        let mut payloads = self.execute_payloads(sql, params)?;
-        payloads.extend(self.execute_payloads(sql, std::slice::from_ref(last))?);
-        let replies =
-            self.send_pipeline(command::STMT_EXECUTE, payloads.iter().map(Vec::as_slice))?;
-        self.finish_pipeline_streamed(&replies)
-    }
-
-    /// `COM_STMT_EXECUTE` payloads of `sql` (prepared if needed) for each
-    /// item of `params`.
-    fn execute_payloads(&mut self, sql: &[u8], params: &[Execute]) -> Result<Vec<Vec<u8>>> {
-        let mut payloads = Vec::with_capacity(params.len());
-        for item in params {
-            let id = self.cached_statement(sql, item)?;
-            payloads.push(item.finish(id));
-        }
-        Ok(payloads)
-    }
-
-    /// Reads every reply of a pipelined batch but the last one's head, as
-    /// [`Conn::pipeline_streamed`] leaves it.
-    fn finish_pipeline_streamed(
-        &mut self,
-        replies: &[ReplyStart],
-    ) -> Result<(PipelineTotals, QueryResult, Option<StreamId>)> {
-        let (&last, others) = replies
-            .split_last()
-            .ok_or_else(|| Error::protocol("empty pipeline"))?;
-        let mut totals = PipelineTotals::default();
-        self.read_replies(others, &mut totals)?;
-        self.stream.expect_reply(last);
-        if let Some((_, err)) = totals.error.take() {
-            // The last statement ran too: read its reply before reporting.
-            match self.read_reply(&mut totals) {
-                Ok(()) | Err(Error::Server { .. }) => return Err(err),
-                Err(other) => return Err(other),
-            }
-        }
-        let (head, stream) = self.read_head()?;
-        Ok((totals, head, stream))
-    }
-
-    /// Sends one `cmd` (`COM_QUERY` or `COM_STMT_EXECUTE`) per payload in a
-    /// single write; returns where each reply starts.
-    fn send_pipeline<'a>(
-        &mut self,
-        cmd: u8,
-        payloads: impl IntoIterator<Item = &'a [u8]>,
-    ) -> Result<Vec<ReplyStart>> {
-        self.drain_results()?;
-        let payloads: Vec<&[u8]> = payloads.into_iter().collect();
-        self.infile = match payloads.as_slice() {
-            [only] if cmd == command::QUERY => self.allowed_files(only),
-            [_] => Infile::Refuse,
-            _ => Infile::Pipelined,
-        };
-        let mut replies = Vec::new();
-        self.stream
-            .write_commands(cmd, payloads.iter().copied(), &mut replies)?;
-        self.binary_reply = cmd == command::STMT_EXECUTE;
-        Ok(replies)
-    }
-
-    /// Reads the replies starting at `replies`, adding them to `totals`.
-    fn read_replies(&mut self, replies: &[ReplyStart], totals: &mut PipelineTotals) -> Result<()> {
-        for (index, &start) in replies.iter().enumerate() {
-            self.stream.expect_reply(start);
-            match self.read_reply(totals) {
-                Ok(()) => {}
-                Err(err @ Error::Server { .. }) => {
-                    if totals.error.is_none() {
-                        totals.error = Some((index, err));
-                    }
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Ok(())
-    }
-
-    /// Reads one statement's whole reply (every result, rows dropped),
-    /// adding its first result's rowcount to `totals`.
-    fn read_reply(&mut self, totals: &mut PipelineTotals) -> Result<()> {
-        let mut first = true;
-        loop {
-            let (result, stream) = self.read_head()?;
-            let count = if let Some(id) = stream {
-                u64::try_from(self.skip_rows(id, usize::MAX)?.0).unwrap_or(u64::MAX)
-            } else {
-                totals.last_insert_id = result.last_insert_id;
-                result.affected_rows
-            };
-            if first {
-                totals.rowcount += count;
-                first = false;
-            }
-            if !self.has_more_results() {
-                return Ok(());
-            }
-        }
+        block_on(
+            self.client
+                .execute_many_cached_streamed(&mut self.io, sql, params, last),
+        )
     }
 
     /// Reads rows of the streamed result set `id` into `rows`, stopping
@@ -1331,32 +762,7 @@ impl Conn {
         rows: &mut RowSet,
         max_bytes: usize,
     ) -> Result<ReadOutcome> {
-        let pending = self.pending_rows(id)?;
-        let limit = rows.data_len().saturating_add(max_bytes);
-        loop {
-            let packet = self
-                .stream
-                .read_into(rows.data_mut())
-                .and_then(|range| accept_row_packet(rows, range, pending.deprecate_eof));
-            match packet {
-                Ok(RowPacket::Row) => {
-                    if rows.data_len() >= limit {
-                        return Ok(ReadOutcome::More);
-                    }
-                }
-                Ok(RowPacket::End(end)) => {
-                    self.pending = None;
-                    self.status = end.status;
-                    return Ok(ReadOutcome::Done {
-                        warnings: end.warnings,
-                    });
-                }
-                Err(err) => {
-                    self.pending = None;
-                    return Err(err);
-                }
-            }
-        }
+        block_on(self.client.read_rows(&mut self.io, id, rows, max_bytes))
     }
 
     /// Reads and drops up to `limit` rows of the streamed result set `id`
@@ -1366,63 +772,7 @@ impl Conn {
     ///
     /// As [`Conn::read_rows`].
     pub fn skip_rows(&mut self, id: StreamId, limit: usize) -> Result<(usize, ReadOutcome)> {
-        let pending = self.pending_rows(id)?;
-        let mut skipped = 0;
-        while skipped < limit {
-            let end = self
-                .read_packet()
-                .and_then(|()| row_terminator(&self.buf, pending.deprecate_eof));
-            match end {
-                Ok(None) => skipped += 1,
-                Ok(Some(end)) => {
-                    self.pending = None;
-                    self.status = end.status;
-                    // A large row skipped may have grown the buffer.
-                    release(&mut self.buf);
-                    return Ok((
-                        skipped,
-                        ReadOutcome::Done {
-                            warnings: end.warnings,
-                        },
-                    ));
-                }
-                Err(err) => {
-                    self.pending = None;
-                    release(&mut self.buf);
-                    return Err(err);
-                }
-            }
-        }
-        Ok((skipped, ReadOutcome::More))
-    }
-
-    fn pending_rows(&self, id: StreamId) -> Result<Pending> {
-        match self.pending {
-            Some(pending) if pending.id == id => Ok(pending),
-            _ => Err(Error::ResultDiscarded),
-        }
-    }
-
-    /// Reads the remaining rows of `stream` into `result`.
-    fn read_all(
-        &mut self,
-        mut result: QueryResult,
-        stream: Option<StreamId>,
-    ) -> Result<QueryResult> {
-        if let Some(id) = stream
-            && let ReadOutcome::Done { warnings } =
-                self.read_rows(id, &mut result.rows, usize::MAX)?
-        {
-            result.warnings = warnings;
-        }
-        Ok(result)
-    }
-
-    /// Whether the server has more results queued for the last query
-    /// (multi-statement queries and stored procedures).
-    #[must_use]
-    pub const fn has_more_results(&self) -> bool {
-        self.status & status::MORE_RESULTS_EXISTS != 0
+        block_on(self.client.skip_rows(&mut self.io, id, limit))
     }
 
     /// Reads the next queued result, if any.
@@ -1431,9 +781,7 @@ impl Conn {
     ///
     /// I/O failures, protocol violations or an ERR packet from the server.
     pub fn next_result(&mut self) -> Result<Option<QueryResult>> {
-        self.next_result_streamed()?
-            .map(|(result, stream)| self.read_all(result, stream))
-            .transpose()
+        block_on(self.client.next_result(&mut self.io))
     }
 
     /// Like [`Conn::next_result`], leaving the rows on the wire as
@@ -1444,184 +792,7 @@ impl Conn {
     ///
     /// I/O failures, protocol violations or an ERR packet from the server.
     pub fn next_result_streamed(&mut self) -> Result<Option<(QueryResult, Option<StreamId>)>> {
-        self.discard_pending_rows()?;
-        if self.has_more_results() {
-            self.read_head().map(Some)
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Reads the start of a statement's response: the OK packet, or the
-    /// column definitions of a result set, whose rows stay pending.
-    fn read_head(&mut self) -> Result<(QueryResult, Option<StreamId>)> {
-        // An error ends the whole response, including queued results.
-        self.status &= !status::MORE_RESULTS_EXISTS;
-        self.read_packet()?;
-        match self.buf.first().copied() {
-            Some(0x00) => {
-                let ok = parse_ok(&self.buf)?;
-                self.status = ok.status;
-                Ok((QueryResult::from_ok(ok), None))
-            }
-            Some(0xFF) => Err(parse_err(&self.buf)),
-            Some(0xFB) => self.local_infile(),
-            Some(_) => {
-                let count = Reader::new(&self.buf).lenenc_len()?;
-                self.read_columns(count, self.binary_reply)
-            }
-            None => Err(Error::protocol("empty response packet")),
-        }
-    }
-
-    /// Local files `sql` may make the server ask for.
-    fn allowed_files(&self, sql: &[u8]) -> Infile {
-        if self.local_infile_dir.is_none() {
-            return Infile::Refuse;
-        }
-        let no_backslash_escapes = self.status & status::NO_BACKSLASH_ESCAPES != 0;
-        Infile::Allow(local_infile_names(sql, no_backslash_escapes))
-    }
-
-    /// Answers the server's request for a local file (`LOAD DATA LOCAL
-    /// INFILE`, the request in `buf`) with the file, or with an empty one
-    /// if it is not allowed, and reads the statement's reply.
-    fn local_infile(&mut self) -> Result<(QueryResult, Option<StreamId>)> {
-        if matches!(self.infile, Infile::Pipelined) {
-            self.stream.get_mut().shutdown();
-            return Err(Error::protocol(
-                "the server asked for a local file in the middle of a pipelined batch",
-            ));
-        }
-        let name = self.buf.get(1..).unwrap_or_default().to_vec();
-        let refused = match self.open_local_file(&name) {
-            Ok((path, file)) => {
-                self.send_file(&path, file)?;
-                None
-            }
-            Err(reason) => Some(reason),
-        };
-        if refused.is_some() {
-            // An empty file ends the request; the statement loads nothing.
-            self.stream.write_packet(&[])?;
-        }
-        self.read_packet()?;
-        let reply = match self.buf.first() {
-            Some(0x00) => {
-                let ok = parse_ok(&self.buf)?;
-                self.status = ok.status;
-                Ok((QueryResult::from_ok(ok), None))
-            }
-            Some(0xFF) => Err(parse_err(&self.buf)),
-            _ => Err(Error::protocol(
-                "expected an OK or ERR packet after a local file",
-            )),
-        };
-        match (refused, reply) {
-            (_, Err(err @ (Error::Io(_) | Error::Protocol(_)))) | (None, Err(err)) => Err(err),
-            (Some(reason), _) => Err(Error::LocalInfile(reason)),
-            (None, reply) => reply,
-        }
-    }
-
-    /// Opens the local file `name` (as the server asked for it) if this
-    /// command may send it, or says why not. Nothing on disk is touched
-    /// unless the statement named the file.
-    fn open_local_file(&self, name: &[u8]) -> std::result::Result<(PathBuf, File), String> {
-        let shown = String::from_utf8_lossy(name);
-        let Some(dir) = &self.local_infile_dir else {
-            return Err(format!(
-                "the server asked for {shown:?}, but LOAD DATA LOCAL INFILE is disabled \
-                 (local_infile_dir allows the files of a directory)"
-            ));
-        };
-        let named = match &self.infile {
-            Infile::Allow(names) => names.iter().any(|allowed| allowed == name),
-            Infile::Refuse | Infile::Pipelined => false,
-        };
-        if !named {
-            return Err(format!(
-                "the server asked for {shown:?}, which the statement being run does not name"
-            ));
-        }
-        let path = std::str::from_utf8(name)
-            .map_err(|_| format!("the file name {shown:?} is not valid UTF-8"))?;
-        // Relative names start at the working directory, as in other clients.
-        let resolved = fs::canonicalize(path).map_err(|err| format!("{path}: {err}"))?;
-        if !resolved.starts_with(dir) {
-            return Err(format!(
-                "{path} is outside local_infile_dir ({})",
-                dir.display()
-            ));
-        }
-        // Checked before opening too: opening a FIFO blocks until something
-        // writes to it, with the connection held. The descriptor is checked
-        // again below, in case the path changed in between.
-        let is_file = fs::metadata(&resolved)
-            .map_err(|err| format!("{path}: {err}"))?
-            .is_file();
-        if !is_file {
-            return Err(format!("{path} is not a regular file"));
-        }
-        let file = File::open(&resolved).map_err(|err| format!("{path}: {err}"))?;
-        let is_file = file
-            .metadata()
-            .map_err(|err| format!("{path}: {err}"))?
-            .is_file();
-        if !is_file {
-            return Err(format!("{path} is not a regular file"));
-        }
-        Ok((resolved, file))
-    }
-
-    /// Sends `file` in packets and the empty packet that ends it. If the
-    /// file cannot be read to the end, the connection is closed instead,
-    /// so the server aborts the statement rather than loading part of it.
-    fn send_file(&mut self, path: &Path, mut file: File) -> Result<()> {
-        let mut chunk = vec![0; LOCAL_INFILE_CHUNK];
-        loop {
-            let len = match read_full(&mut file, &mut chunk) {
-                Ok(len) => len,
-                Err(err) => {
-                    self.stream.get_mut().shutdown();
-                    return Err(io::Error::new(
-                        err.kind(),
-                        format!("reading {}: {err}", path.display()),
-                    )
-                    .into());
-                }
-            };
-            if len == 0 {
-                return self.stream.write_packet(&[]);
-            }
-            self.stream
-                .write_packet(chunk.get(..len).unwrap_or_default())?;
-        }
-    }
-
-    fn read_columns(
-        &mut self,
-        count: usize,
-        binary: bool,
-    ) -> Result<(QueryResult, Option<StreamId>)> {
-        let deprecate_eof = self.capabilities & capability::DEPRECATE_EOF != 0;
-        // Cap the preallocation: `count` comes from the server.
-        let mut columns = Vec::with_capacity(count.min(4096));
-        for _ in 0..count {
-            self.read_packet()?;
-            columns.push(Column::parse(&self.buf)?);
-        }
-        if !deprecate_eof {
-            self.read_packet()?;
-            if self.buf.first() != Some(&0xFE) {
-                return Err(Error::protocol("missing EOF after column definitions"));
-            }
-            self.status = parse_eof(&self.buf)?.status;
-        }
-        self.last_stream_id += 1;
-        let id = StreamId(self.last_stream_id);
-        self.pending = Some(Pending { id, deprecate_eof });
-        Ok((QueryResult::rowset(columns, binary), Some(id)))
+        block_on(self.client.next_result_streamed(&mut self.io))
     }
 
     /// Switches the default database (`COM_INIT_DB`). `database` is in the
@@ -1631,9 +802,7 @@ impl Conn {
     ///
     /// I/O failures or an ERR packet (e.g. unknown database).
     pub fn select_db(&mut self, database: &[u8]) -> Result<()> {
-        self.drain_results()?;
-        self.stream.write_command(command::INIT_DB, database)?;
-        self.expect_ok()
+        block_on(self.client.select_db(&mut self.io, database))
     }
 
     /// Resets the session to its just-connected state without
@@ -1646,11 +815,7 @@ impl Conn {
     ///
     /// I/O failures or an ERR packet.
     pub fn reset_connection(&mut self) -> Result<()> {
-        self.drain_results()?;
-        // The reset closes every prepared statement.
-        self.statements.clear();
-        self.stream.write_command(command::RESET_CONNECTION, &[])?;
-        self.expect_ok()
+        block_on(self.client.reset_connection(&mut self.io))
     }
 
     /// Re-authenticates as another account on the same connection
@@ -1669,67 +834,10 @@ impl Conn {
         password: &str,
         database: Option<&[u8]>,
     ) -> Result<()> {
-        self.drain_results()?;
-        // The new session has none of the old one's prepared statements.
-        self.statements.clear();
-        let plugin = self.default_plugin;
-        let nonce = self.greeting_nonce.clone();
-        let auth_response = self.first_response(plugin, password.as_bytes(), &nonce)?;
-        let auth_len = u8::try_from(auth_response.len())
-            .map_err(|_| Error::protocol("authentication response too long"))?;
-
-        let mut payload = Vec::with_capacity(64 + user.len());
-        put_nul_bytes(&mut payload, user);
-        payload.push(auth_len);
-        payload.extend_from_slice(&auth_response);
-        put_nul_bytes(&mut payload, database.unwrap_or_default());
-        payload.extend_from_slice(&u16::from(self.collation).to_le_bytes());
-        put_nul_bytes(&mut payload, plugin.name());
-        self.stream.write_command(command::CHANGE_USER, &payload)?;
-        let key_requested = requests_key(plugin, &auth_response);
-        self.auth_exchange(password.as_bytes(), plugin, nonce, key_requested)
-    }
-
-    /// Discards unread rows of a streamed result set and unread results of
-    /// a previous multi-result query, so the connection never gets out of
-    /// sync.
-    fn drain_results(&mut self) -> Result<()> {
-        self.discard_pending_rows()?;
-        while self.has_more_results() {
-            // Queued results nobody asked for: their rows are never decoded.
-            if self.read_head()?.1.is_some() {
-                self.discard_pending_rows()?;
-            }
-        }
-        // What the previous command allowed ends with its results.
-        self.infile = Infile::Refuse;
-        Ok(())
-    }
-
-    /// Reads and drops the rows of the pending result set, if any. A server
-    /// error among them ends that result set and is not reported: it
-    /// belongs to a result nobody reads any more.
-    fn discard_pending_rows(&mut self) -> Result<()> {
-        let Some(pending) = self.pending else {
-            return Ok(());
-        };
-        match self.skip_rows(pending.id, usize::MAX) {
-            Ok(_) | Err(Error::Server { .. }) => Ok(()),
-            Err(err) => Err(err),
-        }
-    }
-
-    /// Reads the reply to a command that answers OK or ERR.
-    fn expect_ok(&mut self) -> Result<()> {
-        self.read_packet()?;
-        match self.buf.first() {
-            Some(0x00) => {
-                self.status = parse_ok(&self.buf)?.status;
-                Ok(())
-            }
-            Some(0xFF) => Err(parse_err(&self.buf)),
-            _ => Err(Error::protocol("expected an OK or ERR packet")),
-        }
+        block_on(
+            self.client
+                .change_user(&mut self.io, user, password, database),
+        )
     }
 
     /// Checks that the server is alive.
@@ -1738,44 +846,42 @@ impl Conn {
     ///
     /// I/O failures or an unexpected response.
     pub fn ping(&mut self) -> Result<()> {
-        self.drain_results()?;
-        self.stream.write_command(command::PING, &[])?;
-        self.expect_ok()
+        block_on(self.client.ping(&mut self.io))
     }
 
     /// Sends `COM_QUIT` and closes the socket. Errors are ignored: the
     /// connection is being discarded either way.
     pub fn close(mut self) {
-        let _ = self.stream.write_command(command::QUIT, &[]);
-        self.stream.get_mut().shutdown();
+        let _ = block_on(self.client.quit(&mut self.io));
+        self.io.shutdown();
     }
 
     #[must_use]
     pub fn server_version(&self) -> &str {
-        &self.server_version
+        &self.client.server_version
     }
 
     #[must_use]
     pub const fn connection_id(&self) -> u32 {
-        self.connection_id
+        self.client.connection_id
     }
 
     /// Status flags from the last OK/EOF packet (see [`crate::constants::status`]).
     #[must_use]
     pub const fn status_flags(&self) -> u16 {
-        self.status
+        self.client.session.status
     }
 
     /// Capabilities negotiated with the server.
     #[must_use]
     pub const fn capabilities(&self) -> u32 {
-        self.capabilities
+        self.client.session.capabilities
     }
 
     /// Collation id requested in the handshake.
     #[must_use]
     pub const fn collation(&self) -> u8 {
-        self.collation
+        self.client.collation
     }
 
     /// The server's default character set, from its greeting. MySQL's
@@ -1783,7 +889,7 @@ impl Conn {
     /// chosen in the handshake (MariaDB keeps the latter).
     #[must_use]
     pub fn server_charset(&self) -> Option<&'static str> {
-        crate::charset::charset_of(self.server_collation)
+        crate::charset::charset_of(self.client.server_collation)
     }
 }
 

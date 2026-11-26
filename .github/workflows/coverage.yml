@@ -54,6 +54,7 @@ jobs:
           uv run --no-sync pytest --cov --cov-report=
           uv run --no-sync pytest -c tests/sqla_suite/pytest.ini tests/sqla_suite \
             --db mysql --db mariadb --db mysql_prepared --db mariadb_prepared \
+            --db mysql_async --db mariadb_async \
             --cov=rustmy --cov-append --cov-report=
           uv run --no-sync coverage xml -o coverage.xml
           cargo llvm-cov report --lcov --output-path lcov.info
