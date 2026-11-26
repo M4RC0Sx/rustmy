@@ -22,13 +22,49 @@ wheels with no system libraries to install.
   <img alt="Time to read and insert 1,000,000 rows, and to load 1,000,000 objects through the SQLAlchemy and Django ORMs, with rustmy, mysqlclient, PyMySQL and mysql-connector-python (lower is better; the figures are in the Performance section)" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/hero-light.svg">
 </picture>
 
+And on asyncio, with `rustmy.aio`:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/hero-async-dark.svg">
+  <img alt="Time to read and insert 1,000,000 rows, to load 1,000,000 objects through SQLAlchemy's asyncio ORM, and to run 6,400 queries from 32 tasks sharing a pool of 8 connections, with rustmy.aio, asyncmy, aiomysql and mysql.connector.aio (lower is better; the figures are in the Performance section)" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/hero-async-light.svg">
+</picture>
+
+## Contents
+
+- [Why rustmy](#why-rustmy) · [Quick start](#quick-start) ·
+  [How it compares](#how-it-compares) · [Performance](#performance) ·
+  [Installation and compatibility](#installation-and-compatibility)
+- [Usage](#usage):
+  [Connecting](#connecting) ·
+  [Queries and parameters](#queries-and-parameters) ·
+  [Many rows at once](#many-rows-at-once) ·
+  [Rows as dictionaries](#rows-as-dictionaries) ·
+  [Prepared statements](#prepared-statements) ·
+  [Large results](#large-results-without-loading-them) ·
+  [Errors](#errors) · [TLS](#tls) · [Compression](#compression) ·
+  [Loading local files](#loading-local-files) ·
+  [Character sets](#character-sets) ·
+  [Custom conversions](#custom-conversions)
+- Frameworks and concurrency: [SQLAlchemy](#sqlalchemy) · [Django](#django) ·
+  [asyncio](#asyncio) · [Connection pools](#connection-pools) ·
+  [Threads](#threads) · [In production](#in-production) ·
+  [Security notes](#security-notes)
+- Moving over:
+  [from mysqlclient or PyMySQL](#coming-from-mysqlclient-or-pymysql) ·
+  [from aiomysql or asyncmy](#coming-from-aiomysql-or-asyncmy) ·
+  [Limitations](#limitations)
+- The project: [How it is built and tested](#how-it-is-built-and-tested) ·
+  [Built with](#built-with) · [Contributing](#contributing) ·
+  [License](#license)
+
+
 ## Why rustmy
 
-- **Fast where it counts.** Reading a million rows takes **0.41 s**, against
-  1.29 s with mysqlclient, 1.59 s with mysql-connector-python and 3.11 s with
-  PyMySQL: **3.2x faster than mysqlclient** and 7.7x faster than PyMySQL.
-  Inserting them with `executemany` is **3x faster** than mysqlclient, and
-  Django's `values_list()` 2.8x. Rows are read in small batches with the GIL
+- **Fast where it counts.** Reading a million rows takes **0.40 s**, against
+  1.32 s with mysqlclient, 1.63 s with mysql-connector-python and 3.19 s with
+  PyMySQL: **3.3x faster than mysqlclient** and 8x faster than PyMySQL.
+  Inserting them with `executemany` is **3.3x faster** than mysqlclient, and
+  Django's `values_list()` 2.7x. Rows are read in small batches with the GIL
   released and converted in Rust while the server sends the next batch.
   `executemany` of `UPDATE`/`DELETE` pipelines its statements: one network
   round trip per 256 of them instead of one each.
@@ -37,9 +73,9 @@ wheels with no system libraries to install.
   1.3–1.5x faster than with mysqlclient and 2.1–2.7x faster than with PyMySQL.
 - **asyncio too.** `rustmy.aio` runs the same Rust protocol code on the
   event loop's thread, with the API of aiomysql and asyncmy. Against asyncmy,
-  the fastest of the others, reading a million rows is 1.2x faster (1.3x as
-  dicts) and inserting them 1.3x; against aiomysql and
-  `mysql.connector.aio`, 12–14x faster. SQLAlchemy's
+  the fastest of the others, reading a million rows is 1.1x faster (1.3x as
+  dicts) and inserting them 1.5x; against aiomysql and
+  `mysql.connector.aio`, 11–14x faster. SQLAlchemy's
   `create_async_engine` works with the same URLs.
 - **Connection pools** for threads and for tasks, which serve waiters in
   order of arrival.
@@ -194,7 +230,7 @@ for 3.15 yet). The asyncio sections compare `rustmy.aio` with asyncmy,
 aiomysql and `mysql.connector.aio`.
 
 <!-- showcase:start -->
-**CPython 3.14.3** · MySQL 8.4.13 · Darwin arm64 · rustmy (a release build of develop), mysqlclient 2.3.1, PyMySQL 2.2.8, mysql-connector-python 26.10.0 (C extension), SQLAlchemy 2.1.9, Django 6.1.3 · best of 5 (100k) and 3 (1M) · 2026-11-25T00:39:39+00:00
+**CPython 3.14.3** · MySQL 8.4.13 · Darwin arm64 · rustmy 1.4.0, mysqlclient 2.3.1, PyMySQL 2.2.8, mysql-connector-python 26.10.0 (C extension), SQLAlchemy 2.1.9, Django 6.1.3 · best of 5 (100k) and 3 (1M) · 2026-11-26T11:14:45+00:00
 
 #### DB-API
 
@@ -208,14 +244,14 @@ aiomysql and `mysql.connector.aio`.
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|
-| Read rows (tuples) | 100,000 | **41 ms** | 120 ms | 298 ms | 153 ms | 2.9× faster |
-| Read rows (dicts) | 100,000 | **55 ms** | 135 ms | 333 ms | 204 ms | 2.5× faster |
-| Stream rows | 100,000 | **33 ms** | 102 ms | 315 ms | 179 ms | 3.1× faster |
-| Insert rows (executemany) | 100,000 | **328 ms** | 1.05 s | 621 ms | 575 ms | 3.2× faster |
-| Read rows (tuples) | 1,000,000 | **407 ms** | 1.29 s | 3.11 s | 1.59 s | 3.2× faster |
-| Read rows (dicts) | 1,000,000 | **566 ms** | 1.37 s | 3.43 s | 2.09 s | 2.4× faster |
-| Stream rows | 1,000,000 | **271 ms** | 986 ms | 3.14 s | 1.77 s | 3.6× faster |
-| Insert rows (executemany) | 1,000,000 | **3.69 s** | 10.90 s | 6.36 s | 5.88 s | 3.0× faster |
+| Read rows (tuples) | 100,000 | **40 ms** | 124 ms | 310 ms | 156 ms | 3.1× faster |
+| Read rows (dicts) | 100,000 | **54 ms** | 145 ms | 342 ms | 210 ms | 2.7× faster |
+| Stream rows | 100,000 | **33 ms** | 106 ms | 322 ms | 184 ms | 3.2× faster |
+| Insert rows (executemany) | 100,000 | **316 ms** | 1.09 s | 639 ms | 581 ms | 3.4× faster |
+| Read rows (tuples) | 1,000,000 | **399 ms** | 1.32 s | 3.19 s | 1.63 s | 3.3× faster |
+| Read rows (dicts) | 1,000,000 | **571 ms** | 1.41 s | 3.52 s | 2.11 s | 2.5× faster |
+| Stream rows | 1,000,000 | **276 ms** | 1.03 s | 3.20 s | 1.81 s | 3.7× faster |
+| Insert rows (executemany) | 1,000,000 | **3.37 s** | 10.98 s | 6.45 s | 5.91 s | 3.3× faster |
 
 </details>
 
@@ -231,8 +267,8 @@ aiomysql and `mysql.connector.aio`.
 
 | Workload | Rows | rustmy (prepared) | rustmy (text) | mysql-connector (prepared) | mysqlclient | PyMySQL | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|--:|
-| Read rows | 100,000 | **37 ms** | 41 ms | 178 ms | 123 ms | 308 ms | 3.3× faster |
-| Read rows | 1,000,000 | **402 ms** | 407 ms | 1.78 s | 1.46 s | 3.10 s | 3.6× faster |
+| Read rows | 100,000 | **38 ms** | 40 ms | 183 ms | 126 ms | 319 ms | 3.3× faster |
+| Read rows | 1,000,000 | 420 ms | **399 ms** | 1.83 s | 1.50 s | 3.20 s | 3.6× faster |
 
 </details>
 
@@ -248,14 +284,14 @@ aiomysql and `mysql.connector.aio`.
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|
-| Core: read rows | 100,000 | **49 ms** | 142 ms | 323 ms | 165 ms | 2.9× faster |
-| ORM: load objects | 100,000 | **234 ms** | 316 ms | 510 ms | 354 ms | 1.4× faster |
-| ORM: stream objects (yield_per) | 100,000 | **193 ms** | 253 ms | 478 ms | 327 ms | 1.3× faster |
-| ORM: bulk insert | 100,000 | **521 ms** | 1.38 s | 877 ms | 996 ms | 2.6× faster |
-| Core: read rows | 1,000,000 | **472 ms** | 1.32 s | 3.26 s | 1.66 s | 2.8× faster |
-| ORM: load objects | 1,000,000 | **2.47 s** | 3.39 s | 5.29 s | 3.73 s | 1.4× faster |
-| ORM: stream objects (yield_per) | 1,000,000 | **1.85 s** | 2.41 s | 4.70 s | 3.18 s | 1.3× faster |
-| ORM: bulk insert | 1,000,000 | **5.33 s** | 14.47 s | 8.90 s | 9.69 s | 2.7× faster |
+| Core: read rows | 100,000 | **50 ms** | 148 ms | 329 ms | 170 ms | 3.0× faster |
+| ORM: load objects | 100,000 | **241 ms** | 327 ms | 521 ms | 361 ms | 1.4× faster |
+| ORM: stream objects (yield_per) | 100,000 | **196 ms** | 257 ms | 485 ms | 330 ms | 1.3× faster |
+| ORM: bulk insert | 100,000 | **565 ms** | 1.36 s | 903 ms | 1.02 s | 2.4× faster |
+| Core: read rows | 1,000,000 | **434 ms** | 1.34 s | 3.32 s | 1.70 s | 3.1× faster |
+| ORM: load objects | 1,000,000 | **2.56 s** | 3.46 s | 5.41 s | 3.79 s | 1.4× faster |
+| ORM: stream objects (yield_per) | 1,000,000 | **1.89 s** | 2.45 s | 4.77 s | 3.25 s | 1.3× faster |
+| ORM: bulk insert | 1,000,000 | **5.68 s** | 14.44 s | 9.20 s | 10.11 s | 2.5× faster |
 
 </details>
 
@@ -271,14 +307,14 @@ aiomysql and `mysql.connector.aio`.
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|
-| QuerySet: load objects | 100,000 | **208 ms** | 289 ms | 477 ms | 396 ms | 1.4× faster |
-| QuerySet: values_list() | 100,000 | **47 ms** | 135 ms | 324 ms | 246 ms | 2.9× faster |
-| QuerySet: iterator() | 100,000 | **174 ms** | 251 ms | 447 ms | 361 ms | 1.4× faster |
-| bulk_create() | 100,000 | **1.13 s** | 1.36 s | 1.40 s | 1.92 s | 1.2× faster |
-| QuerySet: load objects | 1,000,000 | **1.98 s** | 2.69 s | 4.75 s | 3.94 s | 1.4× faster |
-| QuerySet: values_list() | 1,000,000 | **434 ms** | 1.21 s | 3.28 s | 2.43 s | 2.8× faster |
-| QuerySet: iterator() | 1,000,000 | **1.68 s** | 2.44 s | 4.53 s | 3.59 s | 1.5× faster |
-| bulk_create() | 1,000,000 | **11.28 s** | 13.75 s | 13.77 s | 19.09 s | 1.2× faster |
+| QuerySet: load objects | 100,000 | **209 ms** | 294 ms | 483 ms | 409 ms | 1.4× faster |
+| QuerySet: values_list() | 100,000 | **47 ms** | 143 ms | 330 ms | 250 ms | 3.0× faster |
+| QuerySet: iterator() | 100,000 | **175 ms** | 248 ms | 452 ms | 370 ms | 1.4× faster |
+| bulk_create() | 100,000 | **1.15 s** | 1.41 s | 1.40 s | 1.93 s | 1.2× faster |
+| QuerySet: load objects | 1,000,000 | **2.01 s** | 2.74 s | 4.79 s | 4.02 s | 1.4× faster |
+| QuerySet: values_list() | 1,000,000 | **449 ms** | 1.23 s | 3.34 s | 2.48 s | 2.7× faster |
+| QuerySet: iterator() | 1,000,000 | **1.69 s** | 2.47 s | 4.54 s | 3.67 s | 1.5× faster |
+| bulk_create() | 1,000,000 | **11.36 s** | 13.81 s | 13.95 s | 19.14 s | 1.2× faster |
 
 </details>
 
@@ -294,7 +330,7 @@ aiomysql and `mysql.connector.aio`.
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
 |---|--:|--:|--:|--:|--:|--:|
-| Peak memory of fetchall() | 1,000,000 | 504 MiB | 697 MiB | 512 MiB | **496 MiB** | 28% less memory |
+| Peak memory of fetchall() | 1,000,000 | 504 MiB | 697 MiB | 511 MiB | **496 MiB** | 28% less memory |
 
 </details>
 
@@ -313,14 +349,14 @@ asyncio: asyncmy 0.2.18, aiomysql 0.3.2 and mysql.connector.aio (mysql-connector
 | Workload | Rows | rustmy | asyncmy | aiomysql | mysql.connector.aio | vs asyncmy |
 |---|--:|--:|--:|--:|--:|--:|
 | Read rows (tuples) | 100,000 | 40 ms | **35 ms** | 371 ms | 454 ms | 1.1× slower |
-| Read rows (dicts) | 100,000 | **51 ms** | 62 ms | 406 ms | 509 ms | 1.2× faster |
-| Stream rows | 100,000 | **58 ms** | 62 ms | 394 ms | 599 ms | 1.1× faster |
-| Insert rows (executemany) | 100,000 | **339 ms** | 538 ms | 628 ms | 1.03 s | 1.6× faster |
-| Read rows (tuples) | 1,000,000 | **327 ms** | 376 ms | 3.81 s | 4.59 s | 1.2× faster |
-| Read rows (dicts) | 1,000,000 | **532 ms** | 693 ms | 4.13 s | 5.09 s | 1.3× faster |
-| Stream rows | 1,000,000 | **535 ms** | 550 ms | 3.95 s | 5.98 s | on par with asyncmy |
-| Insert rows (executemany) | 1,000,000 | **4.07 s** | 5.48 s | 6.32 s | 10.12 s | 1.3× faster |
-| Pool: 32 tasks, 8 connections | 6,400 queries | **173 ms** | 179 ms | 408 ms | n/a | on par with asyncmy |
+| Read rows (dicts) | 100,000 | **50 ms** | 60 ms | 405 ms | 510 ms | 1.2× faster |
+| Stream rows | 100,000 | **58 ms** | 61 ms | 397 ms | 606 ms | 1.1× faster |
+| Insert rows (executemany) | 100,000 | **342 ms** | 538 ms | 630 ms | 1.07 s | 1.6× faster |
+| Read rows (tuples) | 1,000,000 | **342 ms** | 374 ms | 3.84 s | 4.66 s | 1.1× faster |
+| Read rows (dicts) | 1,000,000 | **555 ms** | 719 ms | 4.14 s | 5.17 s | 1.3× faster |
+| Stream rows | 1,000,000 | **540 ms** | 563 ms | 3.97 s | 6.00 s | on par with asyncmy |
+| Insert rows (executemany) | 1,000,000 | **3.76 s** | 5.49 s | 6.37 s | 10.20 s | 1.5× faster |
+| Pool: 32 tasks, 8 connections | 6,400 queries | 191 ms | **186 ms** | 413 ms | n/a | on par with asyncmy |
 
 </details>
 
@@ -336,14 +372,14 @@ asyncio: asyncmy 0.2.18, aiomysql 0.3.2 and mysql.connector.aio (mysql-connector
 
 | Workload | Rows | rustmy | asyncmy | aiomysql | vs asyncmy |
 |---|--:|--:|--:|--:|--:|
-| Core: read rows | 100,000 | 49 ms | **48 ms** | 387 ms | on par with asyncmy |
-| ORM: load objects | 100,000 | **237 ms** | 257 ms | 573 ms | 1.1× faster |
-| ORM: stream objects (yield_per) | 100,000 | **452 ms** | 453 ms | 808 ms | on par with asyncmy |
-| ORM: bulk insert | 100,000 | **561 ms** | 769 ms | 854 ms | 1.4× faster |
-| Core: read rows | 1,000,000 | **453 ms** | 565 ms | 3.87 s | 1.2× faster |
-| ORM: load objects | 1,000,000 | **2.89 s** | 3.07 s | 6.37 s | 1.1× faster |
-| ORM: stream objects (yield_per) | 1,000,000 | **5.08 s** | 5.45 s | 9.00 s | 1.1× faster |
-| ORM: bulk insert | 1,000,000 | **6.55 s** | 8.49 s | 9.32 s | 1.3× faster |
+| Core: read rows | 100,000 | 48 ms | **46 ms** | 393 ms | 1.1× slower |
+| ORM: load objects | 100,000 | **239 ms** | 255 ms | 580 ms | 1.1× faster |
+| ORM: stream objects (yield_per) | 100,000 | 477 ms | **462 ms** | 843 ms | on par with asyncmy |
+| ORM: bulk insert | 100,000 | **578 ms** | 762 ms | 856 ms | 1.3× faster |
+| Core: read rows | 1,000,000 | **462 ms** | 555 ms | 3.92 s | 1.2× faster |
+| ORM: load objects | 1,000,000 | **2.96 s** | 3.11 s | 6.44 s | 1.1× faster |
+| ORM: stream objects (yield_per) | 1,000,000 | **5.29 s** | 5.91 s | 9.33 s | 1.1× faster |
+| ORM: bulk insert | 1,000,000 | **6.56 s** | 8.44 s | 9.45 s | 1.3× faster |
 
 </details>
 <!-- showcase:end -->
@@ -446,6 +482,12 @@ with conn.cursor() as cursor:
     print(cursor.rowcount, cursor.lastrowid)
 conn.commit()
 ```
+
+Each statement is at most `cursor.max_stmt_length` bytes (1,024,000, as in
+PyMySQL, under the 1 MiB `max_allowed_packet` of old servers; 256 KiB of
+parameters for `PreparedCursor`, where larger statements measured slower).
+Raise it on a cursor to send fewer, larger statements to a server that
+allows them.
 
 Any other statement (`UPDATE`, `DELETE`…) still runs once per item, but
 pipelined: rustmy sends up to `cursor.max_pipeline` statements (256 by
@@ -733,42 +775,74 @@ any test that fails with rustmy only.
 with no threads and no runtime of its own: no `run_in_executor` per query.
 It takes the arguments of `rustmy.connect()` (TLS, compression, option
 files, `local_infile_dir`, `init_command`…), and its API has the shape of
-aiomysql's and asyncmy's, so code written for them mostly just works:
+aiomysql's and asyncmy's, so code written for them mostly just works (the
+differences are in [Coming from aiomysql or asyncmy](#coming-from-aiomysql-or-asyncmy)):
 
 ```python
 from rustmy import aio
 
-conn = await aio.connect(
+async with aio.connect(
     host="localhost",
     user="app",
     password="secret",
     database="shop",
     read_timeout=30,
-)
-async with conn.cursor(aio.DictCursor) as cursor:
-    await cursor.execute("SELECT id, name FROM products WHERE id = %s", (42,))
-    product = await cursor.fetchone()
+) as conn:  # closed at the end of the block
+    async with conn.cursor(aio.DictCursor) as cursor:
+        await cursor.execute("SELECT id, name FROM products WHERE id = %s", (42,))
+        product = await cursor.fetchone()  # {"id": 42, "name": "tea"}, or None
+```
+
+`conn = await aio.connect(...)` opens one to keep and close yourself.
+
+Every call that talks to the server is a coroutine: `execute`,
+`executemany`, the `fetch*` methods, `nextset`, `callproc`, `commit`,
+`rollback`, `ping`… `conn.close()` is not (it sends the server a goodbye
+without waiting for it); `await conn.ensure_closed()` is the same under
+aiomysql's and asyncmy's name. As with the blocking API, autocommit is off,
+so statements run in a transaction until `commit()`:
+
+```python
+async with conn.cursor() as cursor:
+    try:
+        await cursor.execute(
+            "UPDATE accounts SET balance = balance - %s WHERE id = %s", (10, 1)
+        )
+        await cursor.execute(
+            "UPDATE accounts SET balance = balance + %s WHERE id = %s", (10, 2)
+        )
+    except aio.Error:
+        await conn.rollback()
+        raise
 await conn.commit()
-conn.close()
+```
+
+Large results stream with `SSCursor` (or `SSDictCursor`): rows are read
+from the server only as fast as you consume them, with flat memory:
+
+```python
+async with conn.cursor(aio.SSCursor) as cursor:
+    await cursor.execute("SELECT id, total FROM orders")
+    async for order_id, total in cursor:
+        ...
 ```
 
 - **Cursors.** `Cursor`, `DictCursor`, `PreparedCursor`,
-  `PreparedDictCursor`, and the unbuffered `SSCursor` and `SSDictCursor`,
-  whose rows are read only as fast as you consume them
-  (`async for row in cursor`), with flat memory. `executemany` groups rows
-  into multi-row `INSERT`s and pipelines other statements, as the blocking
-  cursors do.
+  `PreparedDictCursor`, `SSCursor` and `SSDictCursor`, as in the blocking
+  API. `executemany` groups rows into multi-row `INSERT`s and pipelines
+  other statements, as the blocking cursors do.
+- **One command at a time** per connection: starting another before the
+  first is awaited raises `ProgrammingError`. Give each task its own
+  connection, or use a [pool](#connection-pools).
 - **Timeouts.** `read_timeout` and `write_timeout` fail a command that waits
   that long for the server (error 2013, the connection closed);
   `asyncio.timeout()` around a call works too.
 - **Cancellation.** A task cancelled in the middle of a command closes its
-  connection: the reply would otherwise arrive in the middle of the next
-  command. Pools replace closed connections.
+  connection: the server goes on with the statement, and its reply would
+  otherwise arrive in the middle of the next command. Pools replace closed
+  connections.
 - **Local files** (`LOAD DATA LOCAL INFILE`) are read in the loop's executor,
   so the loop never waits on the disk.
-- **One difference** from aiomysql and asyncmy: fetching after a statement
-  that returned no rows (an `INSERT`, DDL) raises `ProgrammingError`, as PEP
-  249 asks, instead of returning `()`.
 
 It runs on asyncio's default loop and on uvloop. With SQLAlchemy, install
 `rustmy[sqlalchemy-asyncio]` and use the usual URLs with
@@ -777,38 +851,70 @@ arguments are those of the blocking dialect, and `stream_results` uses the
 unbuffered cursor:
 
 ```python
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+# Product as in the SQLAlchemy example above.
 engine = create_async_engine("mysql+rustmy://app:secret@localhost/shop")
+Session = async_sessionmaker(engine, expire_on_commit=False)
+
+async with Session() as session:
+    cheap = (await session.scalars(select(Product).where(Product.price < 10))).all()
+
 async with engine.connect() as conn:
-    rows = (await conn.execute(text("SELECT id, name FROM products"))).all()
+    result = await conn.stream(select(Product))
+    async for product in result.scalars():
+        ...
 ```
 
 ### Connection pools
 
 `rustmy.Pool` lends connections to threads, and `rustmy.aio.create_pool`
-to tasks. Both keep `minsize` connections open, open more as needed up to
-`maxsize`, and then make callers wait for one to come back, **in order of
-arrival**:
+to tasks. Both take `connect()`'s arguments, keep `minsize` connections
+open, open more as needed up to `maxsize`, and then make callers wait for
+one to come back, **in order of arrival**. Leaving the pool's block closes
+it, after waiting for the connections in use:
 
 ```python
-pool = rustmy.Pool(2, 10, host="localhost", user="app", password="secret")
-with pool.acquire(timeout=5) as conn:
-    ...
+import rustmy
+from rustmy import aio
 
-pool = await aio.create_pool(2, 10, host="localhost", user="app", password="secret")
-async with pool.acquire() as conn:
-    ...
+with rustmy.Pool(
+    minsize=2, maxsize=10, host="localhost", user="app", password="secret"
+) as pool:
+    with pool.acquire(timeout=5) as conn, conn.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM orders")
+        (count,) = cursor.fetchone()
+
+async with aio.create_pool(
+    minsize=2, maxsize=10, host="localhost", user="app", password="secret"
+) as pool:
+    async with pool.acquire(timeout=5) as conn, conn.cursor() as cursor:
+        await cursor.execute("SELECT COUNT(*) FROM orders")
+        (count,) = await cursor.fetchone()
 ```
 
-- A connection given back with a transaction open is rolled back;
-  `reset_on_release=True` also resets its session (a round trip per use).
-- One that is closed or failed is not lent again; one idle for `pre_ping`
-  seconds (30) is pinged before it is lent; `pool_recycle` closes those
-  older than that, and `idle_timeout` the idle ones beyond `minsize`.
-- `acquire(timeout=…)` raises `rustmy.PoolTimeout` when none comes back in
-  time.
+| Argument | Default | |
+|---|---|---|
+| `minsize` | 1 | connections opened at once (their errors raise there) and kept open |
+| `maxsize` | 10 | connections open at most, lent or idle |
+| `pre_ping` | 30 | seconds idle after which a connection is pinged before it is lent (`None`: never) |
+| `pool_recycle` | -1 | seconds after which a connection is closed instead of lent again (-1: never) |
+| `idle_timeout` | `None` | seconds unused after which idle connections beyond `minsize` are closed |
+| `reset_on_release` | `False` | reset the session (variables, temporary tables) of each connection given back: a round trip per use |
+| `acquire(timeout=…)` | `None` | seconds to wait for a connection before raising `rustmy.PoolTimeout` (`None`: forever) |
+
+- A connection given back with a transaction open is rolled back, and one
+  that is closed or failed is not lent again. Idle ones are lent most
+  recently used first.
+- Without a `with` block: `conn = await pool.acquire()` and
+  `pool.release(conn)` (awaiting it is optional; it is already done unless
+  a rollback is needed). For threads, `lease = pool.acquire()`,
+  `lease.connection`, then `pool.release(lease.connection)`.
+- `pool.size` and `pool.freesize` count the open and the idle connections;
+  `clear()` closes the idle ones, `close()` the pool (those in use as they
+  come back) and `wait_closed()` waits for them; `terminate()` closes every
+  connection at once.
 - Waiters are served first come, first served: under contention a task never
   waits much longer than the others. aiomysql's and asyncmy's pools let the
   task that gives a connection back take it again at once, a little faster
@@ -875,6 +981,51 @@ def product(product_id: int) -> dict[str, object]:
     return row._asdict()
 ```
 
+With `async def` endpoints, open a `rustmy.aio` pool in the lifespan and
+have each request borrow a connection from it:
+
+```python
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
+from rustmy import aio
+
+pool: aio.Pool
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    global pool
+    async with aio.create_pool(
+        minsize=2,
+        maxsize=20,
+        host="db.internal",
+        user="app",
+        password="secret",
+        database="shop",
+        ssl_mode="verify_identity",
+        connect_timeout=5,
+        read_timeout=30,
+    ) as pool:
+        yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/products/{product_id}")
+async def product(product_id: int) -> dict[str, object]:
+    async with pool.acquire(timeout=5) as conn, conn.cursor(aio.DictCursor) as cursor:
+        await cursor.execute(
+            "SELECT id, name, price FROM products WHERE id = %s", (product_id,)
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404)
+    return row
+```
+
 ### Security notes
 
 - Pass values as parameters (`%s`, `%(name)s`), never by formatting SQL
@@ -935,6 +1086,31 @@ pinned by a test:
   alone, which lets mysqlclient and PyMySQL send any file the server asks for,
   raises `ValueError` (see [Loading local files](#loading-local-files)).
 
+## Coming from aiomysql or asyncmy
+
+`rustmy.aio` keeps their API: `connect()` and `create_pool()` awaited or
+used with `async with`, `await conn.cursor()` (or plain `conn.cursor()`),
+the same coroutines on connections and cursors, a plain `close()` and an
+awaited `ensure_closed()`, autocommit off. What differs, on purpose:
+
+- Fetching after a statement that returned no rows (an `INSERT`, DDL) raises
+  `ProgrammingError`, as PEP 249 asks; both return `[]` from `fetchall()`
+  and `None` from `fetchone()`.
+- Server errors are classed by SQLSTATE, as in the blocking API: "unknown
+  column" (1054) is a `ProgrammingError`, where both raise
+  `OperationalError`.
+- A task cancelled in the middle of a command closes its connection, as in
+  both; the next command on it raises `OperationalError` (2013) instead of
+  `InterfaceError`.
+- Pools serve waiting tasks in order of arrival (see
+  [Connection pools](#connection-pools)), `acquire()` takes a `timeout`, and
+  a connection idle for 30 seconds is pinged before it is lent
+  (`pre_ping`). `pool_recycle` is off by default, as in aiomysql (asyncmy
+  recycles after an hour), and there is no `echo`.
+- The rest follows rustmy's blocking API, so the differences in
+  [Coming from mysqlclient or PyMySQL](#coming-from-mysqlclient-or-pymysql)
+  apply too.
+
 ## Limitations
 
 - **New.** rustmy is tested extensively but has no long production history
@@ -974,10 +1150,16 @@ wire. Every pull request runs:
 - `cargo clippy` with pedantic lints and no panics, `cargo deny` for
   licenses and advisories; the protocol parsers are also fuzzed.
 
+The asyncio API is checked against the blocking one: hypothesis stores and
+reads the same generated values through both, with every kind of cursor, and
+requires the same rows, descriptions and counts. The protocol fuzzer also
+runs each generated session through the current code and the 1.3.2
+release, and fails on any difference in results or errors.
+
 Before a release, `scripts/leak_check.py` runs every path through the driver
 (connections, each cursor, prepared statements, errors, `executemany`,
-compression, `LOAD DATA LOCAL INFILE`…) thousands of times and checks that
-memory stops growing.
+compression, `LOAD DATA LOCAL INFILE`…), blocking and asyncio, pools
+included, thousands of times and checks that memory stops growing.
 
 Releases are built and published by GitHub Actions, with every action pinned
 to a commit. Each wheel and the sdist carry a signed build provenance
