@@ -82,7 +82,7 @@ dev = [
     "pytest-randomly>=4.0",
     "ruff>=0.14",
     "sqlalchemy[asyncio]>=2.0",
-    "testcontainers[mysql]>=4.13",
+    "testcontainers[mysql]>=4.15.0",
     "time-machine>=2.19",
 ]
 # mysqlclient needs libmysqlclient + pkg-config to build, so it stays out of
