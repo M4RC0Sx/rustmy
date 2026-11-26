@@ -52,7 +52,7 @@ dynamic = ["version"]
 [project.optional-dependencies]
 sqlalchemy = ["sqlalchemy>=2.0"]
 # The asyncio dialects: SQLAlchemy's asyncio layer needs greenlet.
-sqlalchemy-asyncio = ["sqlalchemy[asyncio]>=2.0"]
+sqlalchemy-asyncio = ["sqlalchemy[asyncio]>=2.0.58"]
 
 [project.urls]
 Homepage = "https://github.com/M4RC0Sx/rustmy"
@@ -81,7 +81,7 @@ dev = [
     "pytest-mock>=3.15",
     "pytest-randomly>=4.0",
     "ruff>=0.14",
-    "sqlalchemy[asyncio]>=2.0",
+    "sqlalchemy[asyncio]>=2.0.58",
     "testcontainers[mysql]>=4.13",
     "time-machine>=2.19",
 ]
