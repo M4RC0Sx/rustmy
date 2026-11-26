@@ -2,6 +2,16 @@
 
 All notable changes to rustmy are documented in this file. Versions follow [Semantic Versioning](https://semver.org) and entries come from [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.4.1](https://github.com/M4RC0Sx/rustmy/compare/v1.4.0...v1.4.1) (2026-11-26)
+
+### Bug Fixes
+
+* await conn.cursor() and async with aio.connect(), as in aiomysql and asyncmy ([#85](https://github.com/M4RC0Sx/rustmy/issues/85)) ([510b2e4](https://github.com/M4RC0Sx/rustmy/commit/510b2e42c4b54451838a8d6b06265ab8776cdac3))
+
+### Documentation
+
+* README contents, asyncio and pool guides, and figures measured with the published 1.4.0 wheel ([#86](https://github.com/M4RC0Sx/rustmy/issues/86)) ([1bfc31c](https://github.com/M4RC0Sx/rustmy/commit/1bfc31ce605153b058bcbbfe88d2ede3e02bf4e6))
+
 ## [1.4.0](https://github.com/M4RC0Sx/rustmy/compare/v1.3.2...v1.4.0) (2026-11-26)
 
 ### Features
