@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import warnings
 
+from collections.abc import Coroutine
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import TypeVar
@@ -30,6 +31,8 @@ from rustmy.converters import to_literal
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
+    from collections.abc import Callable
+    from collections.abc import Generator
     from collections.abc import Mapping
     from types import TracebackType
 
@@ -339,7 +342,58 @@ class Connection:
             self.close()
 
 
-async def connect(  # noqa: PLR0917  # MySQLdb's positional order
+class _Connect(Coroutine[Any, Any, "Connection"]):
+    """What :func:`connect` returns: a coroutine (awaited, or given to
+    ``asyncio.create_task``, it opens the connection) that also works with
+    ``async with``, closing the connection at the end of the block, as
+    aiomysql's and asyncmy's ``connect()`` do. Nothing starts until it is
+    awaited or entered."""
+
+    __slots__ = ("_conn", "_coro", "_open")
+
+    def __init__(self, open_: Callable[[], Coroutine[Any, Any, Connection]]) -> None:
+        self._open = open_
+        self._coro: Coroutine[Any, Any, Connection] | None = None
+        self._conn: Connection | None = None
+
+    def _started(self) -> Coroutine[Any, Any, Connection]:
+        if self._coro is None:
+            self._coro = self._open()
+        return self._coro
+
+    def send(self, value: Any) -> Any:
+        return self._started().send(value)
+
+    def throw(
+        self, typ: Any, val: Any = None, tb: TracebackType | None = None, /
+    ) -> Any:
+        if val is None and tb is None:
+            return self._started().throw(typ)
+        return self._started().throw(typ, val, tb)
+
+    def close(self) -> None:
+        if self._coro is not None:
+            self._coro.close()
+
+    def __await__(self) -> Generator[Any, None, Connection]:
+        return self._started().__await__()
+
+    async def __aenter__(self) -> Connection:
+        self._conn = await self._started()
+        return self._conn
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            await conn.__aexit__(exc_type, exc, tb)
+
+
+def connect(  # noqa: PLR0917  # MySQLdb's positional order
     host: str | None = None,
     user: str | None = None,
     password: str | None = None,
@@ -350,8 +404,10 @@ async def connect(  # noqa: PLR0917  # MySQLdb's positional order
     cursorclass: type[Cursor] = Cursor,
     conv: Mapping[Any, Any] | None = None,
     **options: Any,
-) -> Connection:
-    """Open a connection on the running event loop.
+) -> _Connect:
+    """Open a connection on the running event loop: ``conn = await
+    connect(...)``, or ``async with connect(...) as conn``, which closes it
+    at the end of the block.
 
     Takes the arguments of :func:`rustmy.connect`, with the same defaults and
     meaning (``passwd``, ``db``, ``ssl=``, option files, ``init_command``,
@@ -360,6 +416,33 @@ async def connect(  # noqa: PLR0917  # MySQLdb's positional order
     TLS and authentication included. ``cursorclass`` is one of
     :mod:`rustmy.aio.cursors`.
     """
+    return _Connect(
+        lambda: _open(
+            host,
+            user,
+            password,
+            database,
+            port,
+            unix_socket,
+            cursorclass=cursorclass,
+            conv=conv,
+            **options,
+        )
+    )
+
+
+async def _open(  # noqa: PLR0917
+    host: str | None,
+    user: str | None,
+    password: str | None,
+    database: str | None,
+    port: int | None,
+    unix_socket: PathArg | None,
+    *,
+    cursorclass: type[Cursor],
+    conv: Mapping[Any, Any] | None,
+    **options: Any,
+) -> Connection:
     args = _connect_args.resolve(
         host=host,
         user=user,

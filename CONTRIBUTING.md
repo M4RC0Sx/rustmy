@@ -320,19 +320,20 @@ TLS runs in memory over any transport (`transport::MaybeTls`, `rustls`'s
 `ClientConnection`, with the blocking connection's configuration and
 cache): `Client::connect` starts it right after the `SSLRequest`, as the
 blocking handshake does. Compression is the same layer as everywhere.
-The Python layer mirrors the blocking one with `await` (the shape of aiomysql's
-and asyncmy's API: `execute`, the `fetch*` methods, `nextset`, `callproc`,
-`commit`... are coroutines): `connect()` resolves its arguments with
-`_connect_args`, applies the session settings with the same plan, and the
-buffered and prepared cursors keep the blocking cursors' behaviour (PEP 249
-errors included). Unbuffered cursors (`AioStream`) apply backpressure: `take`
-hands out the rows already converted without I/O (no future is created
-while rows are at hand), and `read` reads one more batch off the loop only
-when more are asked for; the command generation, the discard warning and
-the errors follow the blocking `ResultStream`. `executemany` groups its
-items with the blocking connection's builders (`batch.rs`) and runs each
-group as a command of its own (`AioMany.step`): one `await` per statement
-or window, not per item.
+The Python layer mirrors the blocking one with `await` (the shape of
+aiomysql's and asyncmy's API: `execute`, the `fetch*` methods, `nextset`,
+`callproc`, `commit`... are coroutines; `connect()` also works with
+`async with` and `await conn.cursor()` gives the cursor, as there):
+`connect()` resolves its arguments with `_connect_args`, applies the session
+settings with the same plan, and the buffered and prepared cursors keep the
+blocking cursors' behaviour (PEP 249 errors included). Unbuffered cursors
+(`AioStream`) apply backpressure: `take` hands out the rows already converted
+without I/O (no future is created while rows are at hand), and `read` reads
+one more batch off the loop only when more are asked for; the command
+generation, the discard warning and the errors follow the blocking
+`ResultStream`. `executemany` groups its items with the blocking connection's
+builders (`batch.rs`) and runs each group as a command of its own
+(`AioMany.step`): one `await` per statement or window, not per item.
 
 **TLS and authentication.** TLS through `rustls`; `ssl_mode` is disabled /
 preferred (default) / required / verify_ca / verify_identity. With `ssl_ca`,

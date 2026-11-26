@@ -18,6 +18,7 @@ from rustmy.err import ProgrammingError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from collections.abc import Generator
     from collections.abc import Iterable
     from collections.abc import Sequence
     from types import TracebackType
@@ -71,6 +72,14 @@ class Cursor:
     async def close(self) -> None:
         self._rows = ()
         self._connection = None
+
+    def __await__(self) -> Generator[Any, None, Self]:
+        """``await conn.cursor()`` gives the cursor itself, for code written
+        for aiomysql and asyncmy, where ``cursor()`` is a coroutine."""
+        return self._itself().__await__()
+
+    async def _itself(self) -> Self:
+        return self
 
     async def __aenter__(self) -> Self:
         return self

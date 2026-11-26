@@ -6,9 +6,10 @@
 
 Writes ``benches/results/showcase-<area>-{light,dark}.svg`` (one panel per
 workload and size: absolute times, lower is better, rustmy highlighted and
-the other drivers in a neutral gray, each bar named), the summary chart at
-the top of the main README (``hero-{light,dark}.svg``), and the tables
-between the ``showcase`` markers of README.md and benches/README.md.
+the other drivers in a neutral gray, each bar named), the summary charts at
+the top of the main README (``hero-{light,dark}.svg`` for the blocking
+drivers, ``hero-async-{light,dark}.svg`` for asyncio), and the tables between
+the ``showcase`` markers of README.md and benches/README.md.
 """
 
 from __future__ import annotations
@@ -301,23 +302,46 @@ def area_chart(run: dict[str, Any], area: str, theme: Theme, path: Path) -> None
     plt.close(fig)
 
 
+#: The summary charts: (area, workload, title) per panel, each workload at
+#: the largest size measured.
 HERO = (
     ("dbapi", "Read rows (tuples)", "Read 1,000,000 rows"),
     ("dbapi", "Insert rows (executemany)", "Insert 1,000,000 rows"),
     ("sqlalchemy", "ORM: load objects", "SQLAlchemy ORM, 1,000,000 objects"),
     ("django", "QuerySet: load objects", "Django ORM, 1,000,000 objects"),
 )
+HERO_ASYNC = (
+    ("asyncio", "Read rows (tuples)", "asyncio: read 1,000,000 rows"),
+    ("asyncio", "Insert rows (executemany)", "asyncio: insert 1,000,000 rows"),
+    (
+        "sqlalchemy-asyncio",
+        "ORM: load objects",
+        "SQLAlchemy asyncio ORM, 1,000,000 objects",
+    ),
+    (
+        "asyncio",
+        "Pool: 32 tasks, 8 connections",
+        "asyncio pool: 32 tasks, 8 connections, 6,400 queries",
+    ),
+)
 
 
-def hero(run: dict[str, Any], theme: Theme, path: Path) -> None:
-    size = max(r["rows"] for r in run["results"] if r["area"] == "dbapi")
+def hero(
+    run: dict[str, Any],
+    theme: Theme,
+    path: Path,
+    spec: tuple[tuple[str, str, str], ...],
+    note: str,
+) -> None:
     fig, axes = plt.subplots(2, 2, squeeze=False)
-    layout(fig, 2, 2, len(ORDER))
+    layout(fig, 2, 2, max(len(AREA_ORDER.get(area, ORDER)) for area, _, _ in spec))
     fig.patch.set_facecolor(theme.surface)
-    for index, (area, name, title) in enumerate(HERO):
-        panel = next(p for p in panels(run, area) if p.title == name and p.rows == size)
+    for index, (area, name, title) in enumerate(spec):
+        panel = max(
+            (p for p in panels(run, area) if p.title == name), key=lambda p: p.rows
+        )
         draw(axes[index // 2][index % 2], theme, panel, title=title)
-    footer(fig, theme, run, "Time, lower is better")
+    footer(fig, theme, run, note)
     fig.savefig(path, facecolor=theme.surface, metadata={"Date": None})
     plt.close(fig)
 
@@ -475,7 +499,20 @@ def render(paths: list[Path]) -> None:
             for area in AREAS:
                 path = RESULTS / f"showcase-{area}-{theme.name}.svg"
                 area_chart(run, area, theme, path)
-            hero(run, theme, RESULTS / f"hero-{theme.name}.svg")
+            hero(
+                run,
+                theme,
+                RESULTS / f"hero-{theme.name}.svg",
+                HERO,
+                "Time, lower is better",
+            )
+            hero(
+                run,
+                theme,
+                RESULTS / f"hero-async-{theme.name}.svg",
+                HERO_ASYNC,
+                "Time, lower is better, on asyncio's default event loop",
+            )
         replace_block(BENCH_README, "results:showcase", section(run, "results"))
         replace_block(README, "showcase", section(run, RAW, folded=True))
         print("wrote the showcase and hero charts, README.md and benches/README.md")
