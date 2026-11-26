@@ -4,6 +4,7 @@ cursors and errors as the blocking connection, awaited."""
 from __future__ import annotations
 
 import asyncio
+import gc
 import socket
 import time
 import uuid
@@ -184,6 +185,70 @@ async def test_dict_and_prepared_variants(conn: aio.Connection) -> None:
     async with conn.cursor(aio.PreparedDictCursor) as cur:
         await cur.execute("SELECT %s AS a, %s AS b", (1, "x"))
         assert await cur.fetchall() == ({"a": 1, "b": "x"},)
+
+
+async def test_awaiting_cursor_gives_the_cursor(conn: aio.Connection) -> None:
+    """``cur = await conn.cursor()``, as in aiomysql and asyncmy, where
+    ``cursor()`` is a coroutine."""
+    cur = await conn.cursor()
+    assert type(cur) is aio.Cursor
+    await cur.execute("SELECT 1")
+    assert await cur.fetchall() == ((1,),)
+    async with await conn.cursor(aio.DictCursor) as dict_cur:
+        assert type(dict_cur) is aio.DictCursor
+        await dict_cur.execute("SELECT 1 AS a")
+        assert await dict_cur.fetchall() == ({"a": 1},)
+
+
+async def test_connect_as_an_async_context_manager(server: Server) -> None:
+    """``async with aio.connect(...) as conn``, without awaiting first, as
+    aiomysql's and asyncmy's ``connect()`` allow: closed at the end of the
+    block, on an error too."""
+    args: dict[str, Any] = {
+        "host": server.host,
+        "port": server.port,
+        "user": "rustmy",
+        "password": "rustmy",
+        "database": "rustmy_test",
+    }
+    async with aio.connect(**args) as connection:
+        assert type(connection) is aio.Connection
+        assert await one(connection, "SELECT 1") == 1
+    assert connection.closed
+    with pytest.raises(rustmy.ProgrammingError):
+        async with aio.connect(**args) as failing:
+            await one(failing, "SELECT nope")
+    assert failing.closed
+    # Closed inside the block: leaving it does not raise.
+    async with aio.connect(**args) as early:
+        early.close()
+
+
+async def test_connect_is_still_a_coroutine(server: Server) -> None:
+    """What ``connect()`` returned before it worked with ``async with``:
+    a coroutine, for ``asyncio.create_task`` and the like."""
+    pending = aio.connect(
+        host=server.host,
+        port=server.port,
+        user="rustmy",
+        password="rustmy",
+        database="rustmy_test",
+    )
+    assert asyncio.iscoroutine(pending)
+    connection = await asyncio.create_task(pending)
+    assert await one(connection, "SELECT 1") == 1
+    connection.close()
+
+
+async def test_connect_never_awaited_opens_nothing(server: Server) -> None:
+    """Nothing starts until awaited: no coroutine is left to warn that it
+    was never awaited."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pending = aio.connect(host=server.host, port=server.port, user="rustmy")
+        del pending
+        gc.collect()
+    assert not [w for w in caught if issubclass(w.category, RuntimeWarning)]
 
 
 async def test_default_cursor_class(server: Server) -> None:
