@@ -2,6 +2,20 @@
 
 All notable changes to rustmy are documented in this file. Versions follow [Semantic Versioning](https://semver.org) and entries come from [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.4.0](https://github.com/M4RC0Sx/rustmy/compare/v1.3.2...v1.4.0) (2026-11-26)
+
+### Features
+
+* rustmy.aio, an asyncio API over the same protocol code, with connection pools and SQLAlchemy asyncio dialects ([#77](https://github.com/M4RC0Sx/rustmy/issues/77)) ([2c0a592](https://github.com/M4RC0Sx/rustmy/commit/2c0a592c279fab65b3cc4e7e3363bff3ecbd6800))
+
+### Tests
+
+* run Django's suite with fork where its runner does not support forkserver ([#64](https://github.com/M4RC0Sx/rustmy/issues/64)) ([f2f998d](https://github.com/M4RC0Sx/rustmy/commit/f2f998d4b77884a5be81373ca63e49197ec7d057))
+
+### Continuous Integration
+
+* stop running workflows for the merged feature/async branch ([#79](https://github.com/M4RC0Sx/rustmy/issues/79)) ([507beab](https://github.com/M4RC0Sx/rustmy/commit/507beabb030d975c696e5e87c801041fa3501d05))
+
 ## [1.3.2](https://github.com/M4RC0Sx/rustmy/compare/v1.3.1...v1.3.2) (2026-11-22)
 
 ### Performance Improvements
