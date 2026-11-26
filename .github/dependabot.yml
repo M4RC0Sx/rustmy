@@ -22,8 +22,14 @@ updates:
     target-branch: develop
     schedule:
       interval: weekly
-    # Development and benchmark tools only: the package has no Python
-    # dependencies.
+    # Development and benchmark tools. The package's only Python dependency
+    # is SQLAlchemy, in its extras: Dependabot would raise their public
+    # floor, and the lock must keep 2.0 for Python 3.10 and 2.1 elsewhere,
+    # so SQLAlchemy is upgraded by hand (`uv lock --upgrade-package
+    # sqlalchemy`).
+    ignore:
+      # Also "sqlalchemy[asyncio]", as Dependabot names it with the extra.
+      - dependency-name: "sqlalchemy*"
     commit-message:
       prefix: chore
       include: scope
