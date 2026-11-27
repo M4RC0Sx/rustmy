@@ -953,6 +953,19 @@ their own connections.
   (`pool_pre_ping=True`, and `pool_recycle` below the server's
   `wait_timeout`) or Django's `CONN_MAX_AGE` with `CONN_HEALTH_CHECKS`. Each
   thread or task uses its own connection, which is what pools hand out.
+- **Name the application.** Every connection tells the server who opened it
+  (`_client_name=rustmy`, `_client_version`, `_os`, `_platform`, `_pid`);
+  `program_name="billing-worker"` (also `?program_name=` in a SQLAlchemy
+  URL) and `conn_attrs={"team": "payments"}` add your own, so a DBA can see
+  which service holds each connection:
+
+  ```sql
+  SELECT PROCESSLIST_ID, ATTR_NAME, ATTR_VALUE
+  FROM performance_schema.session_connect_attrs;
+  ```
+
+  MySQL fills that table by default; MariaDB only with
+  `performance_schema=ON`.
 
 With FastAPI, plain `def` endpoints run in its thread pool, and each borrows a
 pooled connection:

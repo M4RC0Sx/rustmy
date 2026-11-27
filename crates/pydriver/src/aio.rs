@@ -966,6 +966,7 @@ impl AioConnection {
         zstd_level = 3,
         local_infile = false,
         local_infile_dir = None,
+        connect_attrs = Vec::new(),
     ))]
     #[expect(
         clippy::too_many_arguments,
@@ -997,6 +998,7 @@ impl AioConnection {
         zstd_level: u8,
         local_infile: bool,
         local_infile_dir: Option<PathBuf>,
+        connect_attrs: Vec<(String, String)>,
     ) -> PyResult<Self> {
         let unix = unix_socket.is_some();
         let (opts, codec, target) = connect_opts(
@@ -1023,6 +1025,7 @@ impl AioConnection {
             zstd_level,
             local_infile,
             local_infile_dir,
+            connect_attrs,
         )?;
         // Until authentication ends, `connect_timeout` bounds the handshake
         // (`rustmy.aio.connect`); these apply to the commands after it.

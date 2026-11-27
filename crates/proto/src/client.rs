@@ -67,6 +67,9 @@ pub struct Client {
     pub(crate) auth: AuthSettings,
     /// Session collation sent in the handshake, also for `COM_CHANGE_USER`.
     pub(crate) collation: u8,
+    /// Connection attributes block sent in the handshake (empty if the
+    /// server takes none), also for `COM_CHANGE_USER`.
+    pub(crate) connect_attrs: Vec<u8>,
     /// The server's default collation, from its greeting.
     pub(crate) server_collation: u8,
     /// Scratch buffer for control packets.
@@ -178,6 +181,7 @@ impl Client {
             collation,
             compression,
             plugin,
+            connect_attrs,
             ..
         } = login;
         wire.write_packet(io, &response).await?;
@@ -190,6 +194,7 @@ impl Client {
             greeting_nonce: greeting.nonce,
             auth,
             collation,
+            connect_attrs,
             server_collation: greeting.collation,
             buf,
             statements: StatementCache::new(opts.statement_cache),
@@ -866,6 +871,7 @@ impl Client {
         put_nul_bytes(&mut payload, database.unwrap_or_default());
         payload.extend_from_slice(&u16::from(self.collation).to_le_bytes());
         put_nul_bytes(&mut payload, plugin.name());
+        payload.extend_from_slice(&self.connect_attrs);
         self.wire
             .write_command(io, command::CHANGE_USER, &payload)
             .await?;

@@ -360,7 +360,11 @@ the handshake does no I/O of its own (`login.rs`): `Login` turns the
 greeting into the session's parameters and replies, and `Auth` runs the
 authentication exchange one payload at a time, for `COM_CHANGE_USER` too;
 `Conn` moves the payloads, runs the TLS handshake and reads the pinned key
-file (after TLS, before the first response).
+file (after TLS, before the first response). Connection attributes
+(`handshake::connect_attrs`: the driver's own, then `program_name` and
+`conn_attrs`) go in the handshake response and again in every
+`COM_CHANGE_USER`, which replaces them; more than 64 KiB fails before the
+handshake response goes, as servers would refuse it.
 
 **Character sets** (`crates/pydriver/src/charset.rs`, ids in
 `crates/proto/src/charset.rs`). The handshake requests the server's own
@@ -375,7 +379,8 @@ follows (`_HANDSHAKE_MAY_IGNORE` in `connections.py`). `collation=` and
 `autocommit`) go in a single `SET`, before `init_command` (which then
 precedes `autocommit`). Queries are built in the connection's character set, escaping
 text before encoding it; `bytes` go as `X'…'` in multi-byte legacy character
-sets. User and database names go in the connection's character set, the
+sets. User and database names and connection attributes go in the
+connection's character set, the
 password always as UTF-8. **The server's definition of each character set wins
 over Python's codec** (`Fixes` in `charset.rs`, found by probing every
 character on all nine servers and checked exhaustively by

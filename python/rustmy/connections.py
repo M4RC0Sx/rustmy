@@ -100,6 +100,8 @@ class Connection:
         zstd_level: int | None = None,
         local_infile: bool = False,
         local_infile_dir: PathArg | None = None,
+        program_name: str | None = None,
+        conn_attrs: Mapping[str, str] | None = None,
         read_default_file: PathArg | None = None,
         read_default_group: str | None = None,
     ) -> None:
@@ -191,6 +193,15 @@ class Connection:
         full (error 1461), the least recently used one is closed and the
         statement prepared again, once.
 
+        The server lists every connection's attributes in
+        ``performance_schema.session_connect_attrs``: rustmy sends
+        ``_client_name``, ``_client_version``, ``_os``, ``_platform`` and
+        ``_pid``, ``program_name`` names the application, and
+        ``conn_attrs`` adds any others (``str`` names and values; names
+        starting with ``_`` are reserved). MySQL keeps names up to 32
+        characters and values up to 1024, and 512 bytes per connection by
+        default (``performance_schema_session_connect_attrs_size``).
+
         TLS: ``ssl_mode`` is one of ``disabled``, ``preferred`` (default),
         ``required`` (encrypted, server not verified), ``verify_ca`` and
         ``verify_identity``. Passing ``ssl_ca`` alone means
@@ -242,6 +253,8 @@ class Connection:
             zstd_level=zstd_level,
             local_infile=local_infile,
             local_infile_dir=local_infile_dir,
+            program_name=program_name,
+            conn_attrs=conn_attrs,
             read_default_file=read_default_file,
             read_default_group=read_default_group,
         )

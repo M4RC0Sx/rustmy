@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from typing import Any
@@ -24,7 +25,6 @@ from rustmy.constants import CLIENT
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from os import PathLike
 
 
@@ -73,6 +73,40 @@ def timeout(seconds: float | None) -> float | None:
     if seconds is None:
         return DEFAULT_CONNECT_TIMEOUT
     return None if seconds == 0 else seconds
+
+
+def connect_attrs(program_name: object, conn_attrs: object) -> list[tuple[str, str]]:
+    """The connection attributes besides the driver's own: ``conn_attrs``,
+    then ``program_name``. Names starting with ``_`` are the client's."""
+    if conn_attrs is None:
+        conn_attrs = {}
+    elif not isinstance(conn_attrs, Mapping):
+        msg = f"conn_attrs must be a mapping, not {type(conn_attrs).__name__}"
+        raise TypeError(msg)
+    attrs: list[tuple[str, str]] = []
+    for name, value in conn_attrs.items():
+        if not isinstance(name, str) or not isinstance(value, str):
+            msg = (
+                "connection attributes are str names and values,"
+                f" got {name!r}: {value!r}"
+            )
+            raise TypeError(msg)
+        if not name or name.startswith("_"):
+            msg = (
+                f"invalid connection attribute name {name!r}:"
+                " names starting with _ are reserved"
+            )
+            raise ValueError(msg)
+        attrs.append((name, value))
+    if program_name is not None:
+        if not isinstance(program_name, str):
+            msg = f"program_name must be a str, not {type(program_name).__name__}"
+            raise TypeError(msg)
+        if "program_name" in conn_attrs:
+            msg = "program_name given twice: as an argument and in conn_attrs"
+            raise ValueError(msg)
+        attrs.append(("program_name", program_name))
+    return attrs
 
 
 def compression(compress: object) -> str | None:
@@ -132,6 +166,8 @@ def resolve(
     zstd_level: int | None = None,
     local_infile: bool = False,
     local_infile_dir: PathArg | None = None,
+    program_name: str | None = None,
+    conn_attrs: Mapping[str, str] | None = None,
     read_default_file: PathArg | None = None,
     read_default_group: str | None = None,
 ) -> ConnectArgs:
@@ -227,6 +263,7 @@ def resolve(
         "zstd_level": 3 if zstd_level is None else zstd_level,
         "local_infile": bool(local_infile),
         "local_infile_dir": local_infile_dir,
+        "connect_attrs": connect_attrs(program_name, conn_attrs),
     }
     return ConnectArgs(
         core=core,

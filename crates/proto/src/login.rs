@@ -23,6 +23,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::handshake::HandshakeResponse;
 use crate::handshake::ServerHandshake;
+use crate::handshake::connect_attrs;
 use crate::handshake::ssl_request;
 use crate::result::parse_err;
 use crate::result::parse_ok;
@@ -39,6 +40,7 @@ const DEFAULT_CAPABILITIES: u32 = capability::LONG_PASSWORD
     | capability::PS_MULTI_RESULTS
     | capability::PLUGIN_AUTH
     | capability::PLUGIN_AUTH_LENENC_CLIENT_DATA
+    | capability::CONNECT_ATTRS
     | capability::DEPRECATE_EOF;
 
 /// `caching_sha2_password`: the server found the password in its cache.
@@ -80,6 +82,8 @@ pub(crate) struct Login {
     /// The server's default plugin when we know it; otherwise native auth,
     /// and the server switches us.
     pub(crate) plugin: AuthPlugin,
+    /// The connection attributes block, empty if the server takes none.
+    pub(crate) connect_attrs: Vec<u8>,
 }
 
 impl Login {
@@ -115,6 +119,12 @@ impl Login {
             _ => (None, 0),
         };
         let capabilities = wanted & greeting.capabilities;
+        // Checked even when the server takes none, so the same options never
+        // fail on one server only.
+        let mut attrs = connect_attrs(&opts.connect_attrs)?;
+        if capabilities & capability::CONNECT_ATTRS == 0 {
+            attrs.clear();
+        }
         let collation =
             handshake_collation(&opts.charset, greeting.collation, greeting.is_mariadb())
                 .ok_or_else(|| {
@@ -129,6 +139,7 @@ impl Login {
             zstd_level,
             tls,
             plugin,
+            connect_attrs: attrs,
         })
     }
 
@@ -154,6 +165,7 @@ impl Login {
             auth_response: &auth_response,
             database: opts.database.as_deref(),
             auth_plugin: self.plugin.name(),
+            connect_attrs: &self.connect_attrs,
             zstd_level: self.zstd_level,
         }
         .encode()?;

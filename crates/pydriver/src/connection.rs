@@ -1218,6 +1218,7 @@ pub(crate) fn connect_opts(
     zstd_level: u8,
     local_infile: bool,
     local_infile_dir: Option<PathBuf>,
+    connect_attrs: Vec<(String, String)>,
 ) -> PyResult<(Opts, Arc<Codec>, String)> {
     if local_infile && local_infile_dir.is_none() {
         return Err(PyValueError::new_err(
@@ -1253,9 +1254,13 @@ pub(crate) fn connect_opts(
         |p| format!("'{}'", p.display()),
     );
     let codec = Codec::new(py, charset)?;
-    // The server reads both in the session's character set.
+    // The server reads these in the session's character set.
     let user = codec.encode(py, user)?;
     let database = database.map(|db| codec.encode(py, db)).transpose()?;
+    let connect_attrs = connect_attrs
+        .into_iter()
+        .map(|(name, value)| Ok((codec.encode(py, &name)?, codec.encode(py, &value)?)))
+        .collect::<PyResult<_>>()?;
     let opts = Opts {
         host,
         port,
@@ -1279,6 +1284,7 @@ pub(crate) fn connect_opts(
         statement_cache: statement_cache_size,
         compress,
         local_infile_dir,
+        connect_attrs,
     };
     Ok((opts, codec, target))
 }
@@ -1311,6 +1317,7 @@ pub(crate) fn connect_opts(
     zstd_level = 3,
     local_infile = false,
     local_infile_dir = None,
+    connect_attrs = Vec::new(),
 ))]
 #[expect(
     clippy::too_many_arguments,
@@ -1341,6 +1348,7 @@ pub(crate) fn connect(
     zstd_level: u8,
     local_infile: bool,
     local_infile_dir: Option<PathBuf>,
+    connect_attrs: Vec<(String, String)>,
 ) -> PyResult<Connection> {
     let (opts, codec, target) = connect_opts(
         py,
@@ -1366,6 +1374,7 @@ pub(crate) fn connect(
         zstd_level,
         local_infile,
         local_infile_dir,
+        connect_attrs,
     )?;
     let conn = py.detach(|| Conn::connect(&opts)).map_err(|err| {
         from_proto(err, Phase::Connect, &target, |message| {
