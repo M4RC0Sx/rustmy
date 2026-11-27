@@ -2,6 +2,24 @@
 
 All notable changes to rustmy are documented in this file. Versions follow [Semantic Versioning](https://semver.org) and entries come from [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.5.0](https://github.com/M4RC0Sx/rustmy/compare/v1.4.1...v1.5.0) (2026-11-27)
+
+### Features
+
+* connection attributes, program_name and conn_attrs ([#91](https://github.com/M4RC0Sx/rustmy/issues/91)) ([ab3fe6d](https://github.com/M4RC0Sx/rustmy/commit/ab3fe6df06979dd0a8980a08397b38c011ba7d9f))
+* mysql_clear_password authentication over TLS and Unix sockets ([#90](https://github.com/M4RC0Sx/rustmy/issues/90)) ([7a39d3d](https://github.com/M4RC0Sx/rustmy/commit/7a39d3d4f7f5f951181b3071860e8360e4b04d31))
+* mysql_clear_password authentication over TLS, and connection attributes ([#92](https://github.com/M4RC0Sx/rustmy/issues/92)) ([af7c305](https://github.com/M4RC0Sx/rustmy/commit/af7c305ccf9a3ed7b25c1850b28519caed30427c))
+
+### Continuous Integration
+
+* **deps:** bump the actions group with 5 updates ([#80](https://github.com/M4RC0Sx/rustmy/issues/80)) ([e3baa05](https://github.com/M4RC0Sx/rustmy/commit/e3baa05af0ff7e0fa123292e44311096f0ad4210))
+* keep SQLAlchemy out of Dependabot's uv updates ([#88](https://github.com/M4RC0Sx/rustmy/issues/88)) ([44512fb](https://github.com/M4RC0Sx/rustmy/commit/44512fb2a451f3d8205ab445d67093b1613bcd56))
+
+### Miscellaneous Chores
+
+* **deps-dev:** bump the python group with 2 updates ([#81](https://github.com/M4RC0Sx/rustmy/issues/81)) ([0d9a5ee](https://github.com/M4RC0Sx/rustmy/commit/0d9a5ee274a54bcb1e9750fba182d5f4a4cdd8e6))
+* **deps-dev:** update testcontainers[mysql] requirement from >=4.13 to >=4.15.0 ([#82](https://github.com/M4RC0Sx/rustmy/issues/82)) ([40418f3](https://github.com/M4RC0Sx/rustmy/commit/40418f33793197edc4ec5e796ffe02831a12ca6e))
+
 ## [1.4.1](https://github.com/M4RC0Sx/rustmy/compare/v1.4.0...v1.4.1) (2026-11-26)
 
 ### Bug Fixes
