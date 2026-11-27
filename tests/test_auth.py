@@ -5,7 +5,8 @@ password exchange over plain TCP. Each case uses a freshly created account,
 which cannot be in the server's authentication cache, so the
 full-authentication path always runs.
 
-MariaDB: ``client_ed25519`` and ``parsec`` (11.6+), with the accounts from
+MariaDB: ``client_ed25519`` and ``parsec`` (11.6+), and
+``mysql_clear_password`` through PAM, with the accounts from
 ``tests/docker/mariadb-init.sh``.
 """
 
@@ -19,6 +20,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 import rustmy
+
+from rustmy import aio
 
 
 if TYPE_CHECKING:
@@ -180,7 +183,7 @@ def test_get_server_public_key_from_an_option_file(
 @pytest.fixture
 def mariadb(server: Server) -> Server:
     if server.name != "mariadb":
-        pytest.skip("client_ed25519 and parsec are MariaDB-only")
+        pytest.skip("client_ed25519, parsec and PAM are MariaDB-only")
     return server
 
 
@@ -203,3 +206,58 @@ def test_mariadb_plugins(mariadb: Server, user: str, ssl_mode: str) -> None:
     with pytest.raises(rustmy.OperationalError) as info:
         mariadb.connect(user=user, password="wrong", ssl_mode=ssl_mode)
     assert info.value.args[0] == 1045
+
+
+@pytest.fixture
+def pam(mariadb: Server) -> Server:
+    with mariadb.connect() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM information_schema.plugins"
+            " WHERE plugin_name = 'pam' AND plugin_status = 'ACTIVE'"
+        )
+        if cursor.fetchone() is None:
+            pytest.skip("the server has no PAM plugin")
+    return mariadb
+
+
+def test_clear_password_over_tls(pam: Server) -> None:
+    with pam.connect(user="rustmy_pam", ssl_mode="required") as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT CURRENT_USER()")
+        assert cursor.fetchone() == ("rustmy_pam@%",)
+    with pytest.raises(rustmy.OperationalError) as info:
+        pam.connect(user="rustmy_pam", password="wrong", ssl_mode="required")
+    assert info.value.args[0] == 1045
+
+
+def test_clear_password_is_never_sent_without_tls(pam: Server) -> None:
+    with pytest.raises(rustmy.OperationalError) as info:
+        pam.connect(user="rustmy_pam", ssl_mode="disabled")
+    code, message = info.value.args
+    assert code == 2061
+    assert "mysql_clear_password" in message
+    assert "TLS" in message
+
+
+def test_change_user_to_a_clear_password_account(pam: Server) -> None:
+    with pam.connect(ssl_mode="required") as conn:
+        conn.change_user("rustmy_pam", "rustmy")
+        cursor = conn.cursor()
+        cursor.execute("SELECT CURRENT_USER()")
+        assert cursor.fetchone() == ("rustmy_pam@%",)
+    with pam.connect(ssl_mode="disabled") as conn:
+        with pytest.raises(rustmy.OperationalError) as info:
+            conn.change_user("rustmy_pam", "rustmy")
+        assert info.value.args[0] == 2061
+
+
+async def test_aio_clear_password(pam: Server) -> None:
+    args = pam.connect_args(user="rustmy_pam")
+    async with aio.connect(**args, ssl_mode="required") as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT CURRENT_USER()")
+        assert await cursor.fetchone() == ("rustmy_pam@%",)
+    with pytest.raises(rustmy.OperationalError) as info:
+        await aio.connect(**args, ssl_mode="disabled")
+    assert info.value.args[0] == 2061

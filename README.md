@@ -619,6 +619,24 @@ Authentication covers `caching_sha2_password`, `sha256_password` and
 `mysql_native_password` (MySQL), and `client_ed25519` and `parsec` (MariaDB),
 with or without TLS.
 
+Accounts whose server plugin needs the password itself (PAM, LDAP, and the
+IAM tokens of AWS RDS and Aurora, Cloud SQL or Azure) log in with
+`mysql_clear_password`, only over TLS or a Unix socket: over plain TCP the
+connection fails with `OperationalError` 2061 before the password is sent,
+so no option has to enable it. With RDS, for example, the token is the
+password and AWS's CA bundle verifies the server:
+
+```python
+import boto3
+
+token = boto3.client("rds").generate_db_auth_token(
+    DBHostname="db.example.com", Port=3306, DBUsername="app", Region="eu-west-1"
+)
+conn = rustmy.connect(
+    host="db.example.com", user="app", password=token, ssl_ca="global-bundle.pem"
+)
+```
+
 ### Compression
 
 Over a slow or metered link, the compressed protocol trades CPU for bytes:
@@ -1055,7 +1073,7 @@ async def product(product_id: int) -> dict[str, object]:
 - Without verified TLS (see above), whoever can intercept the connection can
   impersonate the server, and with `caching_sha2_password` or
   `sha256_password` obtain the password during a full authentication, as with
-  any MySQL client. Pinning the server's RSA key with
+  any MySQL client (and over TLS, with `mysql_clear_password`). Pinning the server's RSA key with
   `server_public_key="server-key.pem"` closes that path over plain TCP: the
   password is then only ever encrypted with that key.
   `get_server_public_key=False` (also `get-server-public-key=0` in an option

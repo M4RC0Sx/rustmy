@@ -1,0 +1,5 @@
+#!/bin/sh
+# Accepts the `rustmy_pam` account with the password `rustmy`. pam_exec
+# writes the password to standard input, NUL-terminated.
+password=$(tr -d '\000')
+[ "$PAM_USER" = rustmy_pam ] && [ "$password" = rustmy ]

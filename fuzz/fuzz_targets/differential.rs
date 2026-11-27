@@ -5,7 +5,8 @@
 //! for the `session` target), then ends its side and drops whatever the
 //! client writes. Each version runs the same session through its public
 //! API, with and without compression, and logs the `Debug` output of every
-//! result; the logs must match.
+//! result; the logs must match. Sessions that name an authentication plugin
+//! 1.3.2 lacks are skipped.
 
 #![no_main]
 
@@ -195,6 +196,11 @@ fn released(data: &[u8], compress: bool) -> Vec<String> {
 }
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
+    // 1.3.2 has no mysql_clear_password: over this Unix socket the current
+    // version authenticates with it where 1.3.2 fails.
+    if data.windows(20).any(|w| w == b"mysql_clear_password") {
+        return;
+    }
     for compress in [false, true] {
         let now = current(data, compress);
         let then = released(data, compress);

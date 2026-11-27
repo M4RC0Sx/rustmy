@@ -34,6 +34,9 @@ pub(crate) enum AuthPlugin {
     /// MariaDB's `parsec` (11.6+): PBKDF2-derived Ed25519 key signing both
     /// the server's and the client's nonce.
     Parsec,
+    /// `mysql_clear_password`: the password itself, for server plugins that
+    /// need it (PAM, LDAP, cloud IAM tokens). Only over TLS or a Unix socket.
+    ClearPassword,
 }
 
 impl AuthPlugin {
@@ -44,6 +47,7 @@ impl AuthPlugin {
             b"sha256_password" => Some(Self::Sha256),
             b"client_ed25519" => Some(Self::Ed25519),
             b"parsec" => Some(Self::Parsec),
+            b"mysql_clear_password" => Some(Self::ClearPassword),
             _ => None,
         }
     }
@@ -55,6 +59,7 @@ impl AuthPlugin {
             Self::Sha256 => b"sha256_password",
             Self::Ed25519 => b"client_ed25519",
             Self::Parsec => b"parsec",
+            Self::ClearPassword => b"mysql_clear_password",
         }
     }
 
@@ -71,8 +76,9 @@ impl AuthPlugin {
         match self {
             Self::Native => scramble_native(password, nonce),
             Self::CachingSha2 => scramble_caching_sha2(password, nonce),
-            // parsec starts with an empty packet asking for its salt.
-            Self::Sha256 | Self::Ed25519 | Self::Parsec => Vec::new(),
+            // parsec starts with an empty packet asking for its salt; the
+            // other two send the password itself (`login::first_response`).
+            Self::Sha256 | Self::Ed25519 | Self::Parsec | Self::ClearPassword => Vec::new(),
         }
     }
 
