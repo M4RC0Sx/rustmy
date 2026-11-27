@@ -2,6 +2,13 @@
 
 All notable changes to rustmy are documented in this file. Versions follow [Semantic Versioning](https://semver.org) and entries come from [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.5.1](https://github.com/M4RC0Sx/rustmy/compare/v1.5.0...v1.5.1) (2026-11-27)
+
+### Documentation
+
+* documentation site ([#93](https://github.com/M4RC0Sx/rustmy/issues/93)) ([5be5060](https://github.com/M4RC0Sx/rustmy/commit/5be506029d89093eba6ed2000fc79437a92721d3))
+* documentation site ([#94](https://github.com/M4RC0Sx/rustmy/issues/94)) ([6e57928](https://github.com/M4RC0Sx/rustmy/commit/6e579281ca032d4956acd121ba836ca7d466ee6f))
+
 ## [1.5.0](https://github.com/M4RC0Sx/rustmy/compare/v1.4.1...v1.5.0) (2026-11-27)
 
 ### Features
