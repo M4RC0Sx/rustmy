@@ -52,9 +52,13 @@ services:
 
   mariadb:
     image: mariadb:${MARIADB_VERSION:-11.4}
+    # PAM asks for the password with mysql_clear_password instead of its
+    # dialog plugin (the `rustmy_pam` account, tests/docker/pam).
     command:
       - --max-allowed-packet=64M
       - --local-infile=ON
+      - --plugin-load-add=auth_pam
+      - --loose-pam-use-cleartext-plugin=ON
       - --ssl-ca=/certs/ca.pem
       - --ssl-cert=/certs/server.pem
       - --ssl-key=/certs/server-key.pem
@@ -71,6 +75,8 @@ services:
     volumes:
       - ./tests/docker/mariadb-init.sh:/docker-entrypoint-initdb.d/init.sh:ro
       - ./tests/docker/certs:/certs:ro
+      - ./tests/docker/pam/rustmy:/etc/pam.d/rustmy:ro
+      - ./tests/docker/pam/rustmy-check:/etc/pam.d/rustmy-check:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 2s

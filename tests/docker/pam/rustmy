@@ -1,0 +1,4 @@
+# PAM service of the `rustmy_pam` account (mariadb-init.sh): pam_exec runs
+# rustmy-check with the password the client sent on its standard input.
+auth required pam_exec.so expose_authtok quiet /etc/pam.d/rustmy-check
+account required pam_permit.so
