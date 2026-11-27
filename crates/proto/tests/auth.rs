@@ -2,7 +2,8 @@
 //! fake server playing a man in the middle over plain TCP: it may hand the
 //! client a public key of its own at any point, and the client must take one
 //! only right after asking for it, never when a key is pinned with
-//! `server_public_key`.
+//! `server_public_key`. `mysql_clear_password` never sends the password
+//! over plain TCP, whether the greeting or an auth switch asks for it.
 //!
 //! No real server needed: these run with the ordinary tests.
 
@@ -119,6 +120,20 @@ fn exchange_with(
     get_key: bool,
     script: impl FnOnce(&mut Peer) + Send + 'static,
 ) -> Result<Conn, Error> {
+    serve(b"caching_sha2_password", pinned, get_key, |peer| {
+        peer.read().expect("handshake response");
+        script(peer);
+    })
+}
+
+/// Greets with `plugin` as the server's default and runs `script` from
+/// there; returns what `Conn::connect` gave.
+fn serve(
+    plugin: &'static [u8],
+    pinned: bool,
+    get_key: bool,
+    script: impl FnOnce(&mut Peer) + Send + 'static,
+) -> Result<Conn, Error> {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = thread::spawn(move || {
@@ -141,9 +156,9 @@ fn exchange_with(
         greeting.extend_from_slice(&[c0, c1, 255, 0x02, 0x00, c2, c3, 21]);
         greeting.extend_from_slice(&[0; 10]);
         greeting.extend_from_slice(b"ijklmnopqrst\0");
-        greeting.extend_from_slice(b"caching_sha2_password\0");
+        greeting.extend_from_slice(plugin);
+        greeting.push(0);
         peer.write(&greeting);
-        peer.read().expect("handshake response");
         script(&mut peer);
     });
 
@@ -309,4 +324,31 @@ fn without_key_requests_fast_authentication_still_works() {
         peer.write(OK);
     })
     .unwrap();
+}
+
+/// Over plain TCP, `mysql_clear_password` must end the connection without
+/// sending the password, and say why.
+fn assert_clear_password_refused(result: Result<Conn, Error>) {
+    match result {
+        Err(Error::Auth(message)) => {
+            assert!(message.contains("mysql_clear_password"), "{message}");
+            assert!(message.contains("TLS"), "{message}");
+        }
+        other => panic!("expected an authentication error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_switch_to_the_clear_password_plugin_hangs_up_over_plain_tcp() {
+    assert_clear_password_refused(exchange(false, |peer| {
+        peer.write(b"\xFEmysql_clear_password\0");
+        peer.expect_hang_up();
+    }));
+}
+
+#[test]
+fn a_greeting_asking_for_the_clear_password_gets_no_response() {
+    assert_clear_password_refused(serve(b"mysql_clear_password", false, true, |peer| {
+        peer.expect_hang_up();
+    }));
 }

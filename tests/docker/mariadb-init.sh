@@ -33,3 +33,12 @@ if docker_process_sql <<<"INSTALL SONAME 'auth_parsec'" 2>/dev/null; then
 		GRANT ALL ON rustmy_test.* TO 'rustmy_parsec'@'%';
 	EOSQL
 fi
+
+# mysql_clear_password, through PAM (compose.yaml loads the plugin and makes
+# it ask for the password in cleartext); skipped if the plugin did not load.
+if docker_process_sql <<<"SELECT plugin_status FROM information_schema.plugins WHERE plugin_name = 'pam'" | grep -q ACTIVE; then
+	docker_process_sql <<-'EOSQL'
+		CREATE USER 'rustmy_pam'@'%' IDENTIFIED VIA pam USING 'rustmy';
+		GRANT ALL ON rustmy_test.* TO 'rustmy_pam'@'%';
+	EOSQL
+fi

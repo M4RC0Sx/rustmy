@@ -286,7 +286,7 @@ impl Auth {
                     (AuthPlugin::Parsec, salt) => {
                         parsec_response(password, &self.nonce, salt, settings.parsec_max_factor)?
                     }
-                    (AuthPlugin::Native | AuthPlugin::Ed25519, _) => {
+                    (AuthPlugin::Native | AuthPlugin::Ed25519 | AuthPlugin::ClearPassword, _) => {
                         return Err(Error::protocol(
                             "unexpected AuthMoreData for this authentication plugin",
                         ));
@@ -321,6 +321,19 @@ fn first_response(
     nonce: &[u8],
     settings: &AuthSettings,
 ) -> Result<Vec<u8>> {
+    if plugin == AuthPlugin::ClearPassword {
+        // Whoever answers asks for this plugin, in the greeting or a switch:
+        // over plain TCP the password would go to them as it is.
+        return if settings.secure {
+            Ok(cleartext_password(password))
+        } else {
+            Err(Error::Auth(
+                "the server asks for the password in cleartext (mysql_clear_password), \
+                 which is only sent over TLS or a Unix socket"
+                    .to_owned(),
+            ))
+        };
+    }
     if plugin != AuthPlugin::Sha256 {
         return Ok(plugin.scramble(password, nonce));
     }
@@ -459,6 +472,36 @@ bwIDAQAB
             .step(b"\xFEno_such_plugin\0xyz", b"secret", &settings)
             .unwrap_err();
         assert!(matches!(err, Error::Unsupported(_)), "{err}");
+    }
+
+    #[test]
+    fn the_clear_password_goes_only_over_a_secure_transport() {
+        let switch = b"\xFEmysql_clear_password\0";
+        // Over TLS or a Unix socket: the password itself, NUL-terminated.
+        let secure = settings(true, true);
+        let mut auth = caching_sha2(&secure);
+        assert_eq!(
+            auth.step(switch, b"secret", &secure).unwrap(),
+            AuthStep::Send(b"secret\0".to_vec())
+        );
+        assert_eq!(
+            auth.step(OK, b"secret", &secure).unwrap(),
+            AuthStep::Done { status: 2 }
+        );
+        // Over plain TCP, never: neither after a switch nor as the plugin
+        // the greeting names.
+        let plain = settings(false, true);
+        let mut auth = caching_sha2(&plain);
+        let err = auth.step(switch, b"secret", &plain).unwrap_err();
+        assert!(matches!(err, Error::Auth(_)), "{err}");
+        let err =
+            Auth::start(AuthPlugin::ClearPassword, Vec::new(), b"secret", &plain).unwrap_err();
+        assert!(matches!(err, Error::Auth(_)), "{err}");
+        // The plugin has no continuation.
+        let mut auth = caching_sha2(&secure);
+        auth.step(switch, b"secret", &secure).unwrap();
+        let err = auth.step(&[0x01, 0x04], b"secret", &secure).unwrap_err();
+        assert!(err.to_string().contains("unexpected AuthMoreData"), "{err}");
     }
 
     #[test]
