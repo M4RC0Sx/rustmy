@@ -114,6 +114,13 @@ def test_get_server_public_key_from_the_url(value: str, *, expected: bool) -> No
     assert kwargs["get_server_public_key"] is expected
 
 
+def test_program_name_from_the_url() -> None:
+    dialect = sa.create_engine("mysql+rustmy://").dialect
+    url = sa.make_url("mysql+rustmy://u@h/db?program_name=orm-app")
+    _, kwargs = dialect.create_connect_args(url)
+    assert kwargs["program_name"] == "orm-app"
+
+
 # Sessions ----------------------------------------------------------------------
 
 

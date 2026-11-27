@@ -141,7 +141,11 @@ done; docker compose down -v
   `rustmy_ed25519` (`client_ed25519`) and `rustmy_parsec` (`parsec`, 11.6+)
   come from `tests/docker/mariadb-init.sh`; the `mysql_native_password`
   account `rustmy_native` (`tests/docker/mysql-init.sh`, MySQL 8.x only)
-  covers the auth-switch path.
+  covers the auth-switch path. `rustmy_pam` (MariaDB) logs in with
+  `mysql_clear_password`: compose loads the `pam` plugin with
+  `pam_use_cleartext_plugin`, and its PAM service (`tests/docker/pam/`)
+  checks the password with `pam_exec`. MySQL's server plugins for it are
+  Enterprise-only, so there it is covered by `crates/proto/tests/auth.rs`.
 - **`LOAD DATA LOCAL INFILE`**: compose starts both servers with
   `--local-infile=ON` (MySQL 8.0+ defaults to off).
 
@@ -350,7 +354,12 @@ is requested from the server when needed, as PyMySQL does, or pinned with
 `server_public_key`; `get_server_public_key=False` never requests it and
 fails with `Error::Auth` (2061) instead, as libmysqlclient does by default. A key is accepted only right after the client asked for
 it, never with a pinned one (`requests_key` in `login.rs`;
-`crates/proto/tests/auth.rs` plays the man in the middle). MariaDB's `parsec`
+`crates/proto/tests/auth.rs` plays the man in the middle).
+`mysql_clear_password` sends the password itself and only over TLS or a
+Unix socket, whether the greeting or an auth switch asks for it; there is no
+option to enable it (libmysqlclient has one), since a man in the middle of
+unverified TLS can already get the cleartext password from
+`caching_sha2_password`. MariaDB's `parsec`
 derives its key with as many PBKDF2 rounds as the server asks for, bounded
 as MariaDB Connector/C bounds them: what fits in `connect_timeout`
 (`parsec_max_factor`). A logical payload may be 64 KiB until authentication
@@ -360,7 +369,11 @@ the handshake does no I/O of its own (`login.rs`): `Login` turns the
 greeting into the session's parameters and replies, and `Auth` runs the
 authentication exchange one payload at a time, for `COM_CHANGE_USER` too;
 `Conn` moves the payloads, runs the TLS handshake and reads the pinned key
-file (after TLS, before the first response).
+file (after TLS, before the first response). Connection attributes
+(`handshake::connect_attrs`: the driver's own, then `program_name` and
+`conn_attrs`) go in the handshake response and again in every
+`COM_CHANGE_USER`, which replaces them; more than 64 KiB fails before the
+handshake response goes, as servers would refuse it.
 
 **Character sets** (`crates/pydriver/src/charset.rs`, ids in
 `crates/proto/src/charset.rs`). The handshake requests the server's own
@@ -375,7 +388,8 @@ follows (`_HANDSHAKE_MAY_IGNORE` in `connections.py`). `collation=` and
 `autocommit`) go in a single `SET`, before `init_command` (which then
 precedes `autocommit`). Queries are built in the connection's character set, escaping
 text before encoding it; `bytes` go as `X'…'` in multi-byte legacy character
-sets. User and database names go in the connection's character set, the
+sets. User and database names and connection attributes go in the
+connection's character set, the
 password always as UTF-8. **The server's definition of each character set wins
 over Python's codec** (`Fixes` in `charset.rs`, found by probing every
 character on all nine servers and checked exhaustively by

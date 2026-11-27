@@ -23,6 +23,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::handshake::HandshakeResponse;
 use crate::handshake::ServerHandshake;
+use crate::handshake::connect_attrs;
 use crate::handshake::ssl_request;
 use crate::result::parse_err;
 use crate::result::parse_ok;
@@ -39,6 +40,7 @@ const DEFAULT_CAPABILITIES: u32 = capability::LONG_PASSWORD
     | capability::PS_MULTI_RESULTS
     | capability::PLUGIN_AUTH
     | capability::PLUGIN_AUTH_LENENC_CLIENT_DATA
+    | capability::CONNECT_ATTRS
     | capability::DEPRECATE_EOF;
 
 /// `caching_sha2_password`: the server found the password in its cache.
@@ -80,6 +82,8 @@ pub(crate) struct Login {
     /// The server's default plugin when we know it; otherwise native auth,
     /// and the server switches us.
     pub(crate) plugin: AuthPlugin,
+    /// The connection attributes block, empty if the server takes none.
+    pub(crate) connect_attrs: Vec<u8>,
 }
 
 impl Login {
@@ -115,6 +119,12 @@ impl Login {
             _ => (None, 0),
         };
         let capabilities = wanted & greeting.capabilities;
+        // Checked even when the server takes none, so the same options never
+        // fail on one server only.
+        let mut attrs = connect_attrs(&opts.connect_attrs)?;
+        if capabilities & capability::CONNECT_ATTRS == 0 {
+            attrs.clear();
+        }
         let collation =
             handshake_collation(&opts.charset, greeting.collation, greeting.is_mariadb())
                 .ok_or_else(|| {
@@ -129,6 +139,7 @@ impl Login {
             zstd_level,
             tls,
             plugin,
+            connect_attrs: attrs,
         })
     }
 
@@ -154,6 +165,7 @@ impl Login {
             auth_response: &auth_response,
             database: opts.database.as_deref(),
             auth_plugin: self.plugin.name(),
+            connect_attrs: &self.connect_attrs,
             zstd_level: self.zstd_level,
         }
         .encode()?;
@@ -286,7 +298,7 @@ impl Auth {
                     (AuthPlugin::Parsec, salt) => {
                         parsec_response(password, &self.nonce, salt, settings.parsec_max_factor)?
                     }
-                    (AuthPlugin::Native | AuthPlugin::Ed25519, _) => {
+                    (AuthPlugin::Native | AuthPlugin::Ed25519 | AuthPlugin::ClearPassword, _) => {
                         return Err(Error::protocol(
                             "unexpected AuthMoreData for this authentication plugin",
                         ));
@@ -321,6 +333,19 @@ fn first_response(
     nonce: &[u8],
     settings: &AuthSettings,
 ) -> Result<Vec<u8>> {
+    if plugin == AuthPlugin::ClearPassword {
+        // Whoever answers asks for this plugin, in the greeting or a switch:
+        // over plain TCP the password would go to them as it is.
+        return if settings.secure {
+            Ok(cleartext_password(password))
+        } else {
+            Err(Error::Auth(
+                "the server asks for the password in cleartext (mysql_clear_password), \
+                 which is only sent over TLS or a Unix socket"
+                    .to_owned(),
+            ))
+        };
+    }
     if plugin != AuthPlugin::Sha256 {
         return Ok(plugin.scramble(password, nonce));
     }
@@ -459,6 +484,36 @@ bwIDAQAB
             .step(b"\xFEno_such_plugin\0xyz", b"secret", &settings)
             .unwrap_err();
         assert!(matches!(err, Error::Unsupported(_)), "{err}");
+    }
+
+    #[test]
+    fn the_clear_password_goes_only_over_a_secure_transport() {
+        let switch = b"\xFEmysql_clear_password\0";
+        // Over TLS or a Unix socket: the password itself, NUL-terminated.
+        let secure = settings(true, true);
+        let mut auth = caching_sha2(&secure);
+        assert_eq!(
+            auth.step(switch, b"secret", &secure).unwrap(),
+            AuthStep::Send(b"secret\0".to_vec())
+        );
+        assert_eq!(
+            auth.step(OK, b"secret", &secure).unwrap(),
+            AuthStep::Done { status: 2 }
+        );
+        // Over plain TCP, never: neither after a switch nor as the plugin
+        // the greeting names.
+        let plain = settings(false, true);
+        let mut auth = caching_sha2(&plain);
+        let err = auth.step(switch, b"secret", &plain).unwrap_err();
+        assert!(matches!(err, Error::Auth(_)), "{err}");
+        let err =
+            Auth::start(AuthPlugin::ClearPassword, Vec::new(), b"secret", &plain).unwrap_err();
+        assert!(matches!(err, Error::Auth(_)), "{err}");
+        // The plugin has no continuation.
+        let mut auth = caching_sha2(&secure);
+        auth.step(switch, b"secret", &secure).unwrap();
+        let err = auth.step(&[0x01, 0x04], b"secret", &secure).unwrap_err();
+        assert!(err.to_string().contains("unexpected AuthMoreData"), "{err}");
     }
 
     #[test]

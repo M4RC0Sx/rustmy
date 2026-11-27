@@ -619,6 +619,24 @@ Authentication covers `caching_sha2_password`, `sha256_password` and
 `mysql_native_password` (MySQL), and `client_ed25519` and `parsec` (MariaDB),
 with or without TLS.
 
+Accounts whose server plugin needs the password itself (PAM, LDAP, and the
+IAM tokens of AWS RDS and Aurora, Cloud SQL or Azure) log in with
+`mysql_clear_password`, only over TLS or a Unix socket: over plain TCP the
+connection fails with `OperationalError` 2061 before the password is sent,
+so no option has to enable it. With RDS, for example, the token is the
+password and AWS's CA bundle verifies the server:
+
+```python
+import boto3
+
+token = boto3.client("rds").generate_db_auth_token(
+    DBHostname="db.example.com", Port=3306, DBUsername="app", Region="eu-west-1"
+)
+conn = rustmy.connect(
+    host="db.example.com", user="app", password=token, ssl_ca="global-bundle.pem"
+)
+```
+
 ### Compression
 
 Over a slow or metered link, the compressed protocol trades CPU for bytes:
@@ -953,6 +971,19 @@ their own connections.
   (`pool_pre_ping=True`, and `pool_recycle` below the server's
   `wait_timeout`) or Django's `CONN_MAX_AGE` with `CONN_HEALTH_CHECKS`. Each
   thread or task uses its own connection, which is what pools hand out.
+- **Name the application.** Every connection tells the server who opened it
+  (`_client_name=rustmy`, `_client_version`, `_os`, `_platform`, `_pid`);
+  `program_name="billing-worker"` (also `?program_name=` in a SQLAlchemy
+  URL) and `conn_attrs={"team": "payments"}` add your own, so a DBA can see
+  which service holds each connection:
+
+  ```sql
+  SELECT PROCESSLIST_ID, ATTR_NAME, ATTR_VALUE
+  FROM performance_schema.session_connect_attrs;
+  ```
+
+  MySQL fills that table by default; MariaDB only with
+  `performance_schema=ON`.
 
 With FastAPI, plain `def` endpoints run in its thread pool, and each borrows a
 pooled connection:
@@ -1042,7 +1073,7 @@ async def product(product_id: int) -> dict[str, object]:
 - Without verified TLS (see above), whoever can intercept the connection can
   impersonate the server, and with `caching_sha2_password` or
   `sha256_password` obtain the password during a full authentication, as with
-  any MySQL client. Pinning the server's RSA key with
+  any MySQL client (and over TLS, with `mysql_clear_password`). Pinning the server's RSA key with
   `server_public_key="server-key.pem"` closes that path over plain TCP: the
   password is then only ever encrypted with that key.
   `get_server_public_key=False` (also `get-server-public-key=0` in an option

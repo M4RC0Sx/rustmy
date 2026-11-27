@@ -2,6 +2,7 @@
 
 use crate::buf::Reader;
 use crate::buf::put_lenenc_bytes;
+use crate::buf::put_lenenc_int;
 use crate::buf::put_nul_bytes;
 use crate::constants::capability;
 use crate::error::Error;
@@ -101,6 +102,8 @@ pub(crate) struct HandshakeResponse<'a> {
     pub(crate) auth_response: &'a [u8],
     pub(crate) database: Option<&'a [u8]>,
     pub(crate) auth_plugin: &'a [u8],
+    /// [`connect_attrs`], sent with `CONNECT_ATTRS`.
+    pub(crate) connect_attrs: &'a [u8],
     /// zstd level, sent with `ZSTD_COMPRESSION_ALGORITHM`.
     pub(crate) zstd_level: u8,
 }
@@ -132,6 +135,9 @@ impl HandshakeResponse<'_> {
         if caps & capability::PLUGIN_AUTH != 0 {
             put_nul_bytes(&mut out, self.auth_plugin);
         }
+        if caps & capability::CONNECT_ATTRS != 0 {
+            out.extend_from_slice(self.connect_attrs);
+        }
         if caps & capability::ZSTD_COMPRESSION_ALGORITHM != 0 {
             out.push(self.zstd_level);
         }
@@ -139,10 +145,44 @@ impl HandshakeResponse<'_> {
     }
 }
 
+/// The connection attributes of the handshake response and of
+/// `COM_CHANGE_USER` (`performance_schema.session_connect_attrs`): the
+/// driver's own, then `extra`, as length-encoded names and values after
+/// their total length. Servers refuse more than 64 KiB of them.
+pub(crate) fn connect_attrs(extra: &[(Vec<u8>, Vec<u8>)]) -> Result<Vec<u8>> {
+    let pid = std::process::id().to_string();
+    let own: [(&[u8], &[u8]); 5] = [
+        (b"_client_name", b"rustmy"),
+        (b"_client_version", env!("CARGO_PKG_VERSION").as_bytes()),
+        (b"_os", std::env::consts::OS.as_bytes()),
+        (b"_platform", std::env::consts::ARCH.as_bytes()),
+        (b"_pid", pid.as_bytes()),
+    ];
+    let extra = extra.iter().map(|(k, v)| (k.as_slice(), v.as_slice()));
+    let mut pairs = Vec::with_capacity(128);
+    for (name, value) in own.into_iter().chain(extra) {
+        put_lenenc_bytes(&mut pairs, name);
+        put_lenenc_bytes(&mut pairs, value);
+    }
+    let len = u16::try_from(pairs.len()).map_err(|_| {
+        Error::Config(format!(
+            "connection attributes take {} bytes; servers accept at most {}",
+            pairs.len(),
+            u16::MAX
+        ))
+    })?;
+    let mut out = Vec::with_capacity(pairs.len() + 3);
+    put_lenenc_int(&mut out, u64::from(len));
+    out.extend_from_slice(&pairs);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::HandshakeResponse;
     use super::ServerHandshake;
+    use super::connect_attrs;
+    use crate::buf::Reader;
     use crate::constants::capability;
 
     /// Greeting shaped like MySQL 8.4's, built field by field.
@@ -213,11 +253,84 @@ mod tests {
             auth_response: &[1, 2, 3],
             database: Some(b"db"),
             auth_plugin: b"mysql_native_password",
+            connect_attrs: b"\x02\x01k",
             zstd_level: 0,
         }
         .encode()
         .unwrap();
         let tail = &resp[32..];
+        // No CONNECT_ATTRS agreed: no attributes.
         assert_eq!(tail, b"app\0\x03\x01\x02\x03db\0mysql_native_password\0");
+    }
+
+    #[test]
+    fn the_attributes_go_after_the_plugin_and_before_the_zstd_level() {
+        let resp = HandshakeResponse {
+            capabilities: capability::PROTOCOL_41
+                | capability::PLUGIN_AUTH
+                | capability::PLUGIN_AUTH_LENENC_CLIENT_DATA
+                | capability::CONNECT_ATTRS
+                | capability::ZSTD_COMPRESSION_ALGORITHM,
+            collation: 45,
+            user: b"app",
+            auth_response: &[],
+            database: None,
+            auth_plugin: b"parsec",
+            connect_attrs: b"\x04\x01k\x01v",
+            zstd_level: 7,
+        }
+        .encode()
+        .unwrap();
+        assert_eq!(&resp[32..], b"app\0\x00parsec\0\x04\x01k\x01v\x07");
+    }
+
+    /// The names and values of an attributes block, in order.
+    fn decode(block: &[u8]) -> Vec<(String, String)> {
+        let mut r = Reader::new(block);
+        let len = usize::try_from(r.lenenc_int().unwrap()).unwrap();
+        assert_eq!(len, r.rest().len(), "total length");
+        let mut rest = &block[block.len() - len..];
+        let mut pairs = Vec::new();
+        while !rest.is_empty() {
+            let mut r = Reader::new(rest);
+            let name = String::from_utf8(r.lenenc_bytes().unwrap().to_vec()).unwrap();
+            let value = String::from_utf8(r.lenenc_bytes().unwrap().to_vec()).unwrap();
+            pairs.push((name, value));
+            rest = r.rest();
+        }
+        pairs
+    }
+
+    #[test]
+    fn the_driver_names_itself_before_the_callers_attributes() {
+        let block = connect_attrs(&[(b"program_name".to_vec(), b"app".to_vec())]).unwrap();
+        let pairs = decode(&block);
+        let names: Vec<&str> = pairs.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "_client_name",
+                "_client_version",
+                "_os",
+                "_platform",
+                "_pid",
+                "program_name"
+            ]
+        );
+        assert_eq!(pairs[0].1, "rustmy");
+        assert_eq!(pairs[4].1, std::process::id().to_string());
+        assert_eq!(pairs[5].1, "app");
+    }
+
+    #[test]
+    fn attributes_past_64_kib_are_refused() {
+        // A value over 250 bytes takes a 3-byte length: the block's own
+        // length too, once past 250.
+        let big = |n| vec![(b"k".to_vec(), vec![b'x'; n])];
+        let own = connect_attrs(&[]).unwrap().len() - 1;
+        let fits = connect_attrs(&big(65_535 - own - 5)).unwrap();
+        assert_eq!(decode(&fits).len(), 6);
+        let err = connect_attrs(&big(65_535 - own - 4)).unwrap_err();
+        assert!(err.to_string().contains("65535"), "{err}");
     }
 }
