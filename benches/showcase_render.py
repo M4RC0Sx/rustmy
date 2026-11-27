@@ -444,9 +444,12 @@ def section(run: dict[str, Any], base: str, *, folded: bool = False) -> str:
         )
         numbers = table(run, area)
         if folded:
-            # The main README leads with the charts; the figures are a click away.
+            # The main README leads with the charts; the figures are a click
+            # away. `markdown="1"` lets the documentation site, which includes
+            # this block, read the table inside (GitHub and PyPI ignore it).
             numbers = (
-                f"<details>\n<summary>Numbers</summary>\n\n{numbers}\n\n</details>"
+                f'<details markdown="1">\n<summary>Numbers</summary>\n\n'
+                f"{numbers}\n\n</details>"
             )
         parts.append(numbers)
         if not folded and area in AREA_ORDER and panels(run, area, "uvloop"):

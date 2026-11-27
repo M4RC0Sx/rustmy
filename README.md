@@ -6,6 +6,7 @@ PyMySQL, aiomysql or asyncmy, SQLAlchemy dialects (blocking and asyncio)
 included, Django through mysqlclient's module name, connection pools, and
 wheels with no system libraries to install.
 
+[![Docs](https://img.shields.io/badge/docs-m4rc0sx.github.io%2Frustmy-c2410c)](https://m4rc0sx.github.io/rustmy/)
 [![PyPI](https://img.shields.io/pypi/v/rustmy)](https://pypi.org/project/rustmy/)
 [![Python versions](https://img.shields.io/pypi/pyversions/rustmy)](https://pypi.org/project/rustmy/)
 [![Free-threaded](https://img.shields.io/badge/free--threaded-3.14t%20%7C%203.15t-blue)](https://docs.python.org/3/howto/free-threading-python.html)
@@ -28,6 +29,9 @@ And on asyncio, with `rustmy.aio`:
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/hero-async-dark.svg">
   <img alt="Time to read and insert 1,000,000 rows, to load 1,000,000 objects through SQLAlchemy's asyncio ORM, and to run 6,400 queries from 32 tasks sharing a pool of 8 connections, with rustmy.aio, asyncmy, aiomysql and mysql.connector.aio (lower is better; the figures are in the Performance section)" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/hero-async-light.svg">
 </picture>
+
+**Documentation: <https://m4rc0sx.github.io/rustmy/>**, with the guide, the
+integrations, the migration notes and the API reference.
 
 ## Contents
 
@@ -229,6 +233,7 @@ mysql-connector-python runs with its C extension, on Python 3.14 (it has none
 for 3.15 yet). The asyncio sections compare `rustmy.aio` with asyncmy,
 aiomysql and `mysql.connector.aio`.
 
+<!-- --8<-- [start:showcase] -->
 <!-- showcase:start -->
 **CPython 3.14.3** · MySQL 8.4.13 · Darwin arm64 · rustmy 1.4.0, mysqlclient 2.3.1, PyMySQL 2.2.8, mysql-connector-python 26.10.0 (C extension), SQLAlchemy 2.1.9, Django 6.1.3 · best of 5 (100k) and 3 (1M) · 2026-11-26T11:14:45+00:00
 
@@ -239,7 +244,7 @@ aiomysql and `mysql.connector.aio`.
   <img alt="DB-API: time per driver, lower is better" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-dbapi-light.svg">
 </picture>
 
-<details>
+<details markdown="1">
 <summary>Numbers</summary>
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
@@ -262,7 +267,7 @@ aiomysql and `mysql.connector.aio`.
   <img alt="Prepared statements: time per driver, lower is better" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-prepared-light.svg">
 </picture>
 
-<details>
+<details markdown="1">
 <summary>Numbers</summary>
 
 | Workload | Rows | rustmy (prepared) | rustmy (text) | mysql-connector (prepared) | mysqlclient | PyMySQL | vs mysqlclient |
@@ -279,7 +284,7 @@ aiomysql and `mysql.connector.aio`.
   <img alt="SQLAlchemy 2: time per driver, lower is better" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-sqlalchemy-light.svg">
 </picture>
 
-<details>
+<details markdown="1">
 <summary>Numbers</summary>
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
@@ -302,7 +307,7 @@ aiomysql and `mysql.connector.aio`.
   <img alt="Django: time per driver, lower is better" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-django-light.svg">
 </picture>
 
-<details>
+<details markdown="1">
 <summary>Numbers</summary>
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
@@ -325,7 +330,7 @@ aiomysql and `mysql.connector.aio`.
   <img alt="Memory: peak memory per driver, lower is better" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-memory-light.svg">
 </picture>
 
-<details>
+<details markdown="1">
 <summary>Numbers</summary>
 
 | Workload | Rows | rustmy | mysqlclient | PyMySQL | mysql-connector | vs mysqlclient |
@@ -343,7 +348,7 @@ asyncio: asyncmy 0.2.18, aiomysql 0.3.2 and mysql.connector.aio (mysql-connector
   <img alt="asyncio: time per driver, lower is better" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-asyncio-light.svg">
 </picture>
 
-<details>
+<details markdown="1">
 <summary>Numbers</summary>
 
 | Workload | Rows | rustmy | asyncmy | aiomysql | mysql.connector.aio | vs asyncmy |
@@ -367,7 +372,7 @@ asyncio: asyncmy 0.2.18, aiomysql 0.3.2 and mysql.connector.aio (mysql-connector
   <img alt="SQLAlchemy 2, asyncio: time per driver, lower is better" src="https://raw.githubusercontent.com/M4RC0Sx/rustmy/master/benches/results/showcase-sqlalchemy-asyncio-light.svg">
 </picture>
 
-<details>
+<details markdown="1">
 <summary>Numbers</summary>
 
 | Workload | Rows | rustmy | asyncmy | aiomysql | vs asyncmy |
@@ -383,6 +388,7 @@ asyncio: asyncmy 0.2.18, aiomysql 0.3.2 and mysql.connector.aio (mysql-connector
 
 </details>
 <!-- showcase:end -->
+<!-- --8<-- [end:showcase] -->
 
 How it was measured, more scenarios (character sets, `conv=`, cursors,
 compression over slow links, pipelining with latency) and the history of every
