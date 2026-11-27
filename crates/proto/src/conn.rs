@@ -102,6 +102,10 @@ pub struct Opts {
     /// file, resolved too, is inside the directory; any other is refused
     /// with [`Error::LocalInfile`] before touching the disk.
     pub local_infile_dir: Option<PathBuf>,
+    /// Connection attributes besides the driver's own (`_client_name`,
+    /// `_client_version`, `_os`, `_platform`, `_pid`), as names and values
+    /// in the session's character set, sent if the server takes them.
+    pub connect_attrs: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl fmt::Debug for Opts {
@@ -125,6 +129,7 @@ impl fmt::Debug for Opts {
             statement_cache,
             compress,
             local_infile_dir,
+            connect_attrs,
         } = self;
         let password = if password.is_empty() { "" } else { "<hidden>" };
         f.debug_struct("Opts")
@@ -148,6 +153,7 @@ impl fmt::Debug for Opts {
             .field("statement_cache", statement_cache)
             .field("compress", compress)
             .field("local_infile_dir", local_infile_dir)
+            .field("connect_attrs", connect_attrs)
             .finish()
     }
 }
@@ -172,6 +178,7 @@ impl Default for Opts {
             statement_cache: DEFAULT_STATEMENT_CACHE,
             compress: None,
             local_infile_dir: None,
+            connect_attrs: Vec::new(),
         }
     }
 }

@@ -93,7 +93,8 @@ macro_rules! session {
             "connected: {:?} {} {} {:?}",
             conn.server_version(),
             conn.connection_id(),
-            conn.capabilities(),
+            // 1.3.2 sends no connection attributes, so never asks for them.
+            conn.capabilities() & !p::constants::capability::CONNECT_ATTRS,
             conn.compression()
         ));
         let query = conn.query(b"SELECT 1");
