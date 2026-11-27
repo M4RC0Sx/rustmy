@@ -1,0 +1,51 @@
+name: docs
+
+# The documentation site (zensical.toml, docs/). Built in strict mode on
+# every pull request and push to develop, so a broken link or API reference
+# fails; published to GitHub Pages from master, which only moves when
+# develop is merged for a release, so the site documents what is on PyPI.
+on:
+  push:
+    branches: [develop, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      # Only the docs group: the API reference is read from the sources, so
+      # the extension is not built. --isolated keeps the project's own
+      # environment (Python 3.10, below the tools' floor) out of it.
+      - run: uv run --isolated --locked --only-group docs --python 3.14 zensical build --clean --strict
+      - if: github.ref == 'refs/heads/master'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    name: Deploy
+    if: github.ref == 'refs/heads/master'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
