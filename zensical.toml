@@ -1,0 +1,217 @@
+# The documentation site, built with Zensical:
+#   uv run --isolated --only-group docs --python 3.14 zensical serve
+# (--isolated keeps the docs tools, which need Python 3.11+, out of .venv.)
+# The API reference is read from the sources and from _core.pyi by
+# mkdocstrings, without importing rustmy, so nothing is compiled.
+
+[project]
+site_name = "rustmy"
+site_url = "https://m4rc0sx.github.io/rustmy/"
+site_description = "A fast MySQL and MariaDB driver for Python, written in Rust: DB-API 2.0, asyncio, pools, SQLAlchemy and Django."
+site_author = "M4RC0Sx"
+copyright = "Copyright &copy; 2026 M4RC0Sx · MIT or Apache-2.0 · MySQL is a trademark of Oracle Corporation and MariaDB of MariaDB plc"
+repo_url = "https://github.com/M4RC0Sx/rustmy"
+repo_name = "M4RC0Sx/rustmy"
+edit_uri = "edit/develop/docs/content/"
+docs_dir = "docs/content"
+site_dir = "site"
+
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = [
+    "getting-started/index.md",
+    "getting-started/installation.md",
+    "getting-started/comparison.md",
+  ] },
+  { "Guide" = [
+    "guide/index.md",
+    "guide/connecting.md",
+    "guide/queries.md",
+    "guide/cursors.md",
+    "guide/prepared.md",
+    "guide/tls.md",
+    "guide/compression.md",
+    "guide/local-files.md",
+    "guide/charsets.md",
+    "guide/asyncio.md",
+    "guide/pools.md",
+    "guide/production.md",
+    "guide/security.md",
+  ] },
+  { "Integrations" = [
+    "integrations/sqlalchemy.md",
+    "integrations/django.md",
+    "integrations/fastapi.md",
+    "integrations/pandas.md",
+  ] },
+  { "Migrating" = [
+    "migrating/mysqlclient.md",
+    "migrating/aiomysql.md",
+  ] },
+  { "Performance" = "performance.md" },
+  { "API reference" = [
+    "reference/index.md",
+    "reference/connection.md",
+    "reference/cursors.md",
+    "reference/pool.md",
+    "reference/aio.md",
+    "reference/exceptions.md",
+    "reference/converters.md",
+    "reference/module.md",
+  ] },
+  { "Project" = [
+    "project/testing.md",
+    "project/limitations.md",
+    "project/changelog.md",
+    "project/contributing.md",
+  ] },
+]
+
+extra_css = ["assets/stylesheets/extra.css"]
+extra_javascript = ["assets/javascripts/extra.js"]
+
+[project.theme]
+language = "en"
+favicon = "assets/favicon.svg"
+features = [
+  "announce.dismiss",
+  "content.action.edit",
+  "content.action.view",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.code.select",
+  "content.footnote.tooltips",
+  "content.tabs.link",
+  "content.tooltips",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.instant.progress",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+[project.theme.font]
+text = "Inter"
+code = "JetBrains Mono"
+
+[project.theme.icon]
+logo = "lucide/database-zap"
+repo = "fontawesome/brands/github"
+edit = "lucide/pencil"
+view = "lucide/file-code"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/M4RC0Sx/rustmy"
+name = "rustmy on GitHub"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/python"
+link = "https://pypi.org/project/rustmy/"
+name = "rustmy on PyPI"
+
+# Clicking a chart opens it full size.
+[project.plugins.glightbox]
+zoomable = true
+draggable = true
+skip_classes = ["off-glb"]
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["python"]
+inventories = [
+  "https://docs.python.org/3/objects.inv",
+  "https://docs.sqlalchemy.org/en/20/objects.inv",
+]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+# Read the sources and _core.pyi, never a compiled _core module: the site
+# builds the same with or without one.
+allow_inspection = false
+# The docstrings are written with Sphinx roles (:class:`...`); this extension
+# turns them into cross-references.
+extensions = ["docs/sphinx_roles.py:SphinxRoles"]
+docstring_style = "sphinx"
+docstring_section_style = "spacy"
+filters = ["!^_", "^__init__$"]
+group_by_category = true
+heading_level = 2
+# Subclasses list their own members only, with their bases linked.
+inherited_members = false
+members_order = "source"
+merge_init_into_class = true
+relative_crossrefs = true
+scoped_crossrefs = true
+separate_signature = true
+line_length = 72
+show_bases = true
+show_if_no_docstring = true
+show_root_heading = true
+show_root_full_path = true
+show_signature_annotations = true
+show_source = false
+show_symbol_type_heading = true
+show_symbol_type_toc = true
+signature_crossrefs = true
+unwrap_annotated = true
+
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.betterem = {}
+pymdownx.caret = {}
+pymdownx.details = {}
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.magiclink = {}
+pymdownx.mark = {}
+pymdownx.smartsymbols = {}
+# The benchmark figures come from the README's generated block (see
+# docs/performance.md), so they are never copied by hand.
+pymdownx.snippets.base_path = ["."]
+pymdownx.snippets.check_paths = true
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true
+pymdownx.tasklist.custom_checkbox = true
+pymdownx.tilde = {}

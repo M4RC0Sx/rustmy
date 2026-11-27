@@ -31,6 +31,10 @@ const commitAnalyzer = [
       { type: "revert", release: "patch" },
       // The README is the package's page on PyPI, updated only by a release.
       { type: "docs", release: "patch" },
+      // The documentation site (docs/) is published from master by
+      // docs.yml, release or not. Kept after the rule above: a later
+      // `release: false` wins over an earlier match.
+      { type: "docs", scope: "site", release: false },
       // Nothing users get: these wait for the next release (and appear in
       // its changelog).
       { type: "test", release: false },

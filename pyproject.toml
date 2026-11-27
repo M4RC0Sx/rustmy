@@ -56,7 +56,7 @@ sqlalchemy-asyncio = ["sqlalchemy[asyncio]>=2.0"]
 
 [project.urls]
 Homepage = "https://github.com/M4RC0Sx/rustmy"
-Documentation = "https://github.com/M4RC0Sx/rustmy#readme"
+Documentation = "https://m4rc0sx.github.io/rustmy/"
 Repository = "https://github.com/M4RC0Sx/rustmy"
 Issues = "https://github.com/M4RC0Sx/rustmy/issues"
 Changelog = "https://github.com/M4RC0Sx/rustmy/blob/master/CHANGELOG.md"
@@ -100,6 +100,14 @@ bench = [
     "pytest-benchmark>=5.1",
     "uvloop>=0.21; sys_platform != 'win32'",
 ]
+# The documentation site (`uv run --only-group docs zensical serve`). Bounded:
+# Zensical is pre-1.0, and its mkdocstrings integration still changes.
+docs = [
+    "mkdocstrings-python>=2.0.11,<3",
+    # Formats the signatures in the API reference.
+    "ruff>=0.17.6,<1",
+    "zensical>=0.1.3,<0.2",
+]
 
 [tool.uv]
 default-groups = ["dev"]
@@ -111,6 +119,10 @@ cache-keys = [
     { file = "crates/**/Cargo.toml" },
     { file = "crates/**/*.rs" },
 ]
+
+[tool.uv.dependency-groups]
+# Every docs tool needs Python 3.11+, above the package's floor.
+docs = { requires-python = ">=3.11" }
 
 [tool.maturin]
 manifest-path = "crates/pydriver/Cargo.toml"
